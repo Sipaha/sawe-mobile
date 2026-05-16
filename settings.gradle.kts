@@ -21,4 +21,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "spk-editor-android-client"
-include(":core", ":app")
+include(":core", ":app", ":cli")

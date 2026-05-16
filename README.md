@@ -19,6 +19,8 @@ spk-editor-android-client/
   core/   # Pure JVM library (Kotlin). Pairing URL parsing, fingerprint pinning,
           # HMAC handshake, JSON-RPC envelope, WebSocket client. JDK-only,
           # no Android dependencies — easy to unit-test on CI without an SDK.
+  cli/    # Pure JVM smoke client built on :core. No Android. Use it to issue
+          # a single JSON-RPC call against a live editor for debugging.
   app/    # Android Compose UI. Depends on :core. Requires Android SDK to build.
 ```
 
@@ -64,15 +66,55 @@ spk-remote://<host>:<port>?secret=<base64>&client=<name>&fp=<sha256-hex>
 
 ## Integration test
 
-`:core` has an opt-in integration test gated on the `SPK_EDITOR_PAIRING_URL`
-environment variable. To run it against a live editor instance:
+`:core` has an opt-in end-to-end probe gated on the `SPK_EDITOR_PAIRING_URL`
+environment variable. It exercises six assertions against a live editor:
+
+1. `RemoteClient.connect()` succeeds (TLS pin + HMAC handshake).
+2. `remote.editor.capabilities` returns a result containing `protocol_version`.
+3. `remote.solutions.list` returns a (possibly empty) result.
+4. `remote.lsp.start` is rejected with JSON-RPC `-32601` — proves the R-4
+   allow-list filter is active.
+5. `remote.editor.subscribe` with `kinds=["agent_session_message_appended"]`
+   succeeds.
+6. After `client.close()`, a follow-up call does not succeed.
+
+To run it:
 
 ```sh
 SPK_EDITOR_PAIRING_URL='spk-remote://...' ./gradlew :core:test \
     -DincludeTags=integration
 ```
 
-The default `:core:test` run skips integration tests.
+The default `:core:test` run skips integration tests (they're tagged
+`integration` and excluded by the JUnit Platform filter in
+`core/build.gradle.kts`).
+
+## `:cli` smoke client
+
+`:cli` is a pure-JVM terminal client over `:core`. Use it for quick manual
+verification against a live editor without spinning up the Android UI:
+
+```sh
+./gradlew :cli:run --args="<pairing-url> [method] [params-json]"
+```
+
+- `<pairing-url>` may be omitted if `SPK_EDITOR_PAIRING_URL` is set.
+- `[method]` defaults to `remote.editor.capabilities`.
+- `[params-json]` is parsed via `kotlinx.serialization.json` and forwarded as
+  the JSON-RPC `params` field.
+
+If `method` is `remote.editor.subscribe`, the CLI blocks for up to 30 seconds
+after the subscribe response, printing every server notification on the
+`notifications` SharedFlow. Exit code is `0` on success, `1` on
+parse/connection/JSON-RPC-error.
+
+Example:
+
+```sh
+./gradlew :cli:run --args='spk-remote://... remote.solutions.list'
+./gradlew :cli:run \
+    --args='spk-remote://... remote.editor.subscribe {"kinds":["buffer_opened"]}'
+```
 
 ## License
 
