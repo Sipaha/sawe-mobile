@@ -180,5 +180,98 @@ class RemoteDtosTest {
         assertEquals(DisplayState.Unknown, parseDisplayState(""))
     }
 
+    @Test
+    fun `EntrySummary round-trips with each known role`() {
+        // Sanity-check every role we map in parseEntryRole survives both
+        // decode and encode unchanged, including the truncated preview.
+        val text = """
+            {
+              "id": "s",
+              "solution_id": "sol",
+              "agent_id": "claude",
+              "title": "T",
+              "state": "Idle",
+              "created_at": 0,
+              "last_activity_at": 0,
+              "entries": [
+                {"role": "user",        "preview": "hi"},
+                {"role": "assistant",   "preview": "hello world"},
+                {"role": "tool_call",   "preview": "Read(file.kt)"},
+                {"role": "plan",        "preview": "1. step\n2. step"},
+                {"role": "future_kind", "preview": "..."}
+              ]
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(GetSessionResult.serializer(), text)
+        assertEquals(5, parsed.entries.size)
+        assertEquals(EntryRole.User, parseEntryRole(parsed.entries[0].role))
+        assertEquals(EntryRole.Assistant, parseEntryRole(parsed.entries[1].role))
+        assertEquals(EntryRole.ToolCall, parseEntryRole(parsed.entries[2].role))
+        assertEquals(EntryRole.Plan, parseEntryRole(parsed.entries[3].role))
+        assertEquals(EntryRole.Unknown, parseEntryRole(parsed.entries[4].role))
+
+        // Re-encode preserves verbatim — preview field is a black box on the
+        // wire and we don't want to accidentally re-flow newlines or escape
+        // unicode that the server already chose to embed.
+        val reencoded = JsonRpc.json.encodeToString(GetSessionResult.serializer(), parsed)
+        val again = JsonRpc.json.decodeFromString(GetSessionResult.serializer(), reencoded)
+        assertEquals(parsed, again)
+    }
+
+    @Test
+    fun `GetSessionResult round-trips an empty transcript`() {
+        val text = """
+            {
+              "id": "ses-empty",
+              "solution_id": "sol-1",
+              "agent_id": "claude",
+              "title": "Just opened",
+              "state": "Idle",
+              "created_at": 1,
+              "last_activity_at": 1,
+              "entries": []
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(GetSessionResult.serializer(), text)
+        assertEquals("ses-empty", parsed.id)
+        assertEquals("sol-1", parsed.solutionId)
+        assertTrue(parsed.entries.isEmpty())
+        assertEquals(DisplayState.Idle, parseDisplayState(parsed.state))
+    }
+
+    @Test
+    fun `GetSessionResult survives a Running state with payload and multiple entries`() {
+        val text = """
+            {
+              "id": "ses-running",
+              "solution_id": "sol-1",
+              "agent_id": "claude",
+              "title": "Mid-turn",
+              "state": "Running { started_at: Instant { tv_sec: 0, tv_nsec: 0 }, notified: false }",
+              "created_at": 10,
+              "last_activity_at": 20,
+              "entries": [
+                {"role": "user", "preview": "Write a haiku."},
+                {"role": "assistant", "preview": "Snowflakes fall softly..."},
+                {"role": "tool_call", "preview": "Edit(haiku.txt)"}
+              ]
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(GetSessionResult.serializer(), text)
+        assertEquals(3, parsed.entries.size)
+        assertEquals(DisplayState.Running, parseDisplayState(parsed.state))
+        assertEquals("Write a haiku.", parsed.entries[0].preview)
+    }
+
+    @Test
+    fun `parseEntryRole maps all known roles and falls back to Unknown`() {
+        assertEquals(EntryRole.User, parseEntryRole("user"))
+        assertEquals(EntryRole.Assistant, parseEntryRole("assistant"))
+        assertEquals(EntryRole.ToolCall, parseEntryRole("tool_call"))
+        assertEquals(EntryRole.Plan, parseEntryRole("plan"))
+        assertEquals(EntryRole.Unknown, parseEntryRole("system"))
+        assertEquals(EntryRole.Unknown, parseEntryRole(""))
+    }
+
     private fun parsedDisplayStateOf(s: SessionSummary): DisplayState = parseDisplayState(s.state)
 }

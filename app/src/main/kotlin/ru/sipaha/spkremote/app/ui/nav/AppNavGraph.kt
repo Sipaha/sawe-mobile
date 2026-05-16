@@ -15,7 +15,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import ru.sipaha.spkremote.app.ui.qr.QrPairingScreen
-import ru.sipaha.spkremote.app.ui.solutions.SessionDetailStubScreen
+import ru.sipaha.spkremote.app.ui.solutions.SessionDetailScreen
 import ru.sipaha.spkremote.app.ui.solutions.SolutionDetailScreen
 import ru.sipaha.spkremote.app.ui.solutions.SolutionsListScreen
 import ru.sipaha.spkremote.app.vm.MainViewModel
@@ -27,7 +27,7 @@ import ru.sipaha.spkremote.app.vm.UiState
  *   connecting                                           — handshake spinner.
  *   solutions                                            — list of solutions on the paired editor.
  *   solutions/{solutionId}                               — sessions in one solution.
- *   solutions/{solutionId}/sessions/{sessionId}          — chat stub (R-5d will replace).
+ *   solutions/{solutionId}/sessions/{sessionId}          — chat surface (R-5d).
  *
  * The nav graph is the source of truth for navigation. Pairing success is
  * detected via [MainViewModel.state]: when it flips to [UiState.Connected]
@@ -113,7 +113,8 @@ fun AppNav(viewModel: MainViewModel) {
             ),
         ) { entry ->
             val sessionId = entry.arguments?.getString("sessionId").orEmpty()
-            SessionDetailStubScreen(
+            SessionDetailScreen(
+                viewModel = viewModel,
                 sessionId = sessionId,
                 onBack = { navController.popBackStack() },
             )
