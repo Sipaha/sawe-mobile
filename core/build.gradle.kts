@@ -8,9 +8,14 @@ kotlin {
 }
 
 dependencies {
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.1")
+    // Promoted to `api` because their types leak onto :core's public surface
+    // (RemoteClient takes OkHttpClient.Builder, returns JsonRpcResponse carrying
+    // JsonElement, exposes SharedFlow<JsonElement> for notifications). Consumers
+    // (:app, :cli) need these symbols transitively to bind ViewModels/UIs/CLI
+    // output without re-declaring the deps themselves.
+    api("com.squareup.okhttp3:okhttp:4.12.0")
+    api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
+    api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.1")
 
     testImplementation(kotlin("test"))
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
