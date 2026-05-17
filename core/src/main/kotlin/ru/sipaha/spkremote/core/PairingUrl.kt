@@ -6,14 +6,19 @@ import java.util.Base64
 /**
  * A parsed `spk-remote://` pairing URL handed out by the editor.
  *
- * Wire form:
+ * Wire form (matches `crates/remote_control_ui/src/qr_popover.rs::build_pairing_url`):
  * ```
- * spk-remote://<host>:<port>?secret=<base64>&client=<name>&fp=<sha256-hex>
+ * spk-remote://<host>:<port>?secret=<url-safe-base64>&client=<name>&server_fp=<url-safe-base64>
  * ```
  *
- * - [secret] is exactly 32 bytes, base64-decoded.
- * - [fingerprint] is exactly 32 bytes (SHA-256 of the server's leaf certificate)
- *   parsed from a hex string (case-insensitive).
+ * Both `secret` and `server_fp` are **URL-safe base64 without padding**
+ * (`A-Z a-z 0-9 - _`, no `=`). The server emits this variant
+ * intentionally — standard base64's `+` and `/` would be reserved
+ * characters inside a URL query string. Java's `Base64.getUrlDecoder()`
+ * accepts both padded and unpadded URL-safe input.
+ *
+ * - [secret] is exactly 32 bytes (the HMAC key).
+ * - [fingerprint] is exactly 32 bytes (SHA-256 of the server's leaf certificate).
  * - [client] is the human-readable name shown in the editor's connections UI.
  */
 data class PairingUrl(
@@ -72,16 +77,17 @@ data class PairingUrl(
             val params = parseQuery(parsed.rawQuery ?: "")
 
             val secretB64 = requireParam(params, "secret")
-            val secret = runCatching { Base64.getDecoder().decode(secretB64) }
-                .getOrElse { error("secret is not valid base64") }
+            val secret = runCatching { Base64.getUrlDecoder().decode(secretB64) }
+                .getOrElse { error("secret is not valid URL-safe base64") }
             require(secret.size == SECRET_LEN) {
                 "secret must decode to $SECRET_LEN bytes, was ${secret.size}"
             }
 
-            val fpHex = requireParam(params, "fp")
-            val fingerprint = decodeHex(fpHex)
+            val fpB64 = requireParam(params, "server_fp")
+            val fingerprint = runCatching { Base64.getUrlDecoder().decode(fpB64) }
+                .getOrElse { error("server_fp is not valid URL-safe base64") }
             require(fingerprint.size == FP_LEN) {
-                "fingerprint must be $FP_LEN bytes, was ${fingerprint.size}"
+                "fingerprint must decode to $FP_LEN bytes, was ${fingerprint.size}"
             }
 
             val client = requireParam(params, "client")
@@ -115,17 +121,5 @@ data class PairingUrl(
 
         private fun requireParam(params: Map<String, String>, name: String): String =
             params[name] ?: error("missing required param '$name'")
-
-        private fun decodeHex(hex: String): ByteArray {
-            require(hex.length % 2 == 0) { "hex string must have even length" }
-            val out = ByteArray(hex.length / 2)
-            for (i in out.indices) {
-                val hi = Character.digit(hex[i * 2], 16)
-                val lo = Character.digit(hex[i * 2 + 1], 16)
-                require(hi >= 0 && lo >= 0) { "invalid hex char in '$hex'" }
-                out[i] = ((hi shl 4) or lo).toByte()
-            }
-            return out
-        }
     }
 }
