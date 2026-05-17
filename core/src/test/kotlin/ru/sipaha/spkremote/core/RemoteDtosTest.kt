@@ -625,6 +625,145 @@ class RemoteDtosTest {
     }
 
     @Test
+    fun `SessionSummary round-trips with F-server total_tokens and parent_session_id populated`() {
+        // F-server: SessionSummary gained two optional fields. Both must
+        // survive a decode + re-encode + decode cycle so the chip row's
+        // `loadChildren` path can rely on the values.
+        val text = """
+            {
+              "id": "ses-child",
+              "solution_id": "sol-1",
+              "agent_id": "claude",
+              "title": "Sub-agent dispatch",
+              "state": "Running",
+              "created_at": 1715900000000,
+              "last_activity_at": 1715900200000,
+              "total_tokens": 138342,
+              "parent_session_id": "ses-parent"
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(SessionSummary.serializer(), text)
+        assertEquals("ses-child", parsed.id)
+        assertEquals(138342L, parsed.totalTokens)
+        assertEquals("ses-parent", parsed.parentSessionId)
+
+        val reencoded = JsonRpc.json.encodeToString(SessionSummary.serializer(), parsed)
+        val again = JsonRpc.json.decodeFromString(SessionSummary.serializer(), reencoded)
+        assertEquals(parsed, again)
+        assertEquals(138342L, again.totalTokens)
+        assertEquals("ses-parent", again.parentSessionId)
+    }
+
+    @Test
+    fun `SessionSummary defaults total_tokens and parent_session_id to null when omitted`() {
+        // Back-compat with pre-F-server payloads: both fields absent →
+        // both decode to null. Critical so a mixed-version mobile/server
+        // pair (F-phone client + R-6g server) doesn't fail to deserialise.
+        val text = """
+            {
+              "id": "ses-old",
+              "solution_id": "sol-1",
+              "agent_id": "claude",
+              "title": "Pre-F",
+              "state": "Idle",
+              "created_at": 0,
+              "last_activity_at": 0
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(SessionSummary.serializer(), text)
+        assertNull(parsed.totalTokens)
+        assertNull(parsed.parentSessionId)
+    }
+
+    @Test
+    fun `GetSessionChildrenResult round-trips empty and populated lists`() {
+        // Empty list is a normal response for top-level sessions with no
+        // sub-agents dispatched yet. The chip row collapses entirely in
+        // that case (when the current session is also top-level).
+        val empty = JsonRpc.json.decodeFromString(
+            GetSessionChildrenResult.serializer(),
+            """{"children": []}""",
+        )
+        assertTrue(empty.children.isEmpty())
+
+        val text = """
+            {
+              "children": [
+                {
+                  "id": "ses-c1",
+                  "solution_id": "sol-1",
+                  "agent_id": "claude",
+                  "title": "First child",
+                  "state": "Idle",
+                  "created_at": 100,
+                  "last_activity_at": 200,
+                  "total_tokens": 5000,
+                  "parent_session_id": "ses-parent"
+                },
+                {
+                  "id": "ses-c2",
+                  "solution_id": "sol-1",
+                  "agent_id": "claude",
+                  "title": "Second child",
+                  "state": "Running",
+                  "created_at": 300,
+                  "last_activity_at": 400,
+                  "parent_session_id": "ses-parent"
+                }
+              ]
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(GetSessionChildrenResult.serializer(), text)
+        assertEquals(2, parsed.children.size)
+        assertEquals("ses-c1", parsed.children[0].id)
+        assertEquals(5000L, parsed.children[0].totalTokens)
+        assertEquals("ses-parent", parsed.children[0].parentSessionId)
+        assertEquals("ses-c2", parsed.children[1].id)
+        assertNull(parsed.children[1].totalTokens)
+        assertEquals("ses-parent", parsed.children[1].parentSessionId)
+
+        val reencoded = JsonRpc.json.encodeToString(GetSessionChildrenResult.serializer(), parsed)
+        val again = JsonRpc.json.decodeFromString(GetSessionChildrenResult.serializer(), reencoded)
+        assertEquals(parsed, again)
+    }
+
+    @Test
+    fun `SessionCreatedPayload round-trips with parent set and null`() {
+        // With parent (sub-agent spawn case): drives the parent's chip row
+        // to re-fetch children when the notification lands.
+        val withParent = """
+            {"session_id": "ses-new-1", "parent_session_id": "ses-parent"}
+        """.trimIndent()
+        val parsedWith = JsonRpc.json.decodeFromString(
+            SessionCreatedPayload.serializer(),
+            withParent,
+        )
+        assertEquals("ses-new-1", parsedWith.sessionId)
+        assertEquals("ses-parent", parsedWith.parentSessionId)
+
+        // Top-level create — server emits explicit null OR omits the field.
+        val nullParent = """{"session_id": "ses-top", "parent_session_id": null}"""
+        val parsedNull = JsonRpc.json.decodeFromString(
+            SessionCreatedPayload.serializer(),
+            nullParent,
+        )
+        assertEquals("ses-top", parsedNull.sessionId)
+        assertNull(parsedNull.parentSessionId)
+
+        val omitted = """{"session_id": "ses-top"}"""
+        val parsedOmitted = JsonRpc.json.decodeFromString(
+            SessionCreatedPayload.serializer(),
+            omitted,
+        )
+        assertEquals("ses-top", parsedOmitted.sessionId)
+        assertNull(parsedOmitted.parentSessionId)
+
+        val reencoded = JsonRpc.json.encodeToString(SessionCreatedPayload.serializer(), parsedWith)
+        val again = JsonRpc.json.decodeFromString(SessionCreatedPayload.serializer(), reencoded)
+        assertEquals(parsedWith, again)
+    }
+
+    @Test
     fun `EntrySummary with plan payload round-trips`() {
         val text = """
             {

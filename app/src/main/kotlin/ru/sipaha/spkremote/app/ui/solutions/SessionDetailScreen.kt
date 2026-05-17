@@ -22,7 +22,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -30,8 +32,14 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
@@ -86,6 +94,7 @@ import ru.sipaha.spkremote.core.EntryRole
 import ru.sipaha.spkremote.core.EntrySummary
 import ru.sipaha.spkremote.core.GetSessionResult
 import ru.sipaha.spkremote.core.PlanSummary
+import ru.sipaha.spkremote.core.SessionSummary
 import ru.sipaha.spkremote.core.ToolCallSummary
 import ru.sipaha.spkremote.core.parseDisplayState
 import ru.sipaha.spkremote.core.parseEntryRole
@@ -114,11 +123,14 @@ fun SessionDetailScreen(
     viewModel: MainViewModel,
     sessionId: String,
     onBack: () -> Unit,
+    onOpenSibling: (sessionId: String) -> Unit = {},
 ) {
     val sessionState by viewModel.session.collectAsState()
     val optimistic by viewModel.optimisticEntries.collectAsState()
     val cancelInFlight by viewModel.cancelInFlight.collectAsState()
     val isLoadingOlder by viewModel.isLoadingOlder.collectAsState()
+    val childrenMap by viewModel.sessionChildren.collectAsState()
+    val sessionsList by viewModel.sessions.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
     DisposableEffect(sessionId) {
@@ -168,6 +180,29 @@ fun SessionDetailScreen(
         ?.let { parseDisplayState(it.state) } ?: DisplayState.Unknown
     val rawState: String = (sessionState as? UiData.Loaded)?.value?.state ?: ""
 
+    // F-phone chip row inputs.
+    //
+    // `parentId` is read from the loaded session (`GetSessionResult` now
+    // carries `parent_session_id`). The parent's *title* — the label we
+    // want to render on the chip — isn't in that payload, so we cross-
+    // reference `_sessions` (the list-of-sessions cache for the active
+    // solution). When the user deep-linked into a child whose parent
+    // isn't in that cache, fall back to a short hash of the id.
+    val loadedSession: GetSessionResult? = (sessionState as? UiData.Loaded)?.value
+    val parentId: String? = loadedSession?.parentSessionId
+    val sessionsCache: List<SessionSummary> = (sessionsList as? UiData.Loaded)?.value.orEmpty()
+    val parentTitle: String? = parentId?.let { id ->
+        sessionsCache.firstOrNull { it.id == id }?.title?.ifBlank { null }
+            ?: id.take(8)
+    }
+    // Immediate children of the current session, sorted by created_at ASC
+    // so the oldest sub-agent appears first (matches the spec). Empty list
+    // when the server hasn't reported any (or the child fetch is in flight).
+    val children: List<SessionSummary> = childrenMap[sessionId]
+        ?.sortedBy { it.createdAt }
+        .orEmpty()
+    val showChipRow = parentId != null || children.isNotEmpty()
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -191,25 +226,35 @@ fun SessionDetailScreen(
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
-            ComposeBar(
-                enabled = sessionState is UiData.Loaded,
-                state = displayState,
-                cancelInFlight = cancelInFlight,
-                onSend = { text ->
-                    viewModel.sendMessage(text)
-                    // On send, the regular draft is invalidated. We
-                    // optimistically clear here so a quick re-open
-                    // doesn't repopulate the field even before the
-                    // server echo lands. Bounce-on-failure is handled
-                    // separately by handleExpiredMessage.
-                    draftRepository.clear(sessionId)
-                },
-                onCancel = viewModel::cancelTurn,
-                rawState = rawState,
-                sessionId = sessionId,
-                initialDraft = seed.text,
-                onDraftChanged = { text -> draftRepository.save(sessionId, text) },
-            )
+            Column {
+                if (showChipRow) {
+                    SubAgentChipRow(
+                        parentId = parentId,
+                        parentTitle = parentTitle,
+                        children = children,
+                        onChipTap = onOpenSibling,
+                    )
+                }
+                ComposeBar(
+                    enabled = sessionState is UiData.Loaded,
+                    state = displayState,
+                    cancelInFlight = cancelInFlight,
+                    onSend = { text ->
+                        viewModel.sendMessage(text)
+                        // On send, the regular draft is invalidated. We
+                        // optimistically clear here so a quick re-open
+                        // doesn't repopulate the field even before the
+                        // server echo lands. Bounce-on-failure is handled
+                        // separately by handleExpiredMessage.
+                        draftRepository.clear(sessionId)
+                    },
+                    onCancel = viewModel::cancelTurn,
+                    rawState = rawState,
+                    sessionId = sessionId,
+                    initialDraft = seed.text,
+                    onDraftChanged = { text -> draftRepository.save(sessionId, text) },
+                )
+            }
         },
     ) { padding ->
         Box(
@@ -1009,6 +1054,140 @@ private fun HistoryEdgeRow(
             // to avoid asserting "start of conversation" when we can't
             // actually tell.
         }
+    }
+}
+
+/**
+ * Sub-agents chip row (F-phone).
+ *
+ * Sits between the messages LazyColumn and the compose row. Hidden by the
+ * caller when there is nothing to show. Renders:
+ *   - the "Parent: <title>" chip first when the current session has a
+ *     parent (tap → navigate up to the parent session),
+ *   - then one chip per child session, in created_at ASC order — tap →
+ *     navigate down to the child session.
+ *
+ * Each chip carries a small state icon (idle / running / awaiting / errored)
+ * and the child's running token total, abbreviated.
+ *
+ * Material 3's `material-icons-core` artifact ships a tight subset of
+ * icons — `Outlined.Circle`, `Filled.HourglassEmpty`, and `Filled.ErrorOutline`
+ * aren't in it (they live in `material-icons-extended`, which adds ~3 MB to
+ * the APK and isn't worth the size for a single row). We use available
+ * stand-ins: outlined check / play-arrow / warning / clear.
+ */
+@Composable
+private fun SubAgentChipRow(
+    parentId: String?,
+    parentTitle: String?,
+    children: List<SessionSummary>,
+    onChipTap: (sessionId: String) -> Unit,
+) {
+    Surface(
+        tonalElevation = 2.dp,
+        color = MaterialTheme.colorScheme.surface,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        LazyRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (parentId != null) {
+                item(key = "parent-$parentId") {
+                    AssistChip(
+                        onClick = { onChipTap(parentId) },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = null,
+                                modifier = Modifier.size(AssistChipDefaults.IconSize),
+                            )
+                        },
+                        label = {
+                            // Cap title length similar to child chips so a
+                            // long parent title doesn't dominate the row.
+                            val raw = parentTitle ?: "Parent"
+                            Text(
+                                text = "Parent: ${raw.take(20)}",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        },
+                    )
+                }
+            }
+            items(children, key = { it.id }) { child ->
+                ChildChip(child = child, onClick = { onChipTap(child.id) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChildChip(child: SessionSummary, onClick: () -> Unit) {
+    val displayState = parseDisplayState(child.state)
+    val (icon, tint) = stateIconAndTint(displayState)
+    AssistChip(
+        onClick = onClick,
+        leadingIcon = {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = tint,
+                modifier = Modifier.size(AssistChipDefaults.IconSize),
+            )
+        },
+        label = {
+            // Title gets the lion's share of the budget; tokens append
+            // when the server reported a count (F-server). The 24-char
+            // cap matches the spec — wide enough for a meaningful title
+            // on a phone, narrow enough to keep 3-4 chips visible.
+            val title = child.title.ifBlank { "(untitled)" }.take(24)
+            val tokens = child.totalTokens?.let { " · ${abbreviateTokens(it)}" }.orEmpty()
+            Text(
+                text = title + tokens,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+    )
+}
+
+/**
+ * Pick the leading icon + tint for a chip based on the child session's
+ * classified [DisplayState]. The colors lean on theme containers so they
+ * adapt to light/dark; primary is reused as "in progress" green/blue
+ * because we don't have a `green` slot on Material 3 by default.
+ */
+@Composable
+private fun stateIconAndTint(state: DisplayState): Pair<androidx.compose.ui.graphics.vector.ImageVector, Color> {
+    return when (state) {
+        DisplayState.Idle -> Icons.Outlined.CheckCircle to MaterialTheme.colorScheme.onSurfaceVariant
+        DisplayState.Running -> Icons.Filled.PlayArrow to MaterialTheme.colorScheme.primary
+        DisplayState.AwaitingInput -> Icons.Filled.Warning to MaterialTheme.colorScheme.tertiary
+        DisplayState.Errored -> Icons.Filled.Clear to MaterialTheme.colorScheme.error
+        DisplayState.Unknown -> Icons.Filled.CheckCircle to MaterialTheme.colorScheme.onSurfaceVariant
+    }
+}
+
+/**
+ * Format a running token total compactly:
+ *   - `< 1_000` → bare number (`"42"`).
+ *   - `< 1_000_000` → `"k"` with one decimal place (`"138.3k"`).
+ *   - else → `"M"` with one decimal place (`"1.2M"`).
+ *
+ * Uses [String.format] with the root locale so a comma decimal separator
+ * doesn't leak in for users in locales like ru-RU; the chip label is a
+ * compact technical readout, not a localized currency.
+ */
+internal fun abbreviateTokens(n: Long): String {
+    if (n < 0) return n.toString()
+    return when {
+        n < 1_000L -> n.toString()
+        n < 1_000_000L -> String.format(java.util.Locale.ROOT, "%.1fk", n / 1_000.0)
+        else -> String.format(java.util.Locale.ROOT, "%.1fM", n / 1_000_000.0)
     }
 }
 

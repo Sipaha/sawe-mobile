@@ -22,6 +22,7 @@ import ru.sipaha.spkremote.core.AgentSummary
 import ru.sipaha.spkremote.core.ConnectionState
 import ru.sipaha.spkremote.core.CreateSessionResult
 import ru.sipaha.spkremote.core.EntrySummary
+import ru.sipaha.spkremote.core.GetSessionChildrenResult
 import ru.sipaha.spkremote.core.GetSessionResult
 import ru.sipaha.spkremote.core.JsonRpc
 import ru.sipaha.spkremote.core.ListAgentsResult
@@ -31,6 +32,7 @@ import ru.sipaha.spkremote.core.MessageAppendedPayload
 import ru.sipaha.spkremote.core.PairingUrl
 import ru.sipaha.spkremote.core.QueuedMessage
 import ru.sipaha.spkremote.core.RemoteClient
+import ru.sipaha.spkremote.core.SessionCreatedPayload
 import ru.sipaha.spkremote.core.SessionSummary
 import ru.sipaha.spkremote.core.SolutionSummary
 import java.util.UUID
@@ -173,6 +175,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** True while a `cancel_turn` request is in flight (button is debounced). */
     private val _cancelInFlight = MutableStateFlow(false)
     val cancelInFlight: StateFlow<Boolean> = _cancelInFlight.asStateFlow()
+
+    /**
+     * Child sessions tracked per parent session id (F-phone).
+     *
+     * The chip row on `SessionDetailScreen` reads the entry for the
+     * currently-open session — present iff that session has spawned
+     * sub-agents server-side. Populated by [loadChildren] on screen
+     * entry and refreshed on `agent_session_created` notifications
+     * whose `parent_session_id` matches.
+     *
+     * Map keyed by parent session id so navigating between parent and
+     * child preserves the parent's chip data — both screens consult the
+     * same observable map without re-fetching.
+     */
+    private val _sessionChildren = MutableStateFlow<Map<String, List<SessionSummary>>>(emptyMap())
+    val sessionChildren: StateFlow<Map<String, List<SessionSummary>>> = _sessionChildren.asStateFlow()
 
     /**
      * Agent adapters available on the paired editor. Populated lazily by
@@ -419,6 +437,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _agents.value = UiData.Loading
         _optimisticEntries.value = emptyList()
         _isLoadingOlder.value = false
+        _sessionChildren.value = emptyMap()
         _connectionBanner.value = ConnectionBanner.Hidden
         _rawConnectionState.value = ConnectionState.Disconnected
     }
@@ -718,16 +737,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             fetchInitialPage(active, sessionId)
         }
+        // F-phone: prime the chip row data. The screen renders the row
+        // hidden while children is empty, so this is a no-flicker request
+        // — by the time the children data lands the messages list is also
+        // ready and the row appears alongside it.
+        loadChildren(sessionId)
         sessionDetailObserverJob?.cancel()
         sessionDetailObserverJob = viewModelScope.launch {
             if (!sessionDetailSubscribed) {
                 // Routed through RemoteClient.subscribe so the kinds are
-                // tracked + auto-replayed across reconnects (R-6a).
+                // tracked + auto-replayed across reconnects (R-6a). F-phone
+                // adds `agent_session_created` so the chip row can refresh
+                // when the parent agent spawns a new sub-agent.
                 runCatching {
                     active.subscribe(
                         listOf(
                             "agent_session_message_appended",
                             "agent_session_state_changed",
+                            "agent_session_created",
                         ),
                     )
                 }
@@ -739,6 +766,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val kind = params["kind"]?.jsonPrimitive?.content ?: return@collect
                 val data = params["data"] as? JsonObject
                 when (kind) {
+                    "agent_session_created" -> {
+                        // F-phone: a new session appeared. When the parent
+                        // matches the session this screen is showing,
+                        // re-fetch children so the chip row picks up the
+                        // newcomer. Top-level creates (parent_session_id
+                        // null) are no-ops for this screen.
+                        val payload = data?.let {
+                            runCatching {
+                                JsonRpc.json.decodeFromJsonElement(
+                                    SessionCreatedPayload.serializer(),
+                                    it,
+                                )
+                            }.getOrNull()
+                        } ?: return@collect
+                        val parent = payload.parentSessionId ?: return@collect
+                        if (parent == openSessionId) {
+                            loadChildren(parent)
+                        }
+                    }
                     "agent_session_message_appended" -> {
                         if (data == null) {
                             // Defensive — refetch whole transcript so we
@@ -782,6 +828,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     else -> return@collect
                 }
             }
+        }
+    }
+
+    /**
+     * Fetch the immediate children of [sessionId] via
+     * `remote.solution_agent.get_session_children` (F-server) and seat them
+     * in [sessionChildren] keyed by parent id. Used by `SessionDetailScreen`
+     * to populate the sub-agents chip row on entry.
+     *
+     * Failure is silent: the chip row collapses to its "no children" state
+     * (hidden) when the entry is absent. Re-attempt happens on the next
+     * `agent_session_created` notification or the next screen entry.
+     */
+    fun loadChildren(sessionId: String) {
+        val active = client ?: return
+        val params = buildJsonObject { put("session_id", sessionId) }
+        viewModelScope.launch {
+            runCatching { active.call("remote.solution_agent.get_session_children", params) }
+                .mapCatching { resp ->
+                    val err = resp.error
+                    if (err != null) error(err.message)
+                    val result = resp.result ?: error("missing result")
+                    JsonRpc.json.decodeFromJsonElement(
+                        GetSessionChildrenResult.serializer(),
+                        result,
+                    )
+                }
+                .onSuccess { result ->
+                    _sessionChildren.value = _sessionChildren.value + (sessionId to result.children)
+                }
         }
     }
 

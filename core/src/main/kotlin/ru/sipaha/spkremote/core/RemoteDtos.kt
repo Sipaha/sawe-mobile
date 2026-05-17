@@ -42,6 +42,43 @@ data class SessionSummary(
     val state: String,
     @SerialName("created_at") val createdAt: Long,
     @SerialName("last_activity_at") val lastActivityAt: Long,
+    /**
+     * Running token total reported by the server-side adapter (F-server).
+     * Null when the server omits the field (pre-F-server build) OR when the
+     * adapter doesn't track usage. UI surfaces format via `abbreviateTokens`.
+     */
+    @SerialName("total_tokens") val totalTokens: Long? = null,
+    /**
+     * Parent session id when this session was spawned by another agent
+     * (Claude Code Task dispatch, etc.). Null at the top of the tree.
+     * Drives the sub-agent chip row on `SessionDetailScreen` (F-phone).
+     */
+    @SerialName("parent_session_id") val parentSessionId: String? = null,
+)
+
+/**
+ * Result envelope for `remote.solution_agent.get_session_children` (F-server).
+ *
+ * Returns the immediate children of one session — sessions whose
+ * `parent_session_id` matches the requested id. Order is by `created_at`
+ * ascending (oldest sibling first). Empty list is a normal response for
+ * top-level sessions that haven't dispatched any sub-agents.
+ */
+@Serializable
+data class GetSessionChildrenResult(val children: List<SessionSummary>)
+
+/**
+ * Decoded `data` payload of an `agent_session_created` notification.
+ *
+ * F-server extended the event to carry `parent_session_id` so clients can
+ * refresh a parent's chip row when a new sub-agent appears. Null means a
+ * top-level session was created (no parent context). Older servers emit
+ * the field as JSON `null` (or omit it entirely) — both decode to null.
+ */
+@Serializable
+data class SessionCreatedPayload(
+    @SerialName("session_id") val sessionId: String,
+    @SerialName("parent_session_id") val parentSessionId: String? = null,
 )
 
 /**
@@ -226,6 +263,14 @@ data class GetSessionResult(
     val state: String,
     @SerialName("created_at") val createdAt: Long,
     @SerialName("last_activity_at") val lastActivityAt: Long,
+    /**
+     * Parent session id when this session was spawned by another agent.
+     * Mirrors [SessionSummary.parentSessionId] — null at the top of the
+     * agent-dispatch tree or on pre-F-server builds. F-phone uses this to
+     * render the "Parent" chip on `SessionDetailScreen` without needing
+     * a second list_sessions round-trip.
+     */
+    @SerialName("parent_session_id") val parentSessionId: String? = null,
     val entries: List<EntrySummary>,
     /**
      * Total number of entries in the session transcript (R-6e). When the

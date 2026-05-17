@@ -230,11 +230,20 @@ fun AppNav(viewModel: MainViewModel, initialRoute: String? = null) {
                     navArgument("sessionId") { type = NavType.StringType },
                 ),
             ) { entry ->
+                val solutionId = entry.arguments?.getString("solutionId").orEmpty()
                 val sessionId = entry.arguments?.getString("sessionId").orEmpty()
                 SessionDetailScreen(
                     viewModel = viewModel,
                     sessionId = sessionId,
                     onBack = { navController.popBackStack() },
+                    // F-phone: chip-row taps navigate sibling-wise within
+                    // the same solution. `launchSingleTop` prevents a
+                    // re-entry on the same id from stacking duplicates.
+                    onOpenSibling = { siblingId ->
+                        navController.navigate("solutions/$solutionId/sessions/$siblingId") {
+                            launchSingleTop = true
+                        }
+                    },
                 )
             }
         }
