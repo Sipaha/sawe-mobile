@@ -509,6 +509,122 @@ class RemoteDtosTest {
     }
 
     @Test
+    fun `EntrySummary round-trips with R-6e index field populated`() {
+        // R-6e: server now stamps an absolute `index` on every entry so
+        // paginated clients can stitch slices together. The DTO must
+        // round-trip the value verbatim, including when other rich fields
+        // are also present.
+        val text = """
+            {
+              "role": "assistant",
+              "preview": "hi",
+              "index": 42,
+              "markdown": "hi"
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(EntrySummary.serializer(), text)
+        assertEquals(42, parsed.index)
+        assertEquals("assistant", parsed.role)
+        assertEquals("hi", parsed.markdown)
+
+        val reencoded = JsonRpc.json.encodeToString(EntrySummary.serializer(), parsed)
+        val again = JsonRpc.json.decodeFromString(EntrySummary.serializer(), reencoded)
+        assertEquals(parsed, again)
+        assertEquals(42, again.index)
+    }
+
+    @Test
+    fun `EntrySummary defaults index to -1 when omitted by pre-R-6e server`() {
+        // Back-compat with R-5d/R-5f payloads — those servers never emit
+        // an `index` field. The DTO must surface the sentinel rather than
+        // throwing so a mixed-version mobile/server pair keeps working.
+        val text = """{"role":"user","preview":"hello"}"""
+        val parsed = JsonRpc.json.decodeFromString(EntrySummary.serializer(), text)
+        assertEquals(-1, parsed.index)
+        assertEquals("user", parsed.role)
+        assertEquals("hello", parsed.preview)
+    }
+
+    @Test
+    fun `GetSessionResult round-trips with R-6e total_count populated`() {
+        val text = """
+            {
+              "id": "ses-page",
+              "solution_id": "sol-1",
+              "agent_id": "claude",
+              "title": "Paginated",
+              "state": "Idle",
+              "created_at": 1,
+              "last_activity_at": 2,
+              "entries": [
+                {"role": "user", "preview": "first", "index": 0},
+                {"role": "assistant", "preview": "ack", "index": 1}
+              ],
+              "total_count": 137
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(GetSessionResult.serializer(), text)
+        assertEquals(137, parsed.totalCount)
+        assertEquals(2, parsed.entries.size)
+        assertEquals(0, parsed.entries[0].index)
+        assertEquals(1, parsed.entries[1].index)
+
+        val reencoded = JsonRpc.json.encodeToString(GetSessionResult.serializer(), parsed)
+        val again = JsonRpc.json.decodeFromString(GetSessionResult.serializer(), reencoded)
+        assertEquals(parsed, again)
+        assertEquals(137, again.totalCount)
+    }
+
+    @Test
+    fun `GetSessionResult defaults total_count to -1 when omitted by pre-R-6e server`() {
+        // Back-compat with the R-5d / R-5f response shape — those servers
+        // didn't stamp a `total_count` field. Decoder must fall through
+        // to the sentinel so UI gap-detection guards against -1 rather
+        // than misclassifying a legacy full pull as a paginated slice.
+        val text = """
+            {
+              "id": "ses-legacy",
+              "solution_id": "sol-1",
+              "agent_id": "claude",
+              "title": "Legacy",
+              "state": "Idle",
+              "created_at": 1,
+              "last_activity_at": 1,
+              "entries": [{"role": "user", "preview": "hi"}]
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(GetSessionResult.serializer(), text)
+        assertEquals(-1, parsed.totalCount)
+        assertEquals(1, parsed.entries.size)
+        // Pre-R-6e entries also have index=-1 — sentinel must survive both
+        // levels of nesting.
+        assertEquals(-1, parsed.entries[0].index)
+    }
+
+    @Test
+    fun `ListSessionsResult round-trips with optional total_count`() {
+        // R-6e: list_sessions also gained pagination + total_count. UI wiring
+        // is deferred (R-6f) but the DTO must surface it now so the
+        // schema bump isn't a wire break later.
+        val withCount = """
+            {
+              "sessions": [
+                {"id":"s1","solution_id":"sol","agent_id":"claude","title":"T","state":"Idle","created_at":0,"last_activity_at":0}
+              ],
+              "total_count": 5
+            }
+        """.trimIndent()
+        val parsedWith = JsonRpc.json.decodeFromString(ListSessionsResult.serializer(), withCount)
+        assertEquals(5, parsedWith.totalCount)
+
+        val without = """
+            {"sessions": [{"id":"s2","solution_id":"sol","agent_id":"c","title":"T","state":"Idle","created_at":0,"last_activity_at":0}]}
+        """.trimIndent()
+        val parsedWithout = JsonRpc.json.decodeFromString(ListSessionsResult.serializer(), without)
+        assertEquals(-1, parsedWithout.totalCount)
+    }
+
+    @Test
     fun `EntrySummary with plan payload round-trips`() {
         val text = """
             {

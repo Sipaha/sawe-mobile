@@ -60,6 +60,9 @@ sealed interface UiData<out T> {
     data class Error(val message: String) : UiData<Nothing>
 }
 
+/** Page size for [MainViewModel.openSession] and [MainViewModel.loadOlder]. */
+private const val SESSION_PAGE_SIZE = 50
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
@@ -118,6 +121,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _session = MutableStateFlow<UiData<GetSessionResult>>(UiData.Loading)
     val session: StateFlow<UiData<GetSessionResult>> = _session.asStateFlow()
+
+    /**
+     * True while a [loadOlder] request is in flight for the open session.
+     *
+     * Exposed alongside [session] (rather than folded into the
+     * `UiData<GetSessionResult>` shape) so the LazyColumn auto-trigger
+     * in `SessionDetailScreen` can dedupe re-fires while a previous slice
+     * is still on the wire — without churning the `_session` value (which
+     * would trigger a recomposition cycle for every entry row).
+     *
+     * Conceptually this is half of the `SessionView` shape from the R-6e
+     * spec; the other half (`entries`, `totalCount`) already lives on
+     * `_session.value` as the existing `GetSessionResult.entries` and the
+     * new `GetSessionResult.totalCount` field.
+     */
+    private val _isLoadingOlder = MutableStateFlow(false)
+    val isLoadingOlder: StateFlow<Boolean> = _isLoadingOlder.asStateFlow()
 
     /**
      * Locally-appended user messages awaiting server echo. We render them
@@ -345,6 +365,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _session.value = UiData.Loading
         _agents.value = UiData.Loading
         _optimisticEntries.value = emptyList()
+        _isLoadingOlder.value = false
         _connectionBanner.value = ConnectionBanner.Hidden
         _rawConnectionState.value = ConnectionState.Disconnected
         _state.value = UiState.Disconnected()
@@ -386,15 +407,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val isConnected = state is ConnectionState.Connected
                 if (isConnected && !previousConnected) {
-                    // Re-entered Connected — re-fetch the open session
-                    // (if any) so the user sees any entries that landed
-                    // on the desktop while we were offline. The lastSeen
-                    // marker drives the decision: if the desktop progressed
-                    // beyond what we last rendered, the full re-fetch
-                    // catches up cheaply (server transcripts are small).
+                    // Re-entered Connected — fetch any entries that landed
+                    // on the desktop while we were offline. R-6e wires
+                    // `resumeSession` which uses the persisted lastSeen
+                    // marker to issue an incremental `after_index` slice
+                    // instead of a full transcript refetch, and falls back
+                    // to a paginated initial pull when the marker is absent
+                    // or the slice reveals a gap.
                     val activeSession = openSessionId
                     if (activeSession != null) {
-                        refreshSession(activeSession)
+                        resumeSession(activeSession)
                     }
                 }
                 previousConnected = isConnected
@@ -533,6 +555,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         openSessionId = sessionId
         _session.value = UiData.Loading
+        _isLoadingOlder.value = false
         _optimisticEntries.value = emptyList()
         // Seed the in-memory high-water marker from disk if absent —
         // a cold-started VM doesn't have any previous-process state.
@@ -540,7 +563,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (lastSeenEntryIndex[sessionId] == null) {
             lastSeenRepository.get(sessionId)?.let { lastSeenEntryIndex[sessionId] = it }
         }
-        refreshSession(sessionId)
+        // R-6e: paginated initial load — `count: 50` pulls the newest 50
+        // entries instead of the entire transcript. The reconnect-resume
+        // path goes through [resumeSession] which uses `after_index` to
+        // catch up incrementally; this entry point is for "I just opened
+        // the chat surface, give me the most recent page".
+        viewModelScope.launch {
+            fetchInitialPage(active, sessionId)
+        }
         sessionDetailObserverJob?.cancel()
         sessionDetailObserverJob = viewModelScope.launch {
             if (!sessionDetailSubscribed) {
@@ -707,7 +737,246 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         sessionDetailObserverJob = null
         openSessionId = null
         _session.value = UiData.Loading
+        _isLoadingOlder.value = false
         _optimisticEntries.value = emptyList()
+    }
+
+    /**
+     * Paginated initial fetch: pull the newest [SESSION_PAGE_SIZE] entries
+     * via `get_session { count }` and seat them as the baseline `_session`
+     * value. Updates the persistent lastSeen marker to the absolute index
+     * of the newest entry so the next reconnect's [resumeSession] can
+     * issue an `after_index` slice rather than another initial pull.
+     *
+     * Stops being a no-op when the user has navigated away mid-flight
+     * ([openSessionId] differs from [sessionId]). The check guards
+     * `_session` from being clobbered by a stale response from a session
+     * the user already closed.
+     */
+    private suspend fun fetchInitialPage(active: RemoteClient, sessionId: String) {
+        val params = buildJsonObject {
+            put("session_id", sessionId)
+            put("include_full_content", true)
+            put("include_images", true)
+            put("count", SESSION_PAGE_SIZE)
+        }
+        runCatching { active.call("remote.solution_agent.get_session", params) }
+            .mapCatching { resp ->
+                val err = resp.error
+                if (err != null) error(err.message)
+                val result = resp.result ?: error("missing result")
+                JsonRpc.json.decodeFromJsonElement(GetSessionResult.serializer(), result)
+            }
+            .onSuccess { result ->
+                if (openSessionId != sessionId) return@onSuccess
+                _session.value = UiData.Loaded(result)
+                _isLoadingOlder.value = false
+                reconcileOptimistic(result.entries)
+                // Advance the persistent lastSeen marker to the newest
+                // entry's absolute index. Guarded against the -1 sentinel
+                // from pre-R-6e servers — those clients fall back to a
+                // full refetch on reconnect, identical to the R-6d path.
+                result.entries.lastOrNull()?.takeIf { it.index >= 0 }?.let { newest ->
+                    val prev = lastSeenEntryIndex[sessionId] ?: -1
+                    if (newest.index > prev) {
+                        lastSeenEntryIndex[sessionId] = newest.index
+                        lastSeenRepository.set(sessionId, newest.index)
+                    }
+                }
+            }
+            .onFailure {
+                if (openSessionId != sessionId) return@onFailure
+                if (_session.value !is UiData.Loaded) {
+                    _session.value = UiData.Error(it.message ?: "unknown error")
+                }
+            }
+    }
+
+    /**
+     * Fetch the page of entries immediately preceding the oldest entry
+     * already loaded for the open session and prepend them. Caller (the
+     * `SessionDetailScreen` LazyColumn scroll observer) is responsible
+     * for not firing while [isLoadingOlder] is true; we also dedupe
+     * inside this method so a sloppy caller doesn't double-fire.
+     *
+     * No-ops when:
+     *   - the user navigated away,
+     *   - no baseline session yet (still loading),
+     *   - the oldest loaded entry is index 0 (we have the whole history),
+     *   - or the oldest loaded entry has the `-1` sentinel from a
+     *     pre-R-6e server (can't compute a `before_index` cursor → bail).
+     */
+    fun loadOlder(sessionId: String) {
+        if (openSessionId != sessionId) return
+        if (_isLoadingOlder.value) return
+        val active = client ?: return
+        val current = _session.value as? UiData.Loaded ?: return
+        val oldest = current.value.entries.firstOrNull() ?: return
+        val oldestIndex = oldest.index
+        if (oldestIndex <= 0) return
+        _isLoadingOlder.value = true
+        val params = buildJsonObject {
+            put("session_id", sessionId)
+            put("include_full_content", true)
+            put("include_images", true)
+            put("before_index", oldestIndex)
+            put("count", SESSION_PAGE_SIZE)
+        }
+        viewModelScope.launch {
+            runCatching { active.call("remote.solution_agent.get_session", params) }
+                .mapCatching { resp ->
+                    val err = resp.error
+                    if (err != null) error(err.message)
+                    val result = resp.result ?: error("missing result")
+                    JsonRpc.json.decodeFromJsonElement(GetSessionResult.serializer(), result)
+                }
+                .onSuccess { result ->
+                    if (openSessionId != sessionId) {
+                        _isLoadingOlder.value = false
+                        return@onSuccess
+                    }
+                    val latest = _session.value as? UiData.Loaded
+                    if (latest == null) {
+                        _isLoadingOlder.value = false
+                        return@onSuccess
+                    }
+                    // Prepend, deduplicating by index just in case the
+                    // optimistic-append path raced us and seated an entry
+                    // at an overlapping slot (shouldn't happen because
+                    // `agent_session_message_appended` always points past
+                    // the tail, but the guard is cheap).
+                    val existingIndices = latest.value.entries.mapNotNull {
+                        it.index.takeIf { i -> i >= 0 }
+                    }.toHashSet()
+                    val older = result.entries.filterNot {
+                        it.index >= 0 && existingIndices.contains(it.index)
+                    }
+                    val merged = older + latest.value.entries
+                    // Carry the higher totalCount value (server should
+                    // report the same value across both pages; we just
+                    // prefer the freshest one).
+                    val newTotal = maxOf(latest.value.totalCount, result.totalCount)
+                    _session.value = UiData.Loaded(
+                        latest.value.copy(entries = merged, totalCount = newTotal),
+                    )
+                    _isLoadingOlder.value = false
+                }
+                .onFailure {
+                    _isLoadingOlder.value = false
+                    // Surface as a one-shot snackbar via the existing
+                    // _sendError channel — the chat list stays usable;
+                    // the user can scroll-trigger again to retry.
+                    _sendError.tryEmit("Couldn't load older messages: ${it.message ?: "?"}")
+                }
+        }
+    }
+
+    /**
+     * Reconnect-resume path: when the WebSocket flips back to Connected
+     * and a session detail screen is active, fetch only the entries that
+     * landed on the desktop while we were offline using `after_index =
+     * lastSeen`. Falls back to a paginated initial pull ([fetchInitialPage])
+     * when:
+     *   - no persisted marker exists (first-time open of this session),
+     *   - the server reports a `total_count` such that
+     *     `entries.size + slice.size < totalCount` — that's the "gap
+     *     detected" branch from the spec, meaning either our marker is
+     *     stale (e.g. session was reset server-side) or entries were
+     *     deleted. Full refetch is the safest recovery.
+     *
+     * Also a no-op when there's no current session loaded (a defensive
+     * guard — the connection observer only calls this when [openSessionId]
+     * is set, but multiple Disconnected → Connected cycles racing the
+     * tear-down of closeSession could land us here).
+     */
+    fun resumeSession(sessionId: String) {
+        val active = client ?: return
+        if (openSessionId != sessionId) return
+        val current = _session.value
+        val lastSeen = lastSeenEntryIndex[sessionId]
+            ?: lastSeenRepository.get(sessionId)
+        if (lastSeen == null || current !is UiData.Loaded) {
+            // No marker or no baseline — do a paginated initial pull.
+            viewModelScope.launch { fetchInitialPage(active, sessionId) }
+            return
+        }
+        val params = buildJsonObject {
+            put("session_id", sessionId)
+            put("include_full_content", true)
+            put("include_images", true)
+            put("after_index", lastSeen)
+        }
+        viewModelScope.launch {
+            runCatching { active.call("remote.solution_agent.get_session", params) }
+                .mapCatching { resp ->
+                    val err = resp.error
+                    if (err != null) error(err.message)
+                    val result = resp.result ?: error("missing result")
+                    JsonRpc.json.decodeFromJsonElement(GetSessionResult.serializer(), result)
+                }
+                .onSuccess { result ->
+                    if (openSessionId != sessionId) return@onSuccess
+                    val latest = _session.value as? UiData.Loaded ?: return@onSuccess
+                    // Gap detection: if the server reports a totalCount
+                    // larger than what current page + slice can account
+                    // for, our lastSeen marker is stale (likely because
+                    // entries were deleted, or the session was reset on
+                    // the desktop while we were offline). Fall back to a
+                    // full paginated initial pull so the user lands on
+                    // a coherent view rather than a torn one.
+                    //
+                    // Skip the check entirely when totalCount is the -1
+                    // sentinel (pre-R-6e server): we have no signal to
+                    // detect a gap, so we trust the incremental slice and
+                    // append it.
+                    if (result.totalCount >= 0 &&
+                        latest.value.entries.size + result.entries.size < result.totalCount
+                    ) {
+                        fetchInitialPage(active, sessionId)
+                        return@onSuccess
+                    }
+                    // Dedupe — the server may include the lastSeen entry
+                    // itself depending on inclusive/exclusive boundary
+                    // semantics. The current spk-editor server treats
+                    // `after_index` as exclusive (R-6e protocol), but the
+                    // guard costs nothing.
+                    val existingIndices = latest.value.entries.mapNotNull {
+                        it.index.takeIf { i -> i >= 0 }
+                    }.toHashSet()
+                    val fresh = result.entries.filterNot {
+                        it.index >= 0 && existingIndices.contains(it.index)
+                    }
+                    if (fresh.isEmpty()) {
+                        // Server is in sync with us — still update the
+                        // totalCount (best-known value).
+                        if (result.totalCount >= 0 && result.totalCount != latest.value.totalCount) {
+                            _session.value = UiData.Loaded(
+                                latest.value.copy(totalCount = result.totalCount),
+                            )
+                        }
+                        return@onSuccess
+                    }
+                    val merged = latest.value.entries + fresh
+                    val newTotal = maxOf(latest.value.totalCount, result.totalCount)
+                    _session.value = UiData.Loaded(
+                        latest.value.copy(entries = merged, totalCount = newTotal),
+                    )
+                    reconcileOptimistic(merged)
+                    fresh.lastOrNull()?.takeIf { it.index >= 0 }?.let { newest ->
+                        val prev = lastSeenEntryIndex[sessionId] ?: -1
+                        if (newest.index > prev) {
+                            lastSeenEntryIndex[sessionId] = newest.index
+                            lastSeenRepository.set(sessionId, newest.index)
+                        }
+                    }
+                }
+                .onFailure {
+                    // Failed resume is recoverable — the next
+                    // message_appended frame will trigger the per-entry
+                    // RPC, and the next manual refresh re-tries this
+                    // path. No user-visible surface needed.
+                }
+        }
     }
 
     private fun refreshSession(sessionId: String) {

@@ -44,8 +44,23 @@ data class SessionSummary(
     @SerialName("last_activity_at") val lastActivityAt: Long,
 )
 
+/**
+ * Result envelope for `remote.solution_agent.list_sessions`.
+ *
+ * The server-side R-6e cursor params (`before_last_activity_at_ms`,
+ * `count`) also surface a [totalCount] alongside the page of sessions.
+ * Wiring the UI to consume it is deferred (R-6f cleanup) — the
+ * sessions list is short enough today that a single full pull isn't a
+ * load-bearing problem; carrying the field on the DTO is the cheap half
+ * so the deferred UI work doesn't require another wire schema bump.
+ *
+ * Defaulted to `-1` so pre-R-6e server responses decode cleanly.
+ */
 @Serializable
-data class ListSessionsResult(val sessions: List<SessionSummary>)
+data class ListSessionsResult(
+    val sessions: List<SessionSummary>,
+    @SerialName("total_count") val totalCount: Int = -1,
+)
 
 /**
  * One transcript entry returned by `remote.solution_agent.get_session`.
@@ -72,6 +87,19 @@ data class EntrySummary(
     val role: String,
     /** Truncated markdown rendering of the entry (≤200 chars, ellipsised). */
     val preview: String,
+    /**
+     * Absolute index of this entry inside the session's transcript
+     * (post-R-6e). The server populates it on every page so paginated
+     * clients can stitch slices together without an extra round-trip.
+     *
+     * **Sentinel:** defaults to `-1` so a pre-R-6e server (which doesn't
+     * emit the field) still decodes cleanly. Any UI codepath that depends
+     * on a valid index — `loadOlder`'s `before_index` cursor, the gap
+     * detector in `resumeSession`, the disk-persisted lastSeen marker —
+     * MUST guard against `-1` and either fall back to a full refetch or
+     * skip the optimisation.
+     */
+    val index: Int = -1,
     /**
      * Full markdown body — only present when the request set
      * `include_full_content=true` AND the entry has more than the preview.
@@ -199,6 +227,19 @@ data class GetSessionResult(
     @SerialName("created_at") val createdAt: Long,
     @SerialName("last_activity_at") val lastActivityAt: Long,
     val entries: List<EntrySummary>,
+    /**
+     * Total number of entries in the session transcript (R-6e). When the
+     * response is a paginated slice (`before_index` / `after_index` /
+     * `count` set), [entries] is a subset and [totalCount] still reports
+     * the full size — clients use this to drive the "Load older" gate and
+     * the gap-detection safety net in `resumeSession`.
+     *
+     * **Sentinel:** defaults to `-1` for pre-R-6e server responses that
+     * don't emit the field. UI codepaths that compare `totalCount` against
+     * `entries.size` must short-circuit on `-1` and assume "everything
+     * loaded" rather than fall through to a misleading gap-detect.
+     */
+    @SerialName("total_count") val totalCount: Int = -1,
 )
 
 enum class DisplayState { Idle, Running, AwaitingInput, Errored, Unknown }
