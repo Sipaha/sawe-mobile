@@ -16,15 +16,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.systemBars
-import androidx.compose.foundation.layout.union
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
@@ -213,12 +206,6 @@ fun SessionDetailScreen(
     val showChipRow = parentId != null || children.isNotEmpty()
 
     Scaffold(
-        // Zero out Scaffold's default contentWindowInsets so it never
-        // contributes to bottomBar placement. The bar handles its own
-        // ime/nav-bar padding via Modifier.windowInsetsPadding inside
-        // ComposeBar — single source of truth, no risk of Scaffold
-        // adding hidden offsets that compound with the bar's modifier.
-        contentWindowInsets = WindowInsets(0),
         topBar = {
             SlimTopBar(
                 title = displayTitle,
@@ -994,22 +981,13 @@ private fun ComposeBar(
         tonalElevation = 3.dp,
         color = MaterialTheme.colorScheme.surface,
     ) {
-        // Single windowInsetsPadding takes the MAX of nav-bar and IME
-        // insets, so the bar sits above whichever is taller:
-        //  - Keyboard closed: max(navBar=48dp, ime=0) = above nav bar.
-        //  - Keyboard open: max(navBar=48dp, ime≈keyboard+navBar) =
-        //    above keyboard.
-        // The Scaffold contributes 0 from contentWindowInsets so this
-        // is the only padding affecting the bar's position.
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .windowInsetsPadding(
-                    WindowInsets.systemBars
-                        .union(WindowInsets.ime)
-                        .only(WindowInsetsSides.Bottom),
-                ),
-        ) {
+        // No inset modifier. The activity declares
+        // windowSoftInputMode="adjustResize" in the manifest, so the
+        // system shrinks the window when the keyboard opens. With this
+        // bar pinned to the bottom of Scaffold's bottomBar slot, it
+        // naturally ends up just above the keyboard (or just above the
+        // gesture nav when the keyboard is closed).
+        Column(modifier = Modifier.fillMaxWidth()) {
             // Tool-approval banner when the agent is blocked on user input
             // that has to happen on the desktop. The compose row stays
             // enabled — queuing a follow-up message is harmless.

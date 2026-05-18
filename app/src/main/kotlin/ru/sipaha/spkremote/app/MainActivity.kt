@@ -3,7 +3,6 @@ package ru.sipaha.spkremote.app
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import ru.sipaha.spkremote.app.ui.App
 import ru.sipaha.spkremote.app.ui.theme.SpkRemoteTheme
@@ -14,12 +13,12 @@ class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Edge-to-edge tells the activity to publish system-bar + IME
-        // insets to Compose. Without this, `Modifier.imePadding()` on
-        // the chat compose-bar reads zero insets and the input field
-        // stays pinned where it would have been on a phone with no
-        // keyboard — i.e. under the keyboard once it opens.
-        enableEdgeToEdge()
+        // No enableEdgeToEdge(). The manifest declares
+        // windowSoftInputMode="adjustResize", so the system shrinks the
+        // activity window when the keyboard opens — the chat compose
+        // bar (positioned at the bottom of the window) ends up just
+        // above the keyboard automatically, with no inset modifiers
+        // needed inside the Composable tree.
         super.onCreate(savedInstanceState)
         // Cold-start auto-resume: the VM inspects [PairingRepository.loadAll]
         // and returns the appropriate landing destination — `pairing` when
