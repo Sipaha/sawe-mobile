@@ -39,18 +39,6 @@ data class SolutionMember(
     val status: String,
 )
 
-/**
- * Per-window snapshot included in `solutions.get`. The phone uses this
- * only to detect "solution is already open on the desktop" cases.
- */
-@Serializable
-data class SolutionWindow(
-    @SerialName("window_id") val windowId: String,
-    val focused: Boolean,
-    @SerialName("worktree_paths") val worktreePaths: List<String> = emptyList(),
-    @SerialName("active_buffer") val activeBuffer: String? = null,
-)
-
 @Serializable
 data class SolutionDetails(
     val id: String,
@@ -63,7 +51,6 @@ data class SolutionDetails(
 @Serializable
 data class GetSolutionResult(
     val solution: SolutionDetails,
-    val window: SolutionWindow? = null,
 )
 
 @Serializable

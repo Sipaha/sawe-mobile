@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
-    kotlin("android")
+    // Note: AGP 9.0+ ships built-in Kotlin support, so `kotlin("android")` must
+    // NOT be applied — doing so makes plugin-apply fail.
     // R-6c-multi: needed by [PairedServer] which is JSON-serialised into
     // the EncryptedSharedPreferences-backed paired-server list.
     kotlin("plugin.serialization")
@@ -9,12 +10,12 @@ plugins {
 
 android {
     namespace = "ru.sipaha.spkremote.app"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "ru.sipaha.spkremote.app"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
     }
@@ -32,6 +33,9 @@ android {
     sourceSets {
         named("main") {
             java.srcDirs("src/main/kotlin")
+        }
+        named("test") {
+            java.srcDirs("src/test/kotlin")
         }
     }
 
@@ -83,30 +87,44 @@ kotlin {
 
 dependencies {
     implementation(project(":core"))
-    implementation(platform("androidx.compose:compose-bom:2024.09.02"))
-    implementation("androidx.activity:activity-compose:1.9.2")
+    // When upgrading: `Modifier.onFirstVisible` was renamed to `onVisibilityChanged` in 2026.04+.
+    implementation(platform("androidx.compose:compose-bom:2026.04.00"))
+    implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
-    implementation("androidx.navigation:navigation-compose:2.8.4")
-    implementation("androidx.core:core-ktx:1.13.1")
-    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.0")
+    implementation("androidx.navigation:navigation-compose:2.9.8")
+    implementation("androidx.core:core-ktx:1.16.0")
+    implementation("androidx.appcompat:appcompat:1.7.1")
     // Encrypted SharedPreferences for persisting the pairing URL. The
-    // 1.1.0-alpha06 release is the latest published artifact on Google's
+    // 1.1.0-alpha07 release is the final published alpha on Google's
     // Maven (security-crypto has been in alpha for ages; the stable
     // 1.0.0 branch depends on a deprecated Tink and breaks on AGP 8+).
-    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("androidx.security:security-crypto:1.1.0-alpha07")
+    // 4.3.0 is the final upstream release (project is no longer maintained).
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     // Markdown rendering for assistant bubbles. The library pins a Compose
     // runtime version under the hood; keep this in step with the Compose
-    // BoM above when bumping. 0.27.0 is the last release that ships an
-    // Android target without forcing a Compose 1.7+ jump.
+    // BoM above when bumping.
     //
     // We do NOT pull in Coil here. The lib's ImageTransformer hook lets us
     // hand it pre-decoded Painters from EntrySummary.images, so async
     // network/disk loaders are unnecessary — every image we render is
     // already a base64 blob carried inline on the wire.
-    implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.27.0")
+    // TODO verify androidx.compose.runtime aligns with BoM after AGP-9 plugin migration lands.
+    implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.39.0")
+
+    // JUnit 5 + kotlinx-coroutines-test for pure-JVM unit tests of the
+    // `:app` ViewModel-side helpers (e.g. RpcDecoding). The bulk of
+    // `:app` is Android-only; only test files of pure JVM classes belong
+    // here.
+    testImplementation("org.junit.jupiter:junit-jupiter:5.12.0")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.12.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+}
+
+tasks.withType<Test>().configureEach {
+    useJUnitPlatform()
 }

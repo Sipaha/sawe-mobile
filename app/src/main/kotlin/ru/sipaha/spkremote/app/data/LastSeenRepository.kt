@@ -30,8 +30,16 @@ import android.util.Log
  */
 class LastSeenRepository(
     private val context: Context,
-    private val activeServerProvider: () -> String?,
 ) {
+
+    /**
+     * Provider for the currently-active server id. Rebound on every
+     * [get] call — see audit Fix B / [DraftRepository.activeServerProvider]
+     * for the rationale.
+     */
+    @Volatile
+    var activeServerProvider: () -> String? = { null }
+        internal set
 
     private val prefs: SharedPreferences? by lazy { openPrefs() }
 
@@ -88,8 +96,18 @@ class LastSeenRepository(
      * forget-pairing behavior.
      */
     fun clearAll() {
+        clearAllFor(activeServerProvider())
+    }
+
+    /**
+     * Explicit-scope variant of [clearAll] — used by
+     * `MainViewModel.removeServer` when wiping markers for a server that
+     * isn't currently active. Avoids briefly mutating
+     * `MainViewModel._activeServerId` to coerce the provider, which would
+     * leak through the StateFlow to Compose observers.
+     */
+    fun clearAllFor(serverId: String?) {
         val p = prefs ?: return
-        val serverId = activeServerProvider()
         runCatching {
             if (serverId == null) {
                 p.edit().clear().apply()
@@ -101,7 +119,14 @@ class LastSeenRepository(
                 if (key.startsWith(prefix)) editor.remove(key)
             }
             editor.apply()
-        }.onFailure { Log.w(TAG, "clearAll() failed", it) }
+        }.onFailure { Log.w(TAG, "clearAllFor() failed", it) }
+    }
+
+    /** Wipe every marker regardless of server. Used by `forgetAllServers`. */
+    fun clearAllServers() {
+        val p = prefs ?: return
+        runCatching { p.edit().clear().apply() }
+            .onFailure { Log.w(TAG, "clearAllServers() failed", it) }
     }
 
     private fun scopedKey(sessionId: String): String? {
@@ -118,9 +143,11 @@ class LastSeenRepository(
         private var instance: LastSeenRepository? = null
 
         fun get(context: Context, activeServerProvider: () -> String?): LastSeenRepository =
-            instance ?: synchronized(this) {
-                instance ?: LastSeenRepository(context.applicationContext, activeServerProvider)
-                    .also { instance = it }
+            synchronized(this) {
+                val store = instance
+                    ?: LastSeenRepository(context.applicationContext).also { instance = it }
+                store.activeServerProvider = activeServerProvider
+                store
             }
     }
 }

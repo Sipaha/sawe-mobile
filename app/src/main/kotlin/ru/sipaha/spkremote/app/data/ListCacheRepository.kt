@@ -41,8 +41,15 @@ import ru.sipaha.spkremote.core.SolutionSummary
  */
 class ListCacheRepository(
     private val context: Context,
-    private val activeServerProvider: () -> String?,
 ) {
+    /**
+     * Provider for the currently-active server id. Rebound on every
+     * [get] call — see audit Fix B / [DraftRepository.activeServerProvider].
+     */
+    @Volatile
+    var activeServerProvider: () -> String? = { null }
+        internal set
+
     private val prefs: SharedPreferences? by lazy { openPrefs() }
 
     private fun openPrefs(): SharedPreferences? = runCatching {
@@ -94,8 +101,17 @@ class ListCacheRepository(
      * server with overlapping ids doesn't surface stale entries.
      */
     fun clearAll() {
+        clearAllFor(activeServerProvider())
+    }
+
+    /**
+     * Explicit-scope variant of [clearAll] — used by
+     * `MainViewModel.removeServer` when wiping the list cache of a
+     * non-active server. Mirrors the same intent as
+     * `DraftRepository.clearAllFor`.
+     */
+    fun clearAllFor(serverId: String?) {
         val p = prefs ?: return
-        val serverId = activeServerProvider()
         runCatching {
             if (serverId == null) {
                 p.edit().clear().apply()
@@ -110,7 +126,7 @@ class ListCacheRepository(
                 }
             }
             editor.apply()
-        }.onFailure { Log.w(TAG, "clearAll() failed", it) }
+        }.onFailure { Log.w(TAG, "clearAllFor() failed", it) }
     }
 
     fun clearAllServers() {
@@ -145,9 +161,11 @@ class ListCacheRepository(
         private var instance: ListCacheRepository? = null
 
         fun get(context: Context, activeServerProvider: () -> String?): ListCacheRepository =
-            instance ?: synchronized(this) {
-                instance ?: ListCacheRepository(context.applicationContext, activeServerProvider)
-                    .also { instance = it }
+            synchronized(this) {
+                val store = instance
+                    ?: ListCacheRepository(context.applicationContext).also { instance = it }
+                store.activeServerProvider = activeServerProvider
+                store
             }
     }
 }

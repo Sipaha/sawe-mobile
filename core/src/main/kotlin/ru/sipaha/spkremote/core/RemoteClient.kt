@@ -2,6 +2,7 @@ package ru.sipaha.spkremote.core
 
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -39,12 +40,22 @@ import okhttp3.OkHttpClient
 /**
  * Resilient connection to one SPK Editor instance.
  *
- * **Handshake (each attempt):**
+ * **Handshake (each attempt):** all three frames are JSON TEXT — the
+ *   wire is text-only end to end, see [HmacChallengeAuth] kdoc for the
+ *   server-side framing reference.
  *   1. WebSocket upgrade to `wss://host:port/remote` (TLS pinned by
  *      [PairingUrl.fingerprint]).
- *   2. Receive 16-byte binary nonce.
- *   3. Send 32-byte binary HMAC-SHA256 response (see [HmacChallengeAuth]).
- *   4. Receive ASCII verdict `OK` (accept) or `REJECT` (terminate).
+ *   2. Receive a server challenge TEXT frame:
+ *      `{"type":"challenge","challenge":"<32 hex chars>","v":1}` — the
+ *      `challenge` field is hex of a 16-byte nonce.
+ *   3. Send a client response TEXT frame:
+ *      `{"type":"response","response":"<64 hex chars>"}` — the
+ *      `response` is hex of the 32-byte HMAC-SHA256 over
+ *      `domain_tag || nonce_bytes` (see [HmacChallengeAuth.respond]).
+ *   4. On accept the server sends `{"type":"welcome","client":"<name>"}`;
+ *      on reject the server closes the WebSocket with close code 1008
+ *      (policy violation) and the lifecycle classifies that as
+ *      [ConnectFailure.ServerClosed] / [ConnectFailure.AuthRejected].
  *   5. Carry JSON-RPC text frames in both directions. Frames with an `id`
  *      that matches an outstanding [call] resolve that call. Frames without
  *      an `id` (or with an unknown id) are emitted on [notifications].
@@ -94,8 +105,12 @@ class RemoteClient internal constructor(
      * [QueuedMessage] (NOT the in-memory wrapper) so it can route the
      * payload back to the user via the `:app` draft repository.
      *
-     * Always called from the lifecycle coroutine. Implementations must
-     * not block — schedule disk I/O on a separate dispatcher if needed.
+     * May be called from any coroutine context. Implementations must
+     * be thread-safe and should not block — schedule disk I/O on a
+     * separate dispatcher if needed. (Audit Phase 2 M1: the original
+     * "always lifecycle coroutine" contract was inconsistent across
+     * the three TTL-expiry paths; the unified contract is "any thread,
+     * thread-safe consumer".)
      */
     private val onMessageExpired: ((QueuedMessage) -> Unit)? = null,
 ) {
@@ -145,6 +160,20 @@ class RemoteClient internal constructor(
     @Volatile private var lifecycleJob: Job? = null
     @Volatile private var firstConnect: CompletableDeferred<Unit>? = null
     /**
+     * Atomic guard against concurrent [connect] calls. The previous
+     * `check(lifecycleJob == null)` was a non-atomic read; two threads
+     * could both pass it and both launch a lifecycle loop.
+     *
+     * Single-shot semantics: once tripped, [close] does NOT reset it.
+     * A [RemoteClient] is a one-shot lifecycle — re-connecting an
+     * already-closed instance would require also clearing [closing],
+     * the queue rehydration state, and the failed-pending bookkeeping;
+     * the natural Kotlin idiom is "build a fresh instance per connect
+     * cycle", and the `:app` ConnectionManager already does so via
+     * `tearDownConnection` + a new `RemoteClient(...)` per server switch.
+     */
+    private val connectGuard = AtomicBoolean(false)
+    /**
      * The most recent [ConnectFailure] observed by the lifecycle loop.
      * Read by [call] when [transport] is null so the resulting
      * [NotConnectedException] carries a specific reason instead of just
@@ -153,8 +182,16 @@ class RemoteClient internal constructor(
      */
     @Volatile private var lastConnectFailure: ConnectFailure? = null
 
-    /** Current transport (or null while reconnecting). Mutated only from the lifecycle coroutine. */
-    private var transport: RemoteTransport? = null
+    /**
+     * Current transport (or null while reconnecting). Written only by
+     * the lifecycle coroutine and [close]; read from arbitrary
+     * coroutines via [callInternal]. The lifecycle-coroutine writes
+     * "happen-before" the reads ordered by the [_connectionState]
+     * flow's volatile semantics, but a non-Connected read of [transport]
+     * still crosses threads — mark @Volatile so the read sees the most
+     * recent write rather than a stale CPU-cached value.
+     */
+    @Volatile private var transport: RemoteTransport? = null
 
     /**
      * Connect (and from then on, stay connected) using [scope] as the
@@ -167,7 +204,10 @@ class RemoteClient internal constructor(
      */
     suspend fun connect(scope: CoroutineScope? = null): Result<Unit> = runCatching {
         val target = scope ?: CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        check(lifecycleJob == null) { "RemoteClient already connecting/connected" }
+        check(connectGuard.compareAndSet(false, true)) {
+            "RemoteClient is single-shot — connect() can be called at most " +
+                "once per instance (already connecting/connected or previously closed)"
+        }
         this.scope = target
         // Rehydrate the queue from disk before the lifecycle loop boots.
         // The 24h TTL is enforced by [flushQueue] on every reconnect, so
@@ -177,8 +217,19 @@ class RemoteClient internal constructor(
         // on Connected.
         rehydrateQueue()
         val gate = CompletableDeferred<Unit>()
-        firstConnect = gate
-        lifecycleJob = target.launch { lifecycleLoop() }
+        // Serialize the start edge with [close] under [stateLock]. Without
+        // this, close() can run between the connectGuard CAS and the
+        // lifecycleJob assignment: close() sees lifecycleJob == null,
+        // no-ops the cancel, then we proceed to launch a coroutine that
+        // immediately exits because `closing` is true. The launched-then-
+        // quit job is wasteful and the ordering is fragile. Taking the
+        // same lock close() takes around `closing = true` + reading
+        // lifecycleJob serializes these edges.
+        synchronized(stateLock) {
+            if (closing) throw ClosedException()
+            firstConnect = gate
+            lifecycleJob = target.launch { lifecycleLoop() }
+        }
         // Caller awaits the first Connected transition (or terminal failure).
         gate.await()
     }
@@ -214,29 +265,68 @@ class RemoteClient internal constructor(
     @Volatile private var closing = false
 
     fun close() {
-        closing = true
-        events.trySend(LifecycleEvent.UserClose)
-        // Fail pending in-flight calls — the wire is gone.
-        pending.values.forEach { it.cancel() }
-        pending.clear()
-        // Queued items are dropped with ClosedException for symmetry with TTL.
-        // We deliberately do NOT remove them from [queueStore] — close() can
-        // mean "tear down before process exit / config change" and persistent
-        // entries should survive into the next RemoteClient incarnation.
-        // forgetPairing() in :app calls queueStore.clear() explicitly when
-        // the user re-pairs, which is the only situation where draining is
-        // correct.
+        // Serialize the close/connect edges + the close/callInternal
+        // edges through [stateLock] so callInternal cannot install a
+        // pending entry after we've cleared the map. The pending-install
+        // path also takes [stateLock] and re-checks `closing` /
+        // `transport` AFTER installing — that pair of checks closes the
+        // install-after-clear window.
+        val toClose: RemoteTransport?
+        val pendingSnapshot: List<CompletableDeferred<JsonRpcResponse>>
+        val queuedSnapshot: List<QueuedCall>
+        val gate: CompletableDeferred<Unit>?
+        val job: Job?
         synchronized(stateLock) {
-            queued.forEach { it.deferred.completeExceptionally(ClosedException()) }
+            closing = true
+            // Null the transport FIRST so any callInternal that races
+            // past our `closing` check observes a missing transport and
+            // bails out cleanly before installing a pending entry.
+            toClose = transport
+            transport = null
+            pendingSnapshot = pending.values.toList()
+            pending.clear()
+            // Queued items are dropped with ClosedException for symmetry
+            // with TTL. We also remove them from [queueStore] below
+            // (outside the lock, to avoid holding the monitor across
+            // disk I/O) — see the drain loop after `synchronized`.
+            // This is intentional: leaving persisted entries behind
+            // would let a next-process RemoteClient replay them after
+            // callers already observed ClosedException and (possibly)
+            // retried, producing duplicates. ClosedException now means
+            // "the message is gone; retry from your side if you want
+            // it sent again."
+            queuedSnapshot = queued.toList()
             queued.clear()
+            gate = firstConnect
+            job = lifecycleJob
+            lifecycleJob = null
+        }
+        events.trySend(LifecycleEvent.UserClose)
+        pendingSnapshot.forEach { it.cancel() }
+        // Drain the queued items: complete with ClosedException AND
+        // remove the disk record. Without removal a next-process
+        // RemoteClient instance would replay these on rehydrate, but
+        // callers that observed the ClosedException are free to retry
+        // — that would produce duplicates. Clean-on-close gives a
+        // single, predictable failure surface: ClosedException means
+        // "this message is gone; retry if you want it sent". The
+        // `:app` ConnectionManager treats ClosedException as a normal
+        // user-initiated teardown and does not retry.
+        queuedSnapshot.forEach {
+            runCatching { queueStore.remove(it.message.id) }
+            it.deferred.completeExceptionally(ClosedException())
         }
         // Unblock callers still awaiting their first handshake.
-        firstConnect?.takeIf { !it.isCompleted }
-            ?.completeExceptionally(ClosedException())
-        transport?.close()
-        transport = null
-        lifecycleJob?.cancel()
-        lifecycleJob = null
+        gate?.takeIf { !it.isCompleted }?.completeExceptionally(ClosedException())
+        toClose?.close()
+        job?.cancel()
+        // [close] is terminal — we deliberately do NOT reset [connectGuard]
+        // or [closing]. Resetting the guard while [closing] stays true
+        // would let a subsequent [connect] pass the guard, but the
+        // lifecycle loop would immediately exit (its `while (!closing)`
+        // check fails) leaving the new [firstConnect] gate to hang
+        // forever. A [RemoteClient] is single-shot; callers build a
+        // fresh instance to reconnect.
         _connectionState.value = ConnectionState.Disconnected
     }
 
@@ -259,10 +349,24 @@ class RemoteClient internal constructor(
     ): JsonRpcResponse = withTimeout(timeoutMs) { callInternal(method, params) }
 
     private suspend fun callInternal(method: String, params: JsonElement?): JsonRpcResponse {
-        val active = transport ?: throw NotConnectedException(lastConnectFailure)
         val id = nextId.getAndIncrement()
         val deferred = CompletableDeferred<JsonRpcResponse>()
-        pending[id] = deferred
+        // Install the pending entry under [stateLock] and re-check the
+        // close state AFTER the install so a concurrent close() — which
+        // also takes the lock, nulls transport, then clears [pending] —
+        // cannot leave an orphaned deferred. Sequence:
+        //   close():  lock → closing=true → transport=null → pending.clear() → unlock
+        //   here:     lock → if closing/no transport: throw → pending[id]=…  → unlock
+        // Because close() clears pending AFTER nulling transport (both
+        // under the lock), the worst we observe in the install branch
+        // is the absence of a transport; we never install behind a
+        // pending.clear().
+        val active: RemoteTransport = synchronized(stateLock) {
+            if (closing) throw NotConnectedException(lastConnectFailure)
+            val tx = transport ?: throw NotConnectedException(lastConnectFailure)
+            pending[id] = deferred
+            tx
+        }
         val req = JsonRpc.encodeRequest(JsonRpcRequest(method = method, params = params, id = id))
         return suspendCancellableCoroutine { cont ->
             deferred.invokeOnCompletion { cause ->
@@ -275,7 +379,13 @@ class RemoteClient internal constructor(
             cont.invokeOnCancellation {
                 pending.remove(id)?.cancel()
             }
-            val sent = active.send(req)
+            val sent = try {
+                active.send(req)
+            } catch (t: Throwable) {
+                pending.remove(id)
+                cont.resumeWithException(t)
+                return@suspendCancellableCoroutine
+            }
             if (!sent) {
                 pending.remove(id)
                 cont.resumeWithException(IllegalStateException("websocket refused frame"))
@@ -312,8 +422,19 @@ class RemoteClient internal constructor(
         // delivers it, the server's per-method timeout is what we trust.
         // (Wrapping in withTimeout here would interfere with TestScope
         //  virtual-time advancement and isn't what the spec asked for.)
+        //
+        // Race: between the connection-state read and `call()`, the
+        // lifecycle coroutine can null out [transport] (mid-flush
+        // transport drop) and `callInternal` throws [NotConnectedException].
+        // Catch it and fall through to the queuing branch so we honour
+        // the "held until next Connected" contract instead of dropping
+        // the message silently.
         if (_connectionState.value is ConnectionState.Connected) {
-            return call(method, params)
+            try {
+                return call(method, params)
+            } catch (_: NotConnectedException) {
+                // Fall through to queue.
+            }
         }
         val deferred = CompletableDeferred<JsonRpcResponse>()
         val message = QueuedMessage(
@@ -321,7 +442,6 @@ class RemoteClient internal constructor(
             method = method,
             params = params,
             enqueuedAtMs = nowMs(),
-            attemptCount = 0,
         )
         val item = QueuedCall(
             message = message,
@@ -333,6 +453,14 @@ class RemoteClient internal constructor(
             if (_connectionState.value is ConnectionState.Connected) {
                 true
             } else {
+                // Persist BEFORE adding to the in-memory deque, both
+                // under the same lock. If we add to the deque first and
+                // release the lock before queueStore.add lands, a
+                // QueueChanged dispatch can drain + remove the in-memory
+                // entry before the disk write completes — leaving a
+                // phantom on disk that gets replayed at next process
+                // start. Ordering: persist → enqueue, atomically.
+                runCatching { queueStore.add(message) }
                 queued += item
                 false
             }
@@ -340,13 +468,17 @@ class RemoteClient internal constructor(
         if (sendSynchronously) {
             // Connected raced us; send directly. No need to persist —
             // the call is one round-trip away from a real response.
-            return call(method, params)
+            try {
+                return call(method, params)
+            } catch (_: NotConnectedException) {
+                // Same race as the outer fast path — fall through to
+                // the persistent queue branch.
+                synchronized(stateLock) {
+                    runCatching { queueStore.add(message) }
+                    queued += item
+                }
+            }
         }
-        // Persist *after* adding to the in-memory deque so the lifecycle
-        // coroutine can see the entry as soon as it picks up QueueChanged.
-        // EncryptedSharedPreferences performs synchronous I/O on commit();
-        // we rely on the `:app` impl using apply()-equivalent semantics.
-        runCatching { queueStore.add(message) }
         events.trySend(LifecycleEvent.QueueChanged)
         return awaitWithTtl(item)
     }
@@ -411,7 +543,10 @@ class RemoteClient internal constructor(
 
     private suspend fun lifecycleLoop() {
         var attempt = 0
-        while (!closing && (scope?.isActive == true)) {
+        // scope is non-null and active inside the lifecycle loop; the close()
+        // path nulls scope via teardown, but `closing=true` is the actual
+        // exit signal that this coroutine observes first.
+        while (!closing) {
             if (attempt == 0) {
                 _connectionState.value = ConnectionState.Connecting
             } else {
@@ -488,8 +623,17 @@ class RemoteClient internal constructor(
                 ConnectFailure.HandshakeTimeout(ConnectFailure.HANDSHAKE_TIMEOUT_MS)
             )
             if (outcome is AttemptOutcome.Connected) {
-                _connectionState.value = ConnectionState.Connected
+                // Run the re-subscribe handshake BEFORE transitioning
+                // to Connected. The user-visible promise of R-6a is
+                // "reconnect handshake atomicity" — once observers see
+                // Connected they should not receive a notification gap
+                // that includes the window between welcome and
+                // subscribe-ack. Awaiting subscribe here also serializes
+                // flushQueue() after the resubscribe, so any queued
+                // call that itself depends on subscription state hits
+                // a fully-registered server.
                 onConnected()
+                _connectionState.value = ConnectionState.Connected
                 firstConnect?.takeIf { !it.isCompleted }?.complete(Unit)
             } else {
                 tx.close()
@@ -534,24 +678,26 @@ class RemoteClient internal constructor(
     /**
      * Re-subscribe + flush queued calls after a successful handshake.
      *
-     * The re-subscribe RPC is fired on a child coroutine — we don't want to
-     * block the lifecycle loop on its response, and a failure is non-fatal
-     * (the next reconnect retries). Queue flushing is synchronous w.r.t.
-     * the deque scan but dispatches each item on its own coroutine.
+     * The re-subscribe RPC is awaited synchronously by the lifecycle
+     * coroutine BEFORE the connection state transitions to Connected
+     * and before [flushQueue] runs. Without this serialization the
+     * server could dispatch a notification in the window between
+     * welcome and subscribe-ack, leaving subscribers with a gap they
+     * cannot detect from the Connected transition alone. A failure of
+     * the subscribe call is non-fatal (callers see notifications resume
+     * on the next successful reconnect), so we swallow exceptions and
+     * still proceed to flushQueue.
      */
-    private fun onConnected() {
+    private suspend fun onConnected() {
         val kinds = synchronized(stateLock) { activeSubscriptions.toList() }
-        val activeScope = scope
-        if (kinds.isNotEmpty() && activeScope != null) {
-            activeScope.launch {
-                runCatching {
-                    call(
-                        "remote.editor.subscribe",
-                        buildJsonObject {
-                            put("kinds", JsonArray(kinds.map { JsonPrimitive(it) }))
-                        },
-                    )
-                }
+        if (kinds.isNotEmpty()) {
+            runCatching {
+                call(
+                    "remote.editor.subscribe",
+                    buildJsonObject {
+                        put("kinds", JsonArray(kinds.map { JsonPrimitive(it) }))
+                    },
+                )
             }
         }
         flushQueue()
@@ -570,6 +716,24 @@ class RemoteClient internal constructor(
      * bounce-to-input path sees the payload exactly once.
      */
     private fun flushQueue() {
+        // Orchestrator: first walk the queue to drop anything past TTL,
+        // then dispatch the survivors. Semantics are unchanged versus the
+        // pre-refactor monolith — see [expireStaleEntries] and
+        // [dispatchQueuedItems] for the two halves.
+        val survivors = expireStaleEntries()
+        if (survivors.isEmpty()) return
+        dispatchQueuedItems(survivors)
+    }
+
+    /**
+     * Walk [queued] under [stateLock], partitioning into still-fresh
+     * survivors and TTL-expired entries. Expired entries are removed
+     * from [queueStore] and bounced via [onMessageExpired] + their
+     * deferred is completed with [QueueTtlException]. Returns the
+     * survivors (in their original FIFO order) for [dispatchQueuedItems]
+     * to send.
+     */
+    private fun expireStaleEntries(): List<QueuedCall> {
         val (survivors, expired) = synchronized(stateLock) {
             val now = nowMs()
             val sv = ArrayList<QueuedCall>(queued.size)
@@ -589,13 +753,24 @@ class RemoteClient internal constructor(
             runCatching { onMessageExpired?.invoke(item.message) }
             item.deferred.completeExceptionally(QueueTtlException())
         }
-        val toSend = survivors
-        if (toSend.isEmpty()) return
-        val activeScope = scope ?: run {
+        return survivors
+    }
+
+    /**
+     * Attempt the FIFO drain of [toSend] over the current [transport].
+     * On transport loss mid-flush, the untouched suffix is re-enqueued at
+     * the head of [queued] so FIFO order survives the next reconnect.
+     * Returns true iff every item was dispatched (i.e. the transport
+     * stayed alive through the whole loop and no per-item TTL fired).
+     */
+    private fun dispatchQueuedItems(toSend: List<QueuedCall>): Boolean {
+        val activeScope = scope
+        if (activeScope == null) {
             // Without a scope we can't fire — restore everything.
             synchronized(stateLock) { queued.addAll(toSend) }
-            return
+            return false
         }
+        var fullyDrained = true
         for ((index, item) in toSend.withIndex()) {
             val active = transport
             if (active == null) {
@@ -608,36 +783,43 @@ class RemoteClient internal constructor(
                     queued.clear()
                     queued.addAll(combined)
                 }
-                return
+                return false
             }
             val remainingTtl = item.ttlMs - (nowMs() - item.message.enqueuedAtMs)
             if (remainingTtl <= 0) {
                 runCatching { queueStore.remove(item.message.id) }
                 runCatching { onMessageExpired?.invoke(item.message) }
                 item.deferred.completeExceptionally(QueueTtlException())
+                fullyDrained = false
                 continue
             }
-            // The caller-side awaitWithTtl already enforces the overall TTL
-            // budget. We just send + resolve here without an additional
-            // timeout wrapper — wrapping with withTimeout would schedule a
-            // virtual-time job that `advanceUntilIdle` can run past in
-            // tests even when no real network latency exists.
+            // Per-item launch — does NOT block the lifecycle loop on the
+            // wire response. Audit Phase 3 M1 (sequential await) caused
+            // deadlocks in the lifecycle channel: while flushQueue was
+            // blocked on `call()` no other LifecycleEvent could be
+            // processed, including TransportClosed. Reverted to per-item
+            // launch; the FIFO-on-mid-flush-drop invariant remains a
+            // documented gap (see .audit-backlog.md M1 + disabled T1).
             activeScope.launch {
                 try {
                     val resp = call(item.message.method, item.message.params)
-                    // Successful round-trip — remove from disk so the next
-                    // restart doesn't replay.
                     runCatching { queueStore.remove(item.message.id) }
                     item.deferred.complete(resp)
                 } catch (t: Throwable) {
-                    // Transient (transport drop) — leave in the persisted
-                    // store so the next reconnect retries. The deferred
-                    // failure is observed by [awaitWithTtl] which will
-                    // bounce-on-TTL if the retries don't succeed in time.
-                    item.deferred.completeExceptionally(t)
+                    if (t is QueueTtlException) {
+                        runCatching { queueStore.remove(item.message.id) }
+                        item.deferred.completeExceptionally(t)
+                    } else {
+                        // Transient — re-enqueue this single item at the
+                        // head. (FIFO across multiple concurrent failures
+                        // is the open M1 gap.)
+                        synchronized(stateLock) { queued.addFirst(item) }
+                        events.trySend(LifecycleEvent.QueueChanged)
+                    }
                 }
             }
         }
+        return fullyDrained
     }
 
     private suspend fun awaitWithTtl(item: QueuedCall): JsonRpcResponse {
@@ -654,6 +836,12 @@ class RemoteClient internal constructor(
             // disk entry is cleaned up there.
             if (removed) {
                 runCatching { queueStore.remove(item.message.id) }
+                // Fire the bounce callback directly — consistent with the
+                // other two TTL-expiry paths (expireStaleEntries,
+                // dispatchQueuedItems per-item) which also invoke it
+                // synchronously. The callback contract is "may be called
+                // from any coroutine; implementations must be thread-safe"
+                // (see callback KDoc).
                 runCatching { onMessageExpired?.invoke(item.message) }
             }
             if (!item.deferred.isCompleted) {
@@ -794,18 +982,25 @@ class RemoteClient internal constructor(
     private fun dispatchJsonRpc(text: String) {
         val parsed = runCatching { JsonRpc.json.parseToJsonElement(text) }.getOrNull() ?: return
         val obj = parsed.jsonObject
-        val id = obj["id"]?.jsonPrimitive?.let { runCatching { it.long }.getOrNull() }
-        if (id != null) {
-            val deferred = pending.remove(id)
-            if (deferred != null) {
-                val response = runCatching { JsonRpc.decodeResponse(text) }
-                response.fold(
-                    onSuccess = { deferred.complete(it) },
-                    onFailure = { deferred.completeExceptionally(it) },
-                )
-                return
-            }
+        val idElement = obj["id"]
+        if (idElement != null) {
+            // Response frame. Match against [pending]; if no caller is
+            // waiting (typical case: the call was already cancelled or
+            // timed out), drop silently — emitting it onto
+            // [_notifications] would pollute the bounded SharedFlow
+            // buffer (64 entries) and confuse subscribers that only
+            // expect server-initiated frames.
+            val id = idElement.jsonPrimitive.let { runCatching { it.long }.getOrNull() }
+                ?: return
+            val deferred = pending.remove(id) ?: return
+            val response = runCatching { JsonRpc.decodeResponse(text) }
+            response.fold(
+                onSuccess = { deferred.complete(it) },
+                onFailure = { deferred.completeExceptionally(it) },
+            )
+            return
         }
+        // No id at all — server-initiated notification.
         _notifications.tryEmit(parsed)
     }
 
@@ -859,7 +1054,15 @@ class RemoteClient internal constructor(
     /** Surface marker for TTL-expired queue items. */
     class QueueTtlException : RuntimeException("queued call timed out")
 
-    /** Surface marker for queue items dropped at [close]. */
+    /**
+     * Surface marker for queue items dropped at [close].
+     *
+     * **Persistence semantics:** when this exception is raised, the
+     * corresponding [QueuedMessage] has already been removed from the
+     * [queueStore], so a fresh [RemoteClient] instance built after the
+     * close will NOT replay it. Callers that want the message delivered
+     * are responsible for re-issuing the [queueCall] themselves.
+     */
     class ClosedException : RuntimeException("client closed before flush")
 
     companion object {

@@ -14,8 +14,7 @@ import kotlinx.serialization.json.JsonElement
  * id-tracking is the cheap second line.)
  *
  * [enqueuedAtMs] is the source of truth for FIFO ordering and TTL
- * arithmetic. [attemptCount] is a hint for the UI / logging — terminal
- * failures bypass it; transient failures bump it on retry.
+ * arithmetic.
  */
 @Serializable
 data class QueuedMessage(
@@ -23,7 +22,6 @@ data class QueuedMessage(
     val method: String,
     val params: JsonElement?,
     val enqueuedAtMs: Long,
-    val attemptCount: Int = 0,
 )
 
 /**

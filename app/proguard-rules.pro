@@ -43,3 +43,12 @@
 -dontwarn com.google.errorprone.annotations.CheckReturnValue
 -dontwarn com.google.errorprone.annotations.Immutable
 -dontwarn com.google.errorprone.annotations.RestrictedApi
+
+# Preventive keep rules for security-sensitive `:core` classes. Neither
+# is currently referenced reflectively, but both sit on the trust path
+# (TLS fingerprint pinning, HMAC challenge-response) — if a future
+# integration ever does load them through `Class.forName` or service
+# loaders, an R8-stripped build would silently fall back to OS trust /
+# unauth, which is exactly the failure mode we cannot afford.
+-keep class ru.sipaha.spkremote.core.FingerprintPinningTrustManager { *; }
+-keep class ru.sipaha.spkremote.core.HmacChallengeAuth { *; }

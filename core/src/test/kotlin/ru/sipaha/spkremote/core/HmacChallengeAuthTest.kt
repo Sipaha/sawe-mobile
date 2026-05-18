@@ -48,12 +48,13 @@ class HmacChallengeAuthTest {
         val secret = ByteArray(32) { 0x11.toByte() }
         val nonce = ByteArray(16) { 0x00.toByte() }
         val response = HmacChallengeAuth(secret).respond(nonce)
+        // HMAC-SHA256 output is always 32 bytes.
         assertContentEquals(
-            ByteArray(HmacChallengeAuth.RESPONSE_LEN),
+            ByteArray(32),
             response.size.let { ByteArray(it) }
         )
         // separate explicit size assertion for clarity
-        kotlin.test.assertEquals(HmacChallengeAuth.RESPONSE_LEN, response.size)
+        kotlin.test.assertEquals(32, response.size)
     }
 
     @Test

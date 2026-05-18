@@ -764,6 +764,116 @@ class RemoteDtosTest {
     }
 
     @Test
+    fun `SolutionMember round-trips with snake_case catalog_id and local_path`() {
+        // The wire emits all three fields snake_case; the DTO uses
+        // SerialName to map catalog_id → catalogId and local_path → localPath.
+        // The status field is a free-form string (no enum classifier on
+        // the client side yet) so any value must round-trip verbatim.
+        val text = """
+            {
+              "catalog_id": "cat-123",
+              "local_path": "/home/user/projects/foo",
+              "status": "active"
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(SolutionMember.serializer(), text)
+        assertEquals("cat-123", parsed.catalogId)
+        assertEquals("/home/user/projects/foo", parsed.localPath)
+        assertEquals("active", parsed.status)
+
+        val reencoded = JsonRpc.json.encodeToString(SolutionMember.serializer(), parsed)
+        val again = JsonRpc.json.decodeFromString(SolutionMember.serializer(), reencoded)
+        assertEquals(parsed, again)
+    }
+
+    @Test
+    fun `SolutionDetails round-trips with members and last_opened_at`() {
+        val text = """
+            {
+              "id": "sol-deep",
+              "name": "Spk Editor",
+              "root": "/home/spk/.spk/spk-editor",
+              "members": [
+                {"catalog_id": "c1", "local_path": "/p/one", "status": "active"},
+                {"catalog_id": "c2", "local_path": "/p/two", "status": "missing"}
+              ],
+              "last_opened_at": "2026-05-16T08:00:00Z"
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(SolutionDetails.serializer(), text)
+        assertEquals("sol-deep", parsed.id)
+        assertEquals("Spk Editor", parsed.name)
+        assertEquals("/home/spk/.spk/spk-editor", parsed.root)
+        assertEquals(2, parsed.members.size)
+        assertEquals("c1", parsed.members[0].catalogId)
+        assertEquals("missing", parsed.members[1].status)
+        assertEquals("2026-05-16T08:00:00Z", parsed.lastOpenedAt)
+
+        val reencoded = JsonRpc.json.encodeToString(SolutionDetails.serializer(), parsed)
+        val again = JsonRpc.json.decodeFromString(SolutionDetails.serializer(), reencoded)
+        assertEquals(parsed, again)
+    }
+
+    @Test
+    fun `SolutionDetails tolerates empty members list and missing last_opened_at`() {
+        val text = """
+            {
+              "id": "sol-fresh",
+              "name": "Just made",
+              "root": "/tmp/x"
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(SolutionDetails.serializer(), text)
+        assertEquals("sol-fresh", parsed.id)
+        assertTrue(parsed.members.isEmpty())
+        assertNull(parsed.lastOpenedAt)
+    }
+
+    @Test
+    fun `GetSolutionResult round-trips with full solution payload`() {
+        val text = """
+            {
+              "solution": {
+                "id": "sol-x",
+                "name": "X",
+                "root": "/x",
+                "members": [
+                  {"catalog_id": "c", "local_path": "/x/m", "status": "active"}
+                ],
+                "last_opened_at": "2026-05-17T12:00:00Z"
+              }
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(GetSolutionResult.serializer(), text)
+        assertEquals("sol-x", parsed.solution.id)
+        assertEquals(1, parsed.solution.members.size)
+
+        val reencoded = JsonRpc.json.encodeToString(GetSolutionResult.serializer(), parsed)
+        val again = JsonRpc.json.decodeFromString(GetSolutionResult.serializer(), reencoded)
+        assertEquals(parsed, again)
+    }
+
+    @Test
+    fun `GetSolutionResult tolerates unknown window field from older servers`() {
+        // Older servers used to emit a `window` field on this envelope.
+        // The mobile client no longer reads it, but the decoder must
+        // ignore it gracefully so a pre-cleanup desktop build doesn't
+        // wedge the phone UI.
+        val text = """
+            {
+              "solution": {
+                "id": "sol-closed",
+                "name": "Closed",
+                "root": "/closed"
+              },
+              "window": null
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(GetSolutionResult.serializer(), text)
+        assertEquals("sol-closed", parsed.solution.id)
+    }
+
+    @Test
     fun `EntrySummary with plan payload round-trips`() {
         val text = """
             {

@@ -22,7 +22,7 @@ import javax.crypto.spec.SecretKeySpec
  *   - [closeFromServer]: simulate the server hanging up.
  *   - [failFromServer]: simulate a transport-level failure.
  */
-internal class FakeRemoteTransport(
+internal open class FakeRemoteTransport(
     private val pairingUrl: PairingUrl,
     val listener: RemoteTransportListener,
 ) : RemoteTransport {

@@ -15,8 +15,12 @@ spk-editor-mobile/
   core/   # Pure JVM library (Kotlin). Pairing URL parsing, TLS pinning,
           # HMAC handshake, JSON-RPC envelope, reconnect with backoff,
           # outbound queue with disk persistence, ConnectFailure
-          # classifier. JDK-only, no Android deps — unit-testable on
-          # any machine with JDK 21+.
+          # classifier. JDK-only, no Android deps. The `:core` and `:cli`
+          # bytecode targets JDK 17 (see `jvmToolchain(17)` in
+          # `core/build.gradle.kts`), so JDK 17 is the floor for running
+          # their test suites. The Gradle daemon itself wants JDK 21 (AGP
+          # 9 requirement for `:app`) — install JDK 21 too if you'll
+          # build `:app`.
   cli/    # Pure JVM smoke client over :core. Single-shot RPC against
           # a live editor for debugging. No Android.
   app/    # Android Compose UI. Depends on :core. Multi-server pairing,
@@ -29,7 +33,7 @@ spk-editor-mobile/
 ### Prerequisites
 
 - **JDK 21+** (Temurin 21 recommended). Use older JDKs only for `:core` /
-  `:cli`; AGP 8.7 wants ≥ 21 for `:app`.
+  `:cli`; AGP 9.2 wants ≥ 21 for `:app`.
 - **Android SDK** (cmdline-tools alone is enough) for `:app`. Set
   `ANDROID_HOME`.
 
@@ -39,10 +43,10 @@ spk-editor-mobile/
 ./gradlew :core:build :core:test
 ```
 
-This is the surface CI exercises. ~109 unit tests cover URL parsing,
+This is the surface CI exercises. ~140 unit tests cover URL parsing,
 fingerprint pinning, HMAC challenge, JSON-RPC envelope, MCP tools/call
-unwrap, reconnect/backoff, outbound queue TTL, connection-failure
-classification.
+unwrap, role-heading normalisation, reconnect/backoff, outbound queue
+TTL, connection-failure classification.
 
 ### `:app` debug APK
 

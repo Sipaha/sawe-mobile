@@ -92,6 +92,13 @@ data class PairingUrl(
 
             val client = requireParam(params, "client")
             require(client.isNotBlank()) { "client must not be blank" }
+            // [client] flows verbatim into the X-Spk-Remote-Client HTTP header
+            // in OkHttpRemoteTransport. A crafted pairing URL with embedded
+            // CR/LF (or other control chars) could otherwise inject extra
+            // request headers. Reject anything in C0 (< 0x20) plus DEL (0x7F).
+            require(client.none { it.code < 0x20 || it.code == 0x7F }) {
+                "client must not contain control characters"
+            }
 
             PairingUrl(
                 host = host,

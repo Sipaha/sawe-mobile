@@ -68,7 +68,6 @@ fun AppNav(viewModel: MainViewModel, initialRoute: String? = null) {
     val navController = rememberNavController()
     val uiState by viewModel.state.collectAsState()
     val banner by viewModel.connectionBanner.collectAsState()
-    val navStateRepository = viewModel.navStateRepository
 
     val startDestination = initialRoute ?: "pairing"
 
@@ -78,10 +77,13 @@ fun AppNav(viewModel: MainViewModel, initialRoute: String? = null) {
     // `solutions/abc/sessions/xyz`) — we rebuild that from the entry's
     // NavArguments because Compose-Navigation only exposes the route
     // *template* on `currentDestination`. See [resolvedRoute] below.
+    //
+    // `saveCurrentRoute` hops onto IO inside the ViewModel so the
+    // SharedPreferences write doesn't stutter recomposition.
     LaunchedEffect(navController) {
         navController.currentBackStackEntryFlow.collect { entry ->
             val resolved = resolvedRoute(entry) ?: return@collect
-            navStateRepository.saveRoute(resolved)
+            viewModel.saveCurrentRoute(resolved)
         }
     }
 
@@ -96,7 +98,7 @@ fun AppNav(viewModel: MainViewModel, initialRoute: String? = null) {
             is UiState.Connected -> {
                 val current = navController.currentDestination?.route
                 if (current == null || current == "pairing" || current == "connecting") {
-                    val savedRoute = if (!restored) navStateRepository.loadRoute() else null
+                    val savedRoute = if (!restored) viewModel.loadSavedRoute() else null
                     val target = savedRoute?.takeIf { it.startsWith("solutions") } ?: "solutions"
                     restored = true
                     navController.navigate(target) {

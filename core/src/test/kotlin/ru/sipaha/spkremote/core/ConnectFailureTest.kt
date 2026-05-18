@@ -32,9 +32,21 @@ class ConnectFailureTest {
     }
 
     @Test
-    fun `SSLHandshakeException classifies as TlsPinMismatch`() {
-        val cls = ConnectFailure.classify(SSLHandshakeException("Trust anchor for certification path not found."))
+    fun `SSLHandshakeException with fingerprint message classifies as TlsPinMismatch`() {
+        val cls = ConnectFailure.classify(
+            SSLHandshakeException("server fingerprint did not match expected pin")
+        )
         assertTrue(cls is ConnectFailure.TlsPinMismatch)
+    }
+
+    @Test
+    fun `SSLHandshakeException without pin message classifies as TlsNegotiationFailed`() {
+        val cls = ConnectFailure.classify(
+            SSLHandshakeException("Trust anchor for certification path not found.")
+        )
+        assertTrue(cls is ConnectFailure.TlsNegotiationFailed, "got ${cls::class.simpleName}")
+        assertContains(cls.userMessage, "TLS handshake failed", ignoreCase = true)
+        assertTrue(cls.isRetryable)
     }
 
     @Test

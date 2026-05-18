@@ -57,7 +57,6 @@ class HmacChallengeAuth(secret: ByteArray) {
     companion object {
         const val ALGORITHM = "HmacSHA256"
         const val NONCE_LEN = 16
-        const val RESPONSE_LEN = 32
 
         /**
          * Domain-separation tag prepended to the challenge before HMAC-ing.
@@ -85,12 +84,26 @@ internal object HexCodec {
         require(trimmed.length % 2 == 0) { "hex string must have even length" }
         val out = ByteArray(trimmed.length / 2)
         for (i in out.indices) {
-            val hi = Character.digit(trimmed[i * 2], 16)
-            val lo = Character.digit(trimmed[i * 2 + 1], 16)
+            val hi = asciiHexValue(trimmed[i * 2])
+            val lo = asciiHexValue(trimmed[i * 2 + 1])
             require(hi >= 0 && lo >= 0) { "invalid hex char in '$trimmed'" }
             out[i] = ((hi shl 4) or lo).toByte()
         }
         return out
+    }
+
+    /**
+     * Strict ASCII-only hex value lookup. Returns -1 for anything outside
+     * `[0-9A-Fa-f]`. `Character.digit(c, 16)` is too permissive — it
+     * accepts Arabic-Indic and Fullwidth digits, neither of which appear
+     * on the wire, so we reject them at the decoder rather than trusting
+     * the platform's notion of "digit".
+     */
+    private fun asciiHexValue(c: Char): Int = when (c) {
+        in '0'..'9' -> c - '0'
+        in 'a'..'f' -> 10 + (c - 'a')
+        in 'A'..'F' -> 10 + (c - 'A')
+        else -> -1
     }
 
     private val HEX_DIGITS = "0123456789abcdef".toCharArray()

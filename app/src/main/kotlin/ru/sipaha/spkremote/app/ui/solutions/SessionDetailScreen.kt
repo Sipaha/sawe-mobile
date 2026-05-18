@@ -75,6 +75,10 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -85,6 +89,7 @@ import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
 import com.mikepenz.markdown.model.ImageData
 import com.mikepenz.markdown.model.ImageTransformer
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import ru.sipaha.spkremote.app.vm.MainViewModel
@@ -158,18 +163,21 @@ fun SessionDetailScreen(
     // edits/sends/cancels it, the typed draft can be recovered by hand
     // from anywhere they pasted it. (Alternative: append the bounce
     // to the typed draft separated by `\n\n`. Kept simpler for v1.)
-    val draftRepository = viewModel.draftRepository
-    data class InitialDraftSeed(val text: String, val isBounce: Boolean)
-    val seed: InitialDraftSeed = remember(sessionId) {
-        val bounced = draftRepository.bouncedFor(sessionId)
-        if (bounced != null) {
-            InitialDraftSeed(bounced, isBounce = true)
-        } else {
-            InitialDraftSeed(draftRepository.load(sessionId), isBounce = false)
-        }
-    }
-    LaunchedEffect(sessionId, seed.isBounce) {
-        if (seed.isBounce) {
+    //
+    // We use a `LaunchedEffect`-driven async load (via
+    // `MainViewModel.loadDraftSeed`) instead of a `remember { ... }`
+    // synchronous read because the SharedPreferences-backed read happens
+    // off the composition / main thread. The empty initial state during
+    // the brief load window keeps the field functional (user can start
+    // typing immediately — once the seed lands, only the empty initial
+    // value is replaced).
+    var seedText by remember(sessionId) { mutableStateOf("") }
+    var seedLoaded by remember(sessionId) { mutableStateOf(false) }
+    LaunchedEffect(sessionId) {
+        val (text, bounce) = viewModel.loadDraftSeed(sessionId)
+        seedText = text
+        seedLoaded = true
+        if (bounce) {
             snackbarHostState.showSnackbar(
                 "Couldn't send earlier — added back to your message for retry.",
             )
@@ -241,13 +249,14 @@ fun SessionDetailScreen(
                         // doesn't repopulate the field even before the
                         // server echo lands. Bounce-on-failure is handled
                         // separately by handleExpiredMessage.
-                        draftRepository.clear(sessionId)
+                        viewModel.clearDraft(sessionId)
                     },
                     onCancel = viewModel::cancelTurn,
                     rawState = rawState,
                     sessionId = sessionId,
-                    initialDraft = seed.text,
-                    onDraftChanged = { text -> draftRepository.save(sessionId, text) },
+                    initialDraft = seedText,
+                    seedLoaded = seedLoaded,
+                    onDraftChanged = { text -> viewModel.saveDraft(sessionId, text) },
                 )
             }
         },
@@ -479,7 +488,7 @@ private fun ChatBubble(entry: EntrySummary) {
         EntryRole.ToolCall -> {
             val tc = entry.toolCall
             if (tc != null) {
-                ToolCallBubble(call = tc)
+                ToolCallBubble(call = tc, positionKey = entry.index)
             } else {
                 CenteredAnnotatedBubble(
                     text = entry.preview,
@@ -705,8 +714,17 @@ private fun emptyBitmapPainter(): Painter {
 }
 
 @Composable
-private fun ToolCallBubble(call: ToolCallSummary) {
-    var expanded by rememberSaveable(call.name + call.argsPreview) { mutableStateOf(false) }
+private fun ToolCallBubble(call: ToolCallSummary, positionKey: Int) {
+    // Include the transcript-position component so two identical-content
+    // tool calls (same name + same argsPreview) don't share expanded state.
+    var expanded by rememberSaveable(positionKey, call.name, call.argsPreview) {
+        mutableStateOf(false)
+    }
+    val contentDesc = if (expanded) {
+        "Collapse tool call ${call.name}"
+    } else {
+        "Expand tool call ${call.name}"
+    }
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
         Surface(
             color = MaterialTheme.colorScheme.tertiaryContainer,
@@ -714,7 +732,11 @@ private fun ToolCallBubble(call: ToolCallSummary) {
             shape = RoundedCornerShape(12.dp),
             modifier = Modifier
                 .widthIn(max = 360.dp)
-                .clickable { expanded = !expanded },
+                .clickable { expanded = !expanded }
+                .semantics {
+                    role = Role.Button
+                    contentDescription = contentDesc
+                },
         ) {
             Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                 Row(
@@ -954,50 +976,7 @@ private fun SlimTopBar(
     }
 }
 
-@Composable
-private fun StatePill(state: DisplayState, raw: String) {
-    val (label, fg, bg) = when (state) {
-        DisplayState.Idle -> Triple(
-            "Idle",
-            MaterialTheme.colorScheme.onSurfaceVariant,
-            MaterialTheme.colorScheme.surfaceVariant,
-        )
-        DisplayState.Running -> Triple(
-            "Running",
-            MaterialTheme.colorScheme.onPrimary,
-            MaterialTheme.colorScheme.primary,
-        )
-        DisplayState.AwaitingInput -> Triple(
-            "Awaiting input",
-            MaterialTheme.colorScheme.onTertiaryContainer,
-            MaterialTheme.colorScheme.tertiaryContainer,
-        )
-        DisplayState.Errored -> Triple(
-            "Errored",
-            MaterialTheme.colorScheme.onErrorContainer,
-            MaterialTheme.colorScheme.errorContainer,
-        )
-        DisplayState.Unknown -> Triple(
-            raw.take(20).ifBlank { "?" },
-            MaterialTheme.colorScheme.onSurface,
-            MaterialTheme.colorScheme.surface,
-        )
-    }
-    Surface(
-        color = bg,
-        contentColor = fg,
-        shape = MaterialTheme.shapes.small,
-        tonalElevation = 0.dp,
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            color = fg,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-        )
-    }
-}
-
+@OptIn(kotlinx.coroutines.FlowPreview::class)
 @Composable
 private fun ComposeBar(
     enabled: Boolean,
@@ -1008,17 +987,40 @@ private fun ComposeBar(
     rawState: String,
     sessionId: String,
     initialDraft: String,
-    onDraftChanged: (String) -> Unit,
+    seedLoaded: Boolean,
+    onDraftChanged: suspend (String) -> Unit,
 ) {
     // R-6d: rememberSaveable for config-change resilience + draft-on-disk
     // for cross-restart resilience. `mutableStateOf(initialDraft)` keyed
     // on sessionId resets when the user navigates between sessions; the
-    // disk write below is debounced 500 ms so the I/O scheduler isn't
-    // hammered by every keystroke.
+    // disk write below is debounced 500 ms via `snapshotFlow.debounce` so
+    // the I/O scheduler isn't hammered by every keystroke.
     var draft by rememberSaveable(sessionId) { mutableStateOf(initialDraft) }
-    LaunchedEffect(draft, sessionId) {
-        kotlinx.coroutines.delay(500)
-        onDraftChanged(draft)
+    // The async seed lands AFTER the first composition. Seat it into the
+    // text field the moment it arrives so the user sees their saved draft
+    // (or a bounce-recovered message) instead of an empty field.
+    LaunchedEffect(sessionId, seedLoaded, initialDraft) {
+        // Only overwrite if the user hasn't started typing yet — preserve
+        // any keystrokes that landed during the brief async window.
+        if (seedLoaded && draft.isEmpty()) {
+            draft = initialDraft
+        }
+    }
+    // F5: per-session debounced writer. snapshotFlow + debounce(500) +
+    // distinctUntilChanged means:
+    //   - we don't re-arm the 500 ms timer on every keystroke
+    //     (snapshotFlow emits on change, debounce throttles to the
+    //     trailing edge of the burst);
+    //   - we don't fire a redundant write when `draft` is reset to "" by
+    //     the send path (distinctUntilChanged elides the no-op);
+    //   - keying on `sessionId` ensures a session switch cancels any
+    //     pending write so the previous session's tail keystroke doesn't
+    //     bleed into the new session's saved draft.
+    LaunchedEffect(sessionId) {
+        androidx.compose.runtime.snapshotFlow { draft }
+            .debounce(500)
+            .distinctUntilChanged()
+            .collect { text -> onDraftChanged(text) }
     }
     val isRunning = state == DisplayState.Running
     val sendEnabled = enabled && !isRunning && draft.isNotBlank()

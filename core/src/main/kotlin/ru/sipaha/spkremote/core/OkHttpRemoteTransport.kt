@@ -1,11 +1,15 @@
 package ru.sipaha.spkremote.core
 
 import java.security.SecureRandom
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
+import okhttp3.CipherSuite
+import okhttp3.ConnectionSpec
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.TlsVersion
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
@@ -29,7 +33,12 @@ internal class OkHttpRemoteTransportFactory(
     private val builder: (PairingUrl) -> OkHttpClient.Builder = ::defaultBuilder,
 ) : RemoteTransportFactory {
 
-    private val clients = HashMap<PairingUrl, OkHttpClient>()
+    // ConcurrentHashMap (not HashMap) because [connect] is invoked from
+    // arbitrary caller threads — multiple RemoteClients sharing the same
+    // factory (multi-server pairing) can race the per-URL OkHttpClient
+    // cache lookup. `getOrPut` is acceptable here since the OkHttpClient
+    // is cheap to construct redundantly on a rare race.
+    private val clients = ConcurrentHashMap<PairingUrl, OkHttpClient>()
 
     override fun connect(
         url: PairingUrl,
@@ -75,8 +84,28 @@ internal class OkHttpRemoteTransportFactory(
             val sslContext = SSLContext.getInstance("TLSv1.3").apply {
                 init(null, arrayOf(trustManager), secureRandom)
             }
+            // Enforce TLS 1.3 strictly via ConnectionSpec. The SSLContext
+            // setting above only configures the default protocol; OkHttp /
+            // platform code will still negotiate TLS 1.2 if the server
+            // offers it. We do NOT seed from RESTRICTED_TLS: its cipher
+            // list is TLS-1.2-only (TLS_ECDHE_*, TLS_DHE_RSA_*), and
+            // intersected with TLS 1.3 it can yield zero negotiable
+            // suites on stacks like Conscrypt that don't auto-append TLS
+            // 1.3 suites to a user-provided list. Seed from MODERN_TLS
+            // (which gives us isTls=true + supportsTlsExtensions=true)
+            // and override BOTH tlsVersions and cipherSuites with the
+            // three mandatory TLS 1.3 AEAD suites.
+            val tls13Spec = ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
+                .tlsVersions(TlsVersion.TLS_1_3)
+                .cipherSuites(
+                    CipherSuite.TLS_AES_128_GCM_SHA256,
+                    CipherSuite.TLS_AES_256_GCM_SHA384,
+                    CipherSuite.TLS_CHACHA20_POLY1305_SHA256,
+                )
+                .build()
             return OkHttpClient.Builder()
                 .sslSocketFactory(sslContext.socketFactory, trustManager)
+                .connectionSpecs(listOf(tls13Spec))
                 .hostnameVerifier { _, _ -> true } // fingerprint pin obsoletes hostname check
                 .pingInterval(30, TimeUnit.SECONDS)
                 .readTimeout(0, TimeUnit.MILLISECONDS)

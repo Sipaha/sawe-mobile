@@ -19,7 +19,7 @@ import org.junit.jupiter.api.Test
  *
  * Provide a pairing URL from a live editor instance:
  *
- *     SPK_EDITOR_PAIRING_URL='spk-remote://...' \
+ *     SPK_EDITOR_PAIRING_URL='spk-editor-remote://...' \
  *         ./gradlew :core:test -DincludeTags=integration
  *
  * The probes are grouped into a single `@Test` so handshake setup is paid

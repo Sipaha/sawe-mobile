@@ -1,9 +1,7 @@
 package ru.sipaha.spkremote.core
 
 import kotlin.test.Test
-import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
-import kotlinx.coroutines.runBlocking
 
 /**
  * `RemoteClient`'s WebSocket lifecycle is hard to unit-test without spinning
@@ -11,6 +9,9 @@ import kotlinx.coroutines.runBlocking
  * gated behind `SPK_EDITOR_PAIRING_URL`. This smoke test only verifies the
  * surface contract — that `RemoteClient` constructs and exposes a usable
  * `notifications` flow before any connection happens.
+ *
+ * (The `call without connect` failure mode is covered by the matching test
+ * in `RemoteClientLifecycleTest`; no need to duplicate it here.)
  */
 class RemoteClientSmokeTest {
 
@@ -25,22 +26,6 @@ class RemoteClientSmokeTest {
         )
         val client = RemoteClient(url)
         assertNotNull(client.notifications)
-        client.close()
-    }
-
-    @Test
-    fun `call without connect fails`(): Unit = runBlocking {
-        val url = PairingUrl(
-            host = "127.0.0.1",
-            port = 8443,
-            secret = ByteArray(32) { 0x42 },
-            client = "smoke-test",
-            fingerprint = ByteArray(32) { 0x33 },
-        )
-        val client = RemoteClient(url)
-        assertFailsWith<NotConnectedException> {
-            client.call("remote.editor.capabilities")
-        }
         client.close()
     }
 }

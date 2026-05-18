@@ -52,8 +52,6 @@ data class JsonRpcResponse(
     val result: JsonElement? = null,
     val error: JsonRpcError? = null,
 ) {
-    val isSuccess: Boolean get() = error == null && result != null
-
     /**
      * The R-4 server-side proxy wraps every `remote.X.Y` call in an
      * MCP `tools/call { name, arguments }` envelope and passes the

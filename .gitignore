@@ -27,3 +27,6 @@ Thumbs.db
 # Logs & misc
 *.log
 .kotlin/
+
+# Claude Code local state
+.claude/

@@ -23,7 +23,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -36,7 +35,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.derivedStateOf
 import ru.sipaha.spkremote.app.vm.MainViewModel
@@ -75,7 +73,6 @@ fun NewSessionDialog(
     val solutionDetailsState by viewModel.solutionDetails.collectAsState()
     val inFlight by viewModel.createSessionInFlight.collectAsState()
     val autoOpened by viewModel.lastCreateAutoOpened.collectAsState()
-    val scope = rememberCoroutineScope()
 
     // Trigger loadAgents + loadSolutionDetails exactly once for this
     // dialog instance. We do NOT re-key on the state flows — that would

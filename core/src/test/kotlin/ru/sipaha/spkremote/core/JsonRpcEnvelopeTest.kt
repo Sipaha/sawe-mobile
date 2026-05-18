@@ -44,7 +44,6 @@ class JsonRpcEnvelopeTest {
         assertEquals(1L, resp.id)
         assertNotNull(resp.result)
         assertNull(resp.error)
-        assertTrue(resp.isSuccess)
     }
 
     @Test
@@ -56,7 +55,6 @@ class JsonRpcEnvelopeTest {
         val err = assertNotNull(resp.error)
         assertEquals(-32601, err.code)
         assertEquals("Method not found", err.message)
-        assertTrue(!resp.isSuccess)
     }
 
     @Test

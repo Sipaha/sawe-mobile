@@ -29,6 +29,10 @@ package ru.sipaha.spkremote.core
  *   understand (wrong-length nonce, malformed verdict, unexpected text
  *   frame before nonce). Retryable per attempt but recurring = server
  *   protocol drift.
+ * - [TlsNegotiationFailed] — the TLS handshake itself failed for a reason
+ *   that wasn't a pin mismatch (cipher/protocol mismatch, peer aborted
+ *   the handshake mid-flight, …). Retryable per attempt, but the same
+ *   error recurring usually means a misconfigured server.
  * - [ServerClosed] — server closed the WebSocket during the handshake
  *   (often code 1008 "policy violation" = unauthorised client). Often
  *   means the same as [AuthRejected] but framed differently.
@@ -76,6 +80,14 @@ sealed interface ConnectFailure {
                 "Server rejected the pairing secret. Re-pair from the editor's " +
                     "Remote Control panel."
         }
+    }
+
+    data class TlsNegotiationFailed(
+        val reason: String,
+        override val cause: Throwable? = null,
+    ) : ConnectFailure {
+        override val userMessage: String = "TLS handshake failed: $reason"
+        override val isRetryable: Boolean = true
     }
 
     data class HandshakeTimeout(
@@ -148,9 +160,16 @@ sealed interface ConnectFailure {
                     return TlsPinMismatch(cause = t)
                 }
                 if (cls == "javax.net.ssl.SSLHandshakeException") {
-                    // The most common cause we'd see here is the pin failure
-                    // wrapped in SSLHandshakeException. Stay specific.
-                    return TlsPinMismatch(cause = t)
+                    // The pin-mismatch branch above already returned for the
+                    // common case (fingerprint message present anywhere in
+                    // the cause chain). If we got here the handshake failed
+                    // for some OTHER reason — protocol/cipher mismatch, peer
+                    // abort, etc. — and labelling it `TlsPinMismatch` would
+                    // wrongly tell the user to re-pair.
+                    return TlsNegotiationFailed(
+                        reason = msg.ifBlank { "TLS handshake aborted" },
+                        cause = t,
+                    )
                 }
                 if (cls == "java.net.SocketTimeoutException") {
                     return Unreachable("Connection timed out — server unreachable.", cause = t)

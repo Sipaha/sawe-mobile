@@ -41,8 +41,15 @@ import android.util.Log
  */
 class NavStateRepository(
     private val context: Context,
-    private val activeServerProvider: () -> String?,
 ) {
+
+    /**
+     * Provider for the currently-active server id. Rebound on every
+     * [get] call — see audit Fix B / [DraftRepository.activeServerProvider].
+     */
+    @Volatile
+    var activeServerProvider: () -> String? = { null }
+        internal set
 
     private val prefs: SharedPreferences? by lazy { openPrefs() }
 
@@ -90,13 +97,35 @@ class NavStateRepository(
      * cold-start doesn't fall back into it.
      */
     fun clear() {
+        clearFor(activeServerProvider())
+    }
+
+    /**
+     * Explicit-scope variant of [clear]. Mirrors the same rationale as
+     * `DraftRepository.clearAllFor` — callers in `removeServer` can wipe
+     * a non-active server's saved route without the temporary
+     * `_activeServerId` mutation trick.
+     *
+     * Also clears the legacy R-6d unscoped key so a follow-up cold-start
+     * doesn't fall back into it.
+     */
+    fun clearFor(serverId: String?) {
         val p = prefs ?: return
-        val key = scopedKey()
         runCatching {
             val editor = p.edit()
-            if (key != null) editor.remove(key)
+            if (serverId != null) editor.remove("route:$serverId")
             editor.remove(LEGACY_KEY_ROUTE).apply()
-        }.onFailure { Log.w(TAG, "clear() failed", it) }
+        }.onFailure { Log.w(TAG, "clearFor() failed", it) }
+    }
+
+    /**
+     * Wipe every saved route across every server (and the legacy
+     * unscoped key). Used by `forgetAllServers`.
+     */
+    fun clearAllServers() {
+        val p = prefs ?: return
+        runCatching { p.edit().clear().apply() }
+            .onFailure { Log.w(TAG, "clearAllServers() failed", it) }
     }
 
     private fun scopedKey(): String? {
@@ -113,9 +142,11 @@ class NavStateRepository(
         private var instance: NavStateRepository? = null
 
         fun get(context: Context, activeServerProvider: () -> String?): NavStateRepository =
-            instance ?: synchronized(this) {
-                instance ?: NavStateRepository(context.applicationContext, activeServerProvider)
-                    .also { instance = it }
+            synchronized(this) {
+                val store = instance
+                    ?: NavStateRepository(context.applicationContext).also { instance = it }
+                store.activeServerProvider = activeServerProvider
+                store
             }
     }
 }

@@ -80,10 +80,17 @@ fun SolutionDetailScreen(
     // Without this observer the sessions list would stay frozen at the
     // cached (or Loading) state until the user manually pulled.
     val connectionState by viewModel.rawConnectionState.collectAsState()
+    // Track the Disconnected→Connected edge explicitly. Without this,
+    // every re-emission of `Connected` (config-change recomposition,
+    // rotation, etc.) re-triggers a wire refetch — wasted RPC bandwidth
+    // and a brief Loading flicker.
+    val wasConnected = remember { mutableStateOf(false) }
     LaunchedEffect(connectionState) {
-        if (connectionState is ConnectionState.Connected) {
+        val nowConnected = connectionState is ConnectionState.Connected
+        if (nowConnected && !wasConnected.value) {
             viewModel.refreshSessions(solutionId)
         }
+        wasConnected.value = nowConnected
     }
 
     LaunchedEffect(sessionsState) {
@@ -214,50 +221,6 @@ private fun SessionRow(session: SessionSummary, onClick: () -> Unit) {
                 modifier = Modifier.padding(start = 8.dp),
             )
         }
-    }
-}
-
-@Composable
-private fun StatePill(state: DisplayState, raw: String) {
-    val (label, fg, bg) = when (state) {
-        DisplayState.Idle -> Triple(
-            "Idle",
-            MaterialTheme.colorScheme.onSurfaceVariant,
-            MaterialTheme.colorScheme.surfaceVariant,
-        )
-        DisplayState.Running -> Triple(
-            "Running",
-            MaterialTheme.colorScheme.onPrimary,
-            MaterialTheme.colorScheme.primary,
-        )
-        DisplayState.AwaitingInput -> Triple(
-            "Awaiting input",
-            MaterialTheme.colorScheme.onTertiaryContainer,
-            MaterialTheme.colorScheme.tertiaryContainer,
-        )
-        DisplayState.Errored -> Triple(
-            "Errored",
-            MaterialTheme.colorScheme.onErrorContainer,
-            MaterialTheme.colorScheme.errorContainer,
-        )
-        DisplayState.Unknown -> Triple(
-            raw.take(20),
-            MaterialTheme.colorScheme.onSurface,
-            MaterialTheme.colorScheme.surface,
-        )
-    }
-    Surface(
-        color = bg,
-        contentColor = fg,
-        shape = MaterialTheme.shapes.small,
-        tonalElevation = 0.dp,
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            color = fg,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-        )
     }
 }
 

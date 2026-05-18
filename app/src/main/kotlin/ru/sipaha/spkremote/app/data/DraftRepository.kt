@@ -40,8 +40,17 @@ import android.util.Log
  */
 class DraftRepository(
     private val context: Context,
-    private val activeServerProvider: () -> String?,
 ) {
+
+    /**
+     * Provider for the currently-active server id. Mutable + volatile so
+     * the singleton can rebind on every [get] call without leaking the
+     * first caller's lambda for the lifetime of the JVM (audit Fix B).
+     * Reads in scoped operations consult the current value each time.
+     */
+    @Volatile
+    var activeServerProvider: () -> String? = { null }
+        internal set
 
     private val prefs: SharedPreferences? by lazy { openPrefs() }
 
@@ -123,14 +132,6 @@ class DraftRepository(
         }.onFailure { Log.w(TAG, "setBounced() failed", it) }
     }
 
-    /** Forcibly drop a pending bounce — used by `forgetPairing`. */
-    fun clearBounced(sessionId: String) {
-        val p = prefs ?: return
-        val key = bouncedKey(sessionId) ?: return
-        runCatching { p.edit().remove(key).apply() }
-            .onFailure { Log.w(TAG, "clearBounced() failed", it) }
-    }
-
     /**
      * Wipe every draft + bounce belonging to the currently-active server.
      * Called when a single server is removed from the multi-server list
@@ -141,8 +142,21 @@ class DraftRepository(
      * forget-pairing behavior.
      */
     fun clearAll() {
+        clearAllFor(activeServerProvider())
+    }
+
+    /**
+     * Explicit-scope variant of [clearAll] that takes the target server id
+     * directly. Used by `MainViewModel.removeServer` when wiping the
+     * keys of a NON-active server — passing the id avoids the
+     * temporarily-shift-the-active-server trick which leaked the wrong
+     * value through the `activeServerId` StateFlow to Compose observers.
+     *
+     * Mirrors [clearAll]'s null-serverId fallback: a null [serverId] wipes
+     * the whole prefs file (factory-reset semantics).
+     */
+    fun clearAllFor(serverId: String?) {
         val p = prefs ?: return
-        val serverId = activeServerProvider()
         runCatching {
             if (serverId == null) {
                 p.edit().clear().apply()
@@ -157,7 +171,7 @@ class DraftRepository(
                 }
             }
             editor.apply()
-        }.onFailure { Log.w(TAG, "clearAll() failed", it) }
+        }.onFailure { Log.w(TAG, "clearAllFor() failed", it) }
     }
 
     /** Wipe every draft + bounce regardless of server. Used by tests / hard resets. */
@@ -185,9 +199,14 @@ class DraftRepository(
         private var instance: DraftRepository? = null
 
         fun get(context: Context, activeServerProvider: () -> String?): DraftRepository =
-            instance ?: synchronized(this) {
-                instance ?: DraftRepository(context.applicationContext, activeServerProvider)
-                    .also { instance = it }
+            synchronized(this) {
+                val existing = instance
+                val store = existing ?: DraftRepository(context.applicationContext).also { instance = it }
+                // Rebind the provider every call — see kdoc on
+                // [activeServerProvider]. Without this, the first caller's
+                // lambda would silently capture for the life of the JVM.
+                store.activeServerProvider = activeServerProvider
+                store
             }
     }
 }

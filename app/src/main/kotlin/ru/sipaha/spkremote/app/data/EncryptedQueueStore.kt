@@ -50,8 +50,15 @@ import ru.sipaha.spkremote.core.QueuedMessage
  */
 class EncryptedQueueStore(
     private val context: Context,
-    private val activeServerProvider: () -> String?,
 ) : QueueStore {
+
+    /**
+     * Provider for the currently-active server id. Rebound on every
+     * [get] call — see audit Fix B / [ru.sipaha.spkremote.app.data.DraftRepository.activeServerProvider].
+     */
+    @Volatile
+    var activeServerProvider: () -> String? = { null }
+        internal set
 
     private val prefs: SharedPreferences? by lazy { openPrefs() }
     // Defensive in-memory cache so a transient prefs-open failure doesn't
@@ -103,12 +110,57 @@ class EncryptedQueueStore(
     }
 
     /**
+     * Explicit-scope variant of [clear] — drop the queue blob for
+     * [serverId] directly without consulting [activeServerProvider]. Used
+     * by `MainViewModel.removeServer` when removing a non-active server,
+     * so we don't have to temporarily mutate `_activeServerId` to coerce
+     * the right blob key.
+     *
+     * If [serverId] is the currently-cached one, the in-memory cache is
+     * also wiped to keep memory and disk consistent.
+     */
+    @Synchronized
+    fun clearFor(serverId: String?) {
+        val p = prefs ?: return
+        if (serverId == null) return
+        val key = blobKey(serverId)
+        runCatching { p.edit().remove(key).commit() }
+            .onFailure { Log.w(TAG, "clearFor() failed", it) }
+        if (cacheServerId == serverId) {
+            cache.clear()
+        }
+    }
+
+    /**
+     * Wipe every queued-messages blob across every server, including
+     * the legacy R-6d v1 single-key blob. Used by `forgetAllServers`
+     * (audit Fix A). The previous implementation called the per-active-
+     * server [clear] here, which left non-active servers' blobs on
+     * disk after a "Forget all servers" action.
+     */
+    @Synchronized
+    fun clearAllServers() {
+        val p = prefs ?: return
+        runCatching { p.edit().clear().commit() }
+            .onFailure { Log.w(TAG, "clearAllServers() failed", it) }
+        cache.clear()
+        cacheServerId = null
+        cacheInitialised = false
+    }
+
+    /**
      * Reload the in-memory cache from disk when the active server has
      * changed since the previous access. Also performs the one-shot
      * R-6d → R-6c-multi migration of the legacy [KEY_BLOB_V1] blob
      * into the active server's keyed slot when it appears alongside
      * an active server id for the first time.
+     *
+     * Must be called while holding the instance monitor — `@Synchronized`
+     * is applied here as defense-in-depth in case a future non-synchronized
+     * caller reaches it; today only the `@Synchronized` public-facing
+     * methods invoke this.
      */
+    @Synchronized
     private fun refreshCacheIfServerChanged() {
         val serverId = activeServerProvider()
         if (cacheInitialised && cacheServerId == serverId) return
@@ -118,6 +170,7 @@ class EncryptedQueueStore(
         cacheInitialised = true
     }
 
+    @Synchronized
     private fun readBlobFor(serverId: String?): List<QueuedMessage> {
         val p = prefs ?: return emptyList()
         if (serverId == null) return emptyList()
@@ -164,6 +217,14 @@ class EncryptedQueueStore(
         return entries
     }
 
+    /**
+     * Persist [cache] under the currently-cached server id. Must be called
+     * while holding the instance monitor so that `cacheServerId` does NOT
+     * shift mid-write (e.g. a concurrent `switchToServer` cannot redirect
+     * this write to the next server's slot). We snapshot the server id
+     * once at the top and use that local for the entire method.
+     */
+    @Synchronized
     private fun writeBlob() {
         val p = prefs ?: return
         val serverId = cacheServerId ?: return
@@ -199,9 +260,11 @@ class EncryptedQueueStore(
         private var instance: EncryptedQueueStore? = null
 
         fun get(context: Context, activeServerProvider: () -> String?): EncryptedQueueStore =
-            instance ?: synchronized(this) {
-                instance ?: EncryptedQueueStore(context.applicationContext, activeServerProvider)
-                    .also { instance = it }
+            synchronized(this) {
+                val store = instance
+                    ?: EncryptedQueueStore(context.applicationContext).also { instance = it }
+                store.activeServerProvider = activeServerProvider
+                store
             }
     }
 }

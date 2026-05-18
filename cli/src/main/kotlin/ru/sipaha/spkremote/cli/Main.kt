@@ -1,7 +1,8 @@
 package ru.sipaha.spkremote.cli
 
 import kotlin.system.exitProcess
-import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -9,6 +10,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import ru.sipaha.spkremote.core.JsonRpc
+import ru.sipaha.spkremote.core.NotConnectedException
 import ru.sipaha.spkremote.core.PairingUrl
 import ru.sipaha.spkremote.core.RemoteClient
 
@@ -25,15 +27,17 @@ import ru.sipaha.spkremote.core.RemoteClient
  * or set `SPK_EDITOR_PAIRING_URL` and omit the first arg.
  *
  * If `method` is `remote.editor.subscribe`, the CLI prints the subscribe
- * response then blocks for up to 30 seconds, printing every notification
- * that arrives on the SharedFlow.
+ * response then blocks for up to [SUBSCRIBE_LISTEN_MS] ms (30 seconds),
+ * printing every notification that arrives on the SharedFlow.
  */
-private const val USAGE = """\
+private const val SUBSCRIBE_LISTEN_MS = 30_000L
+
+private const val USAGE = """
 Usage:
   spk-remote-cli <pairing-url> [method] [params-json]
   SPK_EDITOR_PAIRING_URL=<url> spk-remote-cli [method] [params-json]
 
-  pairing-url:  spk-remote://host:port?secret=...&fp=...&client=...
+  pairing-url:  spk-editor-remote://host:port?secret=...&server_fp=...&client=...
   method:       JSON-RPC method (default: remote.editor.capabilities)
   params-json:  optional JSON for `params`, e.g. '{"kinds":["buffer_opened"]}'
 
@@ -77,29 +81,45 @@ private fun runMain(args: List<String>): Int {
 
     val client = RemoteClient(parsed)
     return runBlocking {
+        // For `remote.editor.subscribe`, start collecting notifications
+        // BEFORE we issue the subscribe call so we don't miss any that
+        // may race in immediately after the server records us.
+        //
+        // The collector is a hot SharedFlow subscriber that `RemoteClient.close()`
+        // does NOT complete, so we MUST cancel it in the finally block — otherwise
+        // any error path leaves the child coroutine alive and `runBlocking` hangs
+        // waiting for it.
+        var notificationJob: Job? = null
         try {
             client.connect().getOrElse {
                 System.err.println("error: connect failed: ${it.message}")
                 return@runBlocking 1
             }
-            // For `remote.editor.subscribe`, start collecting notifications
-            // BEFORE we issue the subscribe call so we don't miss any that
-            // may race in immediately after the server records us.
-            val notificationJob = if (method == "remote.editor.subscribe") {
-                launch {
+            if (method == "remote.editor.subscribe") {
+                notificationJob = launch {
                     client.notifications
                         .onEach { println("notification: ${prettyJson.encodeToString(JsonElement.serializer(), it)}") }
                         .collect()
                 }
-            } else {
-                null
             }
 
-            val response = client.call(method, params)
-            if (response.error != null) {
+            val response = try {
+                client.call(method, params)
+            } catch (e: TimeoutCancellationException) {
+                System.err.println(
+                    "error: call to '$method' timed out after " +
+                        "${RemoteClient.DEFAULT_CALL_TIMEOUT_MS / 1000} s"
+                )
+                return@runBlocking 1
+            } catch (e: NotConnectedException) {
+                System.err.println("error: lost connection to editor before call to '$method': ${e.message}")
+                return@runBlocking 1
+            }
+            val err = response.error
+            if (err != null) {
                 System.err.println(
                     "error: server returned JSON-RPC error: " +
-                        "code=${response.error!!.code} message=${response.error!!.message}",
+                        "code=${err.code} message=${err.message}",
                 )
                 return@runBlocking 1
             }
@@ -107,13 +127,14 @@ private fun runMain(args: List<String>): Int {
                 println(prettyJson.encodeToString(JsonElement.serializer(), it))
             } ?: println("(no result)")
 
-            if (notificationJob != null) {
-                // Subscribed — block for up to 30 s printing notifications.
-                withTimeoutOrNull(30_000) { notificationJob.join() }
-                notificationJob.cancel()
+            val activeJob = notificationJob
+            if (activeJob != null) {
+                // Subscribed — block for up to [SUBSCRIBE_LISTEN_MS] printing notifications.
+                withTimeoutOrNull(SUBSCRIBE_LISTEN_MS) { activeJob.join() }
             }
             0
         } finally {
+            notificationJob?.cancel()
             client.close()
         }
     }
@@ -126,14 +147,18 @@ private data class CliArgs(
 )
 
 private fun parseArgs(args: List<String>): CliArgs? {
-    if (args.any { it == "--help" || it == "-h" }) return null
+    // Only treat `--help` / `-h` as a help request when it's the leading argv.
+    // Scanning the whole argv would misfire if `--help` appears inside a
+    // params-JSON literal (e.g. `remote.foo '{"x":"--help"}'`).
+    val first = args.firstOrNull()
+    if (first == "--help" || first == "-h") return null
 
     val env = System.getenv("SPK_EDITOR_PAIRING_URL")?.takeIf { it.isNotBlank() }
 
-    // Heuristic: an argv that starts with `spk-remote://` is the pairing URL.
+    // Heuristic: an argv that starts with the pairing URL scheme is the pairing URL.
     // Otherwise, fall back to the env var and treat argv[0] as the method.
     val (pairing, rest) = when {
-        args.isNotEmpty() && args[0].startsWith("spk-remote://") ->
+        args.isNotEmpty() && args[0].startsWith("${PairingUrl.SCHEME}://") ->
             args[0] to args.drop(1)
         env != null ->
             env to args
