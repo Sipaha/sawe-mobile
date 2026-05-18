@@ -421,13 +421,18 @@ private fun ChatBubble(entry: EntrySummary) {
     when (role) {
         EntryRole.User -> UserBubble(entry = entry)
         EntryRole.Assistant -> {
-            // Skip empty assistant turns — when the model only produces
-            // tool calls in a turn, the per-entry markdown is just the
-            // `## Assistant\n\n` banner with no body. After stripRoleHeading
-            // there's nothing to show, but a padded Surface still draws an
-            // empty gray rectangle. Drop the bubble entirely instead.
-            val body = stripRoleHeading(entry.markdown ?: entry.preview)
-            if (body.isNotBlank()) AssistantBubble(entry = entry)
+            // Skip assistant turns whose body is effectively invisible:
+            //  - tool-call-only turns produce `## Assistant\n\n\n\n` (no
+            //    chunks at all);
+            //  - thought-only turns produce `## Assistant\n\n<thinking>…
+            //    </thinking>\n\n` and our markdown widget silently
+            //    swallows the unknown HTML tag, drawing a padded gray
+            //    rectangle with nothing in it.
+            // Strip the role banner, strip `<thinking>…</thinking>`
+            // blocks, then check what's left.
+            if (hasVisibleAssistantBody(entry.markdown ?: entry.preview)) {
+                AssistantBubble(entry = entry)
+            }
         }
         EntryRole.ToolCall -> {
             val tc = entry.toolCall
@@ -835,6 +840,32 @@ private fun CenteredAnnotatedBubble(
 // stripRoleHeading is defined in :core (RemoteDtos.kt) so the optimistic-
 // bubble dedupe in MainViewModel.reconcileOptimistic can share the same
 // normalisation that this file applies to rendering.
+
+/**
+ * Does this assistant entry have anything visible to render?
+ *
+ * The upstream `acp_thread::AssistantMessage::to_markdown` always wraps
+ * the chunks in `"## Assistant\n\n{chunks}\n\n"`, so an empty chunks list
+ * still produces a non-empty markdown string. And a chunks list that
+ * contains only `<thinking>` blocks looks non-blank but renders nothing
+ * — our markdown widget treats `<thinking>` as raw HTML and drops it.
+ *
+ * Returns false when both filters strip everything away. The dispatch
+ * site at [ChatBubble] skips the bubble entirely in that case, so the
+ * user doesn't see a padded gray rectangle with no content inside.
+ */
+private fun hasVisibleAssistantBody(raw: String): Boolean {
+    val stripped = stripRoleHeading(raw)
+    return THINKING_BLOCK.replace(stripped, "").isNotBlank()
+}
+
+// `[\s\S]` matches across newlines so multi-line `<thinking>` payloads
+// are removed in one pass. The lazy `*?` keeps each match minimal so two
+// thinking blocks in the same body each shed independently.
+private val THINKING_BLOCK = Regex(
+    pattern = """<thinking>[\s\S]*?</thinking>""",
+    options = setOf(RegexOption.IGNORE_CASE),
+)
 
 /**
  * 44 dp content-height app bar — replaces M3's stock `TopAppBar`, which
