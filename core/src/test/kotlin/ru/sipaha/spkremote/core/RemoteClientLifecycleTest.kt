@@ -193,6 +193,12 @@ class RemoteClientLifecycleTest {
         connectAndHandshake(client, factory)
         factory.latest().closeFromServer()
         runCurrent()
+        // Baseline frame count after the initial handshake completes
+        // (which itself emits one JSON response frame on the first
+        // transport). The assertion below is "no NEW frames went out
+        // while we were disconnected"; without a baseline it would
+        // false-positive on the handshake-response frame.
+        val sentBefore = factory.transports.sumOf { it.sent.size }
 
         // Queue a call while disconnected (we're in Reconnecting now).
         val callJob = async {
@@ -206,8 +212,8 @@ class RemoteClientLifecycleTest {
             )
         }
         runCurrent()
-        val sent1 = factory.transports.sumOf { it.sent.size }
-        assertEquals(0, sent1, "no send during reconnect: $sent1")
+        val sentAfter = factory.transports.sumOf { it.sent.size }
+        assertEquals(sentBefore, sentAfter, "no send during reconnect")
 
         // Advance past backoff to start the next attempt; then complete its handshake.
         advanceTimeBy(150L)

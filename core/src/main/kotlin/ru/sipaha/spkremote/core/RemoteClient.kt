@@ -28,6 +28,8 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
@@ -680,56 +682,76 @@ class RemoteClient internal constructor(
     ) : RemoteTransportListener {
 
         override fun onBinary(bytes: ByteArray) {
-            val tx = transport ?: return
-            when (ref.stage) {
-                HandshakeStage.AwaitingNonce -> {
-                    if (bytes.size != HmacChallengeAuth.NONCE_LEN) {
-                        completeTerminal(
-                            ConnectFailure.ProtocolError(
-                                "expected ${HmacChallengeAuth.NONCE_LEN}-byte nonce, got ${bytes.size}B " +
-                                    "— peer isn't spk-editor"
-                            )
-                        )
-                        return
-                    }
-                    val response = auth.respond(bytes)
-                    ref.stage = HandshakeStage.AwaitingVerdict
-                    tx.send(response)
-                }
-                HandshakeStage.AwaitingVerdict -> {
-                    if (auth.isAccepted(bytes)) {
-                        ref.stage = HandshakeStage.Established
-                        handshake.complete(AttemptOutcome.Connected)
-                    } else {
-                        completeTerminal(ConnectFailure.AuthRejected())
-                    }
-                }
-                HandshakeStage.Established -> {
-                    // Post-handshake binary frames are unexpected today.
-                }
+            // The R-2 handshake is entirely text/JSON — any binary frame
+            // before Established means the peer speaks a different
+            // protocol. Post-Established the protocol is also text-only
+            // (JSON-RPC) so binary stays unexpected; drop silently to
+            // avoid logging every keep-alive ping payload that might
+            // sneak through.
+            if (ref.stage != HandshakeStage.Established) {
+                completeTransient(
+                    ConnectFailure.ProtocolError(
+                        "unexpected binary frame during handshake — peer isn't spk-editor"
+                    )
+                )
             }
         }
 
         override fun onText(text: String) {
             when (ref.stage) {
-                HandshakeStage.AwaitingVerdict -> {
-                    if (text.trim() == HmacChallengeAuth.VERDICT_OK) {
-                        ref.stage = HandshakeStage.Established
-                        handshake.complete(AttemptOutcome.Connected)
-                    } else {
+                HandshakeStage.AwaitingNonce -> {
+                    val challengeBytes = parseChallengeFrame(text)
+                    if (challengeBytes == null) {
                         completeTerminal(
-                            ConnectFailure.AuthRejected("Server verdict: $text")
+                            ConnectFailure.ProtocolError(
+                                "expected challenge JSON frame, got: " +
+                                    text.take(60)
+                            )
+                        )
+                        return
+                    }
+                    val tx = transport ?: return
+                    val responseBytes = auth.respond(challengeBytes)
+                    val responseFrame = JsonRpc.json.encodeToString(
+                        HandshakeResponseFrame.serializer(),
+                        HandshakeResponseFrame(response = HexCodec.encode(responseBytes)),
+                    )
+                    ref.stage = HandshakeStage.AwaitingVerdict
+                    tx.send(responseFrame)
+                }
+                HandshakeStage.AwaitingVerdict -> {
+                    val obj = runCatching { JsonRpc.json.parseToJsonElement(text).jsonObject }
+                        .getOrNull()
+                    val type = obj?.get("type")?.jsonPrimitive?.contentOrNull
+                    when (type) {
+                        "welcome" -> {
+                            ref.stage = HandshakeStage.Established
+                            handshake.complete(AttemptOutcome.Connected)
+                        }
+                        else -> completeTerminal(
+                            ConnectFailure.AuthRejected(
+                                "Unexpected handshake response: ${text.take(60)}"
+                            )
                         )
                     }
                 }
                 HandshakeStage.Established -> dispatchJsonRpc(text)
-                HandshakeStage.AwaitingNonce ->
-                    completeTransient(
-                        ConnectFailure.ProtocolError(
-                            "got text frame before the nonce — peer isn't spk-editor"
-                        )
-                    )
             }
+        }
+
+        /**
+         * Parse a `{"type":"challenge","challenge":"<hex>","v":1}` frame
+         * and return the decoded 16-byte challenge. Returns null on any
+         * shape mismatch — caller turns null into a ProtocolError.
+         */
+        private fun parseChallengeFrame(text: String): ByteArray? {
+            val obj = runCatching { JsonRpc.json.parseToJsonElement(text).jsonObject }
+                .getOrNull() ?: return null
+            val type = obj["type"]?.jsonPrimitive?.contentOrNull
+            if (type != "challenge") return null
+            val hex = obj["challenge"]?.jsonPrimitive?.contentOrNull ?: return null
+            val bytes = runCatching { HexCodec.decode(hex) }.getOrNull() ?: return null
+            return bytes.takeIf { it.size == HmacChallengeAuth.NONCE_LEN }
         }
 
         override fun onFailure(t: Throwable) {
@@ -791,6 +813,16 @@ class RemoteClient internal constructor(
     // ---------------------------------------------------------------------
 
     internal enum class HandshakeStage { AwaitingNonce, AwaitingVerdict, Established }
+
+    /**
+     * Wire shape for the response side of the handshake. See
+     * [HmacChallengeAuth] kdoc for the full three-frame protocol.
+     */
+    @Serializable
+    private data class HandshakeResponseFrame(
+        val type: String = "response",
+        val response: String,
+    )
 
     private sealed interface AttemptOutcome {
         data object Connected : AttemptOutcome

@@ -71,17 +71,19 @@ class HmacChallengeAuthTest {
     }
 
     @Test
-    fun `parses verdict OK`() {
-        val auth = HmacChallengeAuth(ByteArray(32))
-        assertTrue(auth.isAccepted("OK".toByteArray(Charsets.US_ASCII)))
-        assertTrue(auth.isAccepted("OK\n".toByteArray(Charsets.US_ASCII)))
+    fun `HexCodec round-trips arbitrary bytes`() {
+        val raw = ByteArray(32) { it.toByte() }
+        val hex = HexCodec.encode(raw)
+        assertContentEquals(raw, HexCodec.decode(hex))
+        // 32 raw bytes → 64 hex chars (lowercase).
+        kotlin.test.assertEquals(64, hex.length)
+        kotlin.test.assertEquals(hex, hex.lowercase())
     }
 
     @Test
-    fun `parses verdict REJECT`() {
-        val auth = HmacChallengeAuth(ByteArray(32))
-        assertFalse(auth.isAccepted("REJECT".toByteArray(Charsets.US_ASCII)))
-        assertFalse(auth.isAccepted("ok".toByteArray(Charsets.US_ASCII))) // case sensitive
+    fun `HexCodec accepts mixed case input`() {
+        val raw = HexCodec.decode("CAFEBABE")
+        assertContentEquals(byteArrayOf(0xCA.toByte(), 0xFE.toByte(), 0xBA.toByte(), 0xBE.toByte()), raw)
     }
 
     private fun hexToBytes(hex: String): ByteArray {

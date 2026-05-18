@@ -52,27 +52,29 @@ internal class FakeRemoteTransport(
     }
 
     /**
-     * Walk the listener through a full nonce/verdict handshake. Uses the
-     * pairing secret to compute the HMAC the client must produce; then
-     * asserts the client's reply matches and emits the `OK` verdict.
+     * Walk the listener through the full text/JSON handshake — same
+     * three-frame protocol the real R-2 server uses:
+     *   1. Server → text: `{"type":"challenge","challenge":"<hex>","v":1}`
+     *   2. Client → text: `{"type":"response","response":"<hex>"}`
+     *   3. Server → text: `{"type":"welcome","client":"<name>"}`
      *
-     * Returns true if the handshake completed successfully on this side
-     * (client produced the right HMAC).
+     * Returns true if the handshake completed successfully (client's
+     * response hex matches the HMAC we expect).
      */
     fun completeHandshake(): Boolean {
-        // Nonce stage — fixed pseudo-random 16 bytes so test asserts are
-        // deterministic.
         val nonce = ByteArray(HmacChallengeAuth.NONCE_LEN) { (it + 1).toByte() }
-        listener.onBinary(nonce)
-        // Give the listener a tick to compute + dispatch its response.
-        // The listener is synchronous in our fake so by the time onBinary
-        // returns, the client's send() has happened.
-        val lastBinary = sentBinary.lastOrNull() ?: return false
-        val expected = expectedHmac(pairingUrl.secret, nonce)
-        if (!lastBinary.contentEquals(expected)) return false
-        // Send the OK verdict — either as ASCII text (the common path) or
-        // as a binary 32-byte echo. We send text since most tests prefer it.
-        listener.onText(HmacChallengeAuth.VERDICT_OK)
+        val challengeHex = HexCodec.encode(nonce)
+        val challengeFrame =
+            """{"type":"challenge","challenge":"$challengeHex","v":1}"""
+        listener.onText(challengeFrame)
+        // The listener is synchronous in our fake — by the time onText
+        // returns, the client has sent its response.
+        val lastText = sent.lastOrNull() ?: return false
+        val expectedHmac = expectedHmac(pairingUrl.secret, nonce)
+        val expectedHex = HexCodec.encode(expectedHmac)
+        val expectedResponse = """{"type":"response","response":"$expectedHex"}"""
+        if (lastText != expectedResponse) return false
+        listener.onText("""{"type":"welcome","client":"${pairingUrl.client}"}""")
         return true
     }
 
