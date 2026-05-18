@@ -22,6 +22,7 @@ import ru.sipaha.spkremote.app.data.PairingRepository
 import ru.sipaha.spkremote.core.AgentSummary
 import ru.sipaha.spkremote.core.ConnectionState
 import ru.sipaha.spkremote.core.CreateSessionResult
+import ru.sipaha.spkremote.core.GetSolutionResult
 import ru.sipaha.spkremote.core.EntrySummary
 import ru.sipaha.spkremote.core.GetSessionChildrenResult
 import ru.sipaha.spkremote.core.GetSessionResult
@@ -227,6 +228,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private val _agents = MutableStateFlow<UiData<List<AgentSummary>>>(UiData.Loading)
     val agents: StateFlow<UiData<List<AgentSummary>>> = _agents.asStateFlow()
+
+    /**
+     * Per-solution details (members + window) fetched on-demand. The
+     * new-session dialog uses this to populate the worktree dropdown
+     * for solutions with ≥ 2 member projects.
+     */
+    private val _solutionDetails = MutableStateFlow<UiData<GetSolutionResult>>(UiData.Loading)
+    val solutionDetails: StateFlow<UiData<GetSolutionResult>> = _solutionDetails.asStateFlow()
 
     /** True while a `create_session` (possibly with auto-open retry) is in flight. */
     private val _createSessionInFlight = MutableStateFlow(false)
@@ -1573,6 +1582,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Fetch a single solution's full record (id + name + root + members)
+     * via `remote.solutions.get`. Drives the worktree-root picker in the
+     * new-session dialog when the solution has 2+ members.
+     */
+    fun loadSolutionDetails(solutionId: String) {
+        val active = client
+        if (active == null) {
+            _solutionDetails.value = UiData.Error(notConnectedMessage())
+            return
+        }
+        _solutionDetails.value = UiData.Loading
+        val params = buildJsonObject { put("solution_id", solutionId) }
+        viewModelScope.launch {
+            runCatching { active.call("remote.solutions.get", params) }
+                .mapCatching { resp ->
+                    val err = resp.error
+                    if (err != null) error(err.message)
+                    val toolErr = resp.toolError()
+                    if (toolErr != null) error(toolErr)
+                    val result = resp.structuredContent() ?: error("missing structuredContent")
+                    JsonRpc.json.decodeFromJsonElement(GetSolutionResult.serializer(), result)
+                }
+                .onSuccess { _solutionDetails.value = UiData.Loaded(it) }
+                .onFailure { _solutionDetails.value = UiData.Error(it.message ?: "unknown error") }
+        }
+    }
+
+    /**
      * Create a new session for [solutionId] backed by [agentId].
      *
      * Production behaviour: if the desktop reports
@@ -1596,6 +1633,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         solutionId: String,
         agentId: String,
         initialMessage: String?,
+        title: String?,
+        cwd: String?,
         onCreated: (sessionId: String) -> Unit,
     ) {
         val active = client
@@ -1607,7 +1646,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _createSessionInFlight.value = true
         _lastCreateAutoOpened.value = false
         viewModelScope.launch {
-            val firstAttempt = attemptCreateSession(active, solutionId, agentId, initialMessage)
+            val firstAttempt = attemptCreateSession(active, solutionId, agentId, initialMessage, title, cwd)
             firstAttempt
                 .onSuccess { sessionId ->
                     _createSessionInFlight.value = false
@@ -1623,7 +1662,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             _sendError.tryEmit("Couldn't open solution: $openErr")
                             return@launch
                         }
-                        val retry = attemptCreateSession(active, solutionId, agentId, initialMessage)
+                        val retry = attemptCreateSession(active, solutionId, agentId, initialMessage, title, cwd)
                         retry
                             .onSuccess { sessionId ->
                                 _lastCreateAutoOpened.value = true
@@ -1654,12 +1693,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         solutionId: String,
         agentId: String,
         initialMessage: String?,
+        title: String?,
+        cwd: String?,
     ): Result<String> {
         val params = buildJsonObject {
             put("solution_id", solutionId)
             put("agent_id", agentId)
             if (!initialMessage.isNullOrBlank()) {
                 put("initial_message", initialMessage)
+            }
+            if (!title.isNullOrBlank()) {
+                put("title", title)
+            }
+            if (!cwd.isNullOrBlank()) {
+                put("cwd", cwd)
             }
         }
         return runCatching {
@@ -1672,6 +1719,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             JsonRpc.json
                 .decodeFromJsonElement(CreateSessionResult.serializer(), result)
                 .sessionId
+        }
+    }
+
+    /**
+     * Rename a session via the new `solution_agent.rename_session` MCP
+     * tool. Best-effort: surfaces failures through [sendError] but does
+     * NOT optimistically mutate any local state — the server emits an
+     * `agent_session_title_changed` notification which the subscribers
+     * (sessions list refresh + active session re-poll) already wire up.
+     */
+    fun renameSession(sessionId: String, newTitle: String) {
+        val active = client
+        if (active == null) {
+            _sendError.tryEmit(notConnectedMessage())
+            return
+        }
+        val trimmed = newTitle.trim()
+        if (trimmed.isEmpty()) {
+            _sendError.tryEmit("Session title can't be empty")
+            return
+        }
+        val params = buildJsonObject {
+            put("session_id", sessionId)
+            put("title", trimmed)
+        }
+        viewModelScope.launch {
+            runCatching { active.call("remote.solution_agent.rename_session", params) }
+                .mapCatching { resp ->
+                    val err = resp.error
+                    if (err != null) error(err.message)
+                    val toolErr = resp.toolError()
+                    if (toolErr != null) error(toolErr)
+                }
+                .onFailure { _sendError.tryEmit("Couldn't rename session: ${it.message ?: "?"}") }
         }
     }
 

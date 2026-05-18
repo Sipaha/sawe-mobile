@@ -205,11 +205,13 @@ fun SessionDetailScreen(
         .orEmpty()
     val showChipRow = parentId != null || children.isNotEmpty()
 
+    var showRenameDialog by rememberSaveable { mutableStateOf(false) }
     Scaffold(
         topBar = {
             SlimTopBar(
                 title = displayTitle,
                 onBack = onBack,
+                onTitleClick = { if (sessionState is UiData.Loaded) showRenameDialog = true },
                 trailing = {
                     if (sessionState is UiData.Loaded) {
                         StatePill(state = displayState, raw = rawState)
@@ -275,6 +277,48 @@ fun SessionDetailScreen(
             }
         }
     }
+
+    if (showRenameDialog) {
+        RenameSessionDialog(
+            initialTitle = displayTitle,
+            onDismiss = { showRenameDialog = false },
+            onConfirm = { newTitle ->
+                viewModel.renameSession(sessionId, newTitle)
+                showRenameDialog = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun RenameSessionDialog(
+    initialTitle: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var text by rememberSaveable { mutableStateOf(initialTitle) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename session") },
+        text = {
+            androidx.compose.material3.OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                label = { Text("Session name") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(
+                onClick = { onConfirm(text) },
+                enabled = text.trim().isNotEmpty() && text.trim() != initialTitle,
+            ) { Text("Rename") }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 @Composable
@@ -875,6 +919,7 @@ private val THINKING_BLOCK = Regex(
 private fun SlimTopBar(
     title: String,
     onBack: () -> Unit,
+    onTitleClick: (() -> Unit)? = null,
     trailing: @Composable RowScope.() -> Unit = {},
 ) {
     Surface(
@@ -892,14 +937,16 @@ private fun SlimTopBar(
             IconButton(onClick = onBack, modifier = Modifier.size(40.dp)) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
             }
+            val titleModifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 4.dp)
+                .let { if (onTitleClick != null) it.clickable(onClick = onTitleClick) else it }
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleSmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(horizontal = 4.dp),
+                modifier = titleModifier,
             )
             trailing()
             Spacer(Modifier.padding(end = 8.dp))

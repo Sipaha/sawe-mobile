@@ -27,6 +27,45 @@ data class SolutionSummary(
 @Serializable
 data class ListSolutionsResult(val solutions: List<SolutionSummary>)
 
+/**
+ * One member project inside a Solution as returned by `solutions.get`.
+ * The dialog flow uses [localPath] to feed `create_session.cwd` so the
+ * agent subprocess starts in the right worktree.
+ */
+@Serializable
+data class SolutionMember(
+    @SerialName("catalog_id") val catalogId: String,
+    @SerialName("local_path") val localPath: String,
+    val status: String,
+)
+
+/**
+ * Per-window snapshot included in `solutions.get`. The phone uses this
+ * only to detect "solution is already open on the desktop" cases.
+ */
+@Serializable
+data class SolutionWindow(
+    @SerialName("window_id") val windowId: String,
+    val focused: Boolean,
+    @SerialName("worktree_paths") val worktreePaths: List<String> = emptyList(),
+    @SerialName("active_buffer") val activeBuffer: String? = null,
+)
+
+@Serializable
+data class SolutionDetails(
+    val id: String,
+    val name: String,
+    val root: String,
+    val members: List<SolutionMember> = emptyList(),
+    @SerialName("last_opened_at") val lastOpenedAt: String? = null,
+)
+
+@Serializable
+data class GetSolutionResult(
+    val solution: SolutionDetails,
+    val window: SolutionWindow? = null,
+)
+
 @Serializable
 data class SessionSummary(
     val id: String,

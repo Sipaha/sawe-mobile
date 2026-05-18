@@ -31,9 +31,17 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.runtime.derivedStateOf
 import ru.sipaha.spkremote.app.vm.MainViewModel
 import ru.sipaha.spkremote.app.vm.UiData
 import ru.sipaha.spkremote.core.AgentSummary
+import ru.sipaha.spkremote.core.SolutionMember
 
 /**
  * "New session" dialog launched from [SolutionDetailScreen]'s FAB.
@@ -63,17 +71,33 @@ fun NewSessionDialog(
     onCreated: (String) -> Unit,
 ) {
     val agentsState by viewModel.agents.collectAsState()
+    val solutionDetailsState by viewModel.solutionDetails.collectAsState()
     val inFlight by viewModel.createSessionInFlight.collectAsState()
     val autoOpened by viewModel.lastCreateAutoOpened.collectAsState()
     val scope = rememberCoroutineScope()
 
-    // Trigger loadAgents exactly once for this dialog instance. We do NOT
-    // re-key on agentsState — that would relaunch on every state flip and
-    // thrash list_agents requests against the server.
-    LaunchedEffect(Unit) { viewModel.loadAgents() }
+    // Trigger loadAgents + loadSolutionDetails exactly once for this
+    // dialog instance. We do NOT re-key on the state flows — that would
+    // relaunch on every flip and thrash the server with duplicate calls.
+    LaunchedEffect(Unit) {
+        viewModel.loadAgents()
+        viewModel.loadSolutionDetails(solutionId)
+    }
 
     var selectedAgentId by rememberSaveable { mutableStateOf<String?>(null) }
     var initialMessage by rememberSaveable { mutableStateOf("") }
+    var sessionTitle by rememberSaveable { mutableStateOf("") }
+    var selectedCwd by rememberSaveable { mutableStateOf<String?>(null) }
+    val members: List<SolutionMember> = (solutionDetailsState as? UiData.Loaded)
+        ?.value?.solution?.members.orEmpty()
+    // Auto-pick the first member as the default cwd, so single-member
+    // solutions don't show a redundant dropdown. The picker UI itself is
+    // hidden below when members.size < 2.
+    LaunchedEffect(members) {
+        if (selectedCwd == null && members.isNotEmpty()) {
+            selectedCwd = members.first().localPath
+        }
+    }
 
     // Pre-select the first agent when the list lands (or refreshes). We
     // re-run the auto-pick whenever the loaded list changes so a user
@@ -115,6 +139,28 @@ fun NewSessionDialog(
                     onSelected = { selectedAgentId = it },
                 )
 
+                if (members.size >= 2) {
+                    Text(
+                        text = "Working directory",
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                    CwdPicker(
+                        members = members,
+                        selectedPath = selectedCwd,
+                        enabled = !inFlight,
+                        onSelected = { selectedCwd = it },
+                    )
+                }
+
+                OutlinedTextField(
+                    value = sessionTitle,
+                    onValueChange = { sessionTitle = it },
+                    label = { Text("Session name (optional)") },
+                    enabled = !inFlight,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
                 OutlinedTextField(
                     value = initialMessage,
                     onValueChange = { initialMessage = it },
@@ -142,8 +188,10 @@ fun NewSessionDialog(
             TextButton(
                 onClick = {
                     val agentId = selectedAgentId ?: return@TextButton
-                    val trimmed = initialMessage.trim().ifBlank { null }
-                    viewModel.createSession(solutionId, agentId, trimmed, onCreated)
+                    val msg = initialMessage.trim().ifBlank { null }
+                    val title = sessionTitle.trim().ifBlank { null }
+                    val cwd = selectedCwd
+                    viewModel.createSession(solutionId, agentId, msg, title, cwd, onCreated)
                 },
                 enabled = canCreate,
             ) {
@@ -252,4 +300,77 @@ private fun AgentPicker(
     }
     // Spacer so RadioButton rows don't kiss the OutlinedTextField directly.
     Box(modifier = Modifier.padding(top = 4.dp))
+}
+
+/**
+ * Dropdown for selecting which solution member's local path the new
+ * session should run inside. Only rendered when the solution has 2+
+ * members — for single-member solutions the auto-selected first
+ * member is already the only option.
+ *
+ * Visual: trigger looks like an OutlinedTextField with a trailing
+ * chevron; tapping opens the DropdownMenu with one item per member,
+ * showing the catalog name + a truncated path under it.
+ */
+@Composable
+private fun CwdPicker(
+    members: List<SolutionMember>,
+    selectedPath: String?,
+    enabled: Boolean,
+    onSelected: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedMember by remember(selectedPath, members) {
+        derivedStateOf {
+            members.firstOrNull { it.localPath == selectedPath } ?: members.firstOrNull()
+        }
+    }
+    Box(modifier = Modifier.fillMaxWidth()) {
+        OutlinedTextField(
+            value = selectedMember?.catalogId.orEmpty(),
+            onValueChange = {},
+            readOnly = true,
+            enabled = enabled,
+            singleLine = true,
+            label = { Text("Member") },
+            trailingIcon = {
+                Icon(
+                    imageVector = Icons.Filled.KeyboardArrowDown,
+                    contentDescription = "Open member picker",
+                )
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .selectable(
+                    selected = true,
+                    enabled = enabled,
+                    role = Role.RadioButton,
+                    onClick = { expanded = true },
+                ),
+        )
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            for (m in members) {
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(m.catalogId, style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                m.localPath,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    onClick = {
+                        expanded = false
+                        onSelected(m.localPath)
+                    },
+                )
+            }
+        }
+    }
 }
