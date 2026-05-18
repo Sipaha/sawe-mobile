@@ -241,9 +241,22 @@ class RemoteClient internal constructor(
     /**
      * Fire a JSON-RPC call now, expecting the wire to be live. If the
      * transport is closed or refuses the frame, fails with
-     * [IllegalStateException]. Most call sites should prefer [queueCall].
+     * [NotConnectedException]. If the server doesn't reply within
+     * [timeoutMs] (default [DEFAULT_CALL_TIMEOUT_MS] = 30s), fails with
+     * [kotlinx.coroutines.TimeoutCancellationException] — without this
+     * a broken server / allow-list miss / dead proxy could hang the UI
+     * spinner indefinitely.
+     *
+     * Most call sites that produce user-typed messages should prefer
+     * [queueCall] which handles the disconnected case + persistence.
      */
-    suspend fun call(method: String, params: JsonElement? = null): JsonRpcResponse {
+    suspend fun call(
+        method: String,
+        params: JsonElement? = null,
+        timeoutMs: Long = DEFAULT_CALL_TIMEOUT_MS,
+    ): JsonRpcResponse = withTimeout(timeoutMs) { callInternal(method, params) }
+
+    private suspend fun callInternal(method: String, params: JsonElement?): JsonRpcResponse {
         val active = transport ?: throw NotConnectedException(lastConnectFailure)
         val id = nextId.getAndIncrement()
         val deferred = CompletableDeferred<JsonRpcResponse>()
@@ -828,5 +841,16 @@ class RemoteClient internal constructor(
          * intent's stale, the user notices the bubble and edits.
          */
         const val DEFAULT_QUEUE_TTL_MS: Long = 24L * 60L * 60L * 1_000L
+
+        /**
+         * Default per-call timeout for [call]. Without this a broken /
+         * stuck server post-handshake would hang any RPC indefinitely —
+         * the UI spinner waiting on the result would stay forever. 30s
+         * is generous for chat-shaped operations (the longest realistic
+         * one is `solution_agent.create_session` which spawns an agent
+         * subprocess) and short enough that the user can tell something
+         * went wrong and tap a retry button.
+         */
+        const val DEFAULT_CALL_TIMEOUT_MS: Long = 30_000L
     }
 }
