@@ -306,6 +306,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Edit the host / port / label of an existing paired server without
+     * re-pairing. Secret + fingerprint + client name come from the
+     * existing pairing URL — only the address and the user-facing label
+     * change. Used when the server's public IP rotates, when the
+     * port-forward moves, or just to give a paired server a friendlier
+     * name.
+     *
+     * Returns `null` on success; a short error string when the new
+     * host:port combination doesn't produce a parseable URL. The caller
+     * (an [EditServerDialog]) surfaces the error inline.
+     *
+     * If [serverId] is the active server, the connection is restarted
+     * against the new address.
+     */
+    fun editServer(
+        serverId: String,
+        label: String,
+        host: String,
+        port: Int,
+    ): String? {
+        val existing = pairingRepository.get(serverId)
+            ?: return "Server not found."
+        val trimmedHost = host.trim()
+        if (trimmedHost.isEmpty()) return "Host can't be empty."
+        if (port !in 1..65_535) return "Port must be 1..65535."
+
+        // Preserve the query string (secret, client, server_fp, plus any
+        // future params) verbatim — we only rewrite the authority.
+        val query = existing.pairingUrl.substringAfter('?', "")
+        if (query.isEmpty()) return "Existing pairing has no query — re-pair from scratch."
+        val newUrl = "${PairingUrl.SCHEME}://$trimmedHost:$port?$query"
+
+        // Round-trip through the parser to catch any invalid hostname
+        // characters before we persist.
+        PairingUrl.parse(newUrl).getOrElse {
+            return "Address invalid: ${it.message}"
+        }
+
+        val newLabel = label.trim().ifEmpty { "$trimmedHost:$port" }
+        val updated = existing.copy(pairingUrl = newUrl, label = newLabel)
+        pairingRepository.upsert(updated)
+        _pairedServers.value = pairingRepository.loadAll()
+
+        // If this is the active server, reconnect against the new address.
+        // switchToServer no-ops on (active && client != null), so we tear
+        // down explicitly to force a fresh connect attempt.
+        if (_activeServerId.value == serverId) {
+            tearDownConnection()
+            _activeServerId.value = null   // make switchToServer treat us as a new bind
+            switchToServer(serverId)
+        }
+        return null
+    }
+
+    /**
      * Switch the active connection to [serverId]: tear down the
      * existing [RemoteClient], reset per-session UI caches, and connect
      * to the new server's pairing URL.

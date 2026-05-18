@@ -81,6 +81,8 @@ fun SettingsScreen(
     val context = LocalContext.current
 
     var showForgetDialog by remember { mutableStateOf(false) }
+    var showEditDialog by remember { mutableStateOf(false) }
+    val activeServer = pairedServers.firstOrNull { it.id == activeServerId }
 
     val otherServers = pairedServers.filter { it.id != activeServerId }
 
@@ -128,6 +130,11 @@ fun SettingsScreen(
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("Switch server (${pairedServers.size} paired)") }
                 }
+                OutlinedButton(
+                    onClick = { showEditDialog = true },
+                    enabled = activeServer != null,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Edit address / label") }
                 OutlinedButton(
                     onClick = { showForgetDialog = true },
                     modifier = Modifier.fillMaxWidth(),
@@ -204,6 +211,16 @@ fun SettingsScreen(
                 },
             )
         }
+    }
+
+    if (showEditDialog && activeServer != null) {
+        EditServerDialog(
+            current = activeServer,
+            onDismiss = { showEditDialog = false },
+            onSave = { newLabel, newHost, newPort ->
+                viewModel.editServer(activeServer.id, newLabel, newHost, newPort)
+            },
+        )
     }
 
     if (showForgetDialog) {
