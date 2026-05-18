@@ -400,7 +400,8 @@ class RemoteClient internal constructor(
         if (err != null) {
             error("get_session_entry failed: ${err.message}")
         }
-        val result = response.result ?: error("get_session_entry returned no result")
+        val result = response.structuredContent()
+            ?: error("get_session_entry returned no structuredContent")
         return JsonRpc.json.decodeFromJsonElement(GetSessionEntryResult.serializer(), result)
     }
 

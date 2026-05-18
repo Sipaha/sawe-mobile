@@ -402,7 +402,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             runCatching { newClient.call("remote.editor.capabilities") }
                 .onSuccess { resp ->
-                    val version = (resp.result as? JsonObject)
+                    val version = (resp.structuredContent() as? JsonObject)
                         ?.get("protocol_version")
                         ?.jsonPrimitive
                         ?.content
@@ -694,7 +694,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .mapCatching { resp ->
                     val err = resp.error
                     if (err != null) error(err.message)
-                    val result = resp.result ?: error("missing result")
+                    val result = resp.structuredContent() ?: error("missing structuredContent")
                     JsonRpc.json
                         .decodeFromJsonElement(ListSolutionsResult.serializer(), result)
                         .solutions
@@ -722,7 +722,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .mapCatching { resp ->
                     val err = resp.error
                     if (err != null) error(err.message)
-                    val result = resp.result ?: error("missing result")
+                    val result = resp.structuredContent() ?: error("missing structuredContent")
                     JsonRpc.json
                         .decodeFromJsonElement(ListSessionsResult.serializer(), result)
                         .sessions
@@ -941,7 +941,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .mapCatching { resp ->
                     val err = resp.error
                     if (err != null) error(err.message)
-                    val result = resp.result ?: error("missing result")
+                    val result = resp.structuredContent() ?: error("missing structuredContent")
                     JsonRpc.json.decodeFromJsonElement(
                         GetSessionChildrenResult.serializer(),
                         result,
@@ -1037,7 +1037,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .mapCatching { resp ->
                 val err = resp.error
                 if (err != null) error(err.message)
-                val result = resp.result ?: error("missing result")
+                val result = resp.structuredContent() ?: error("missing structuredContent")
                 JsonRpc.json.decodeFromJsonElement(GetSessionResult.serializer(), result)
             }
             .onSuccess { result ->
@@ -1079,7 +1079,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .mapCatching { resp ->
                 val err = resp.error
                 if (err != null) error(err.message)
-                val result = resp.result ?: error("missing result")
+                val result = resp.structuredContent() ?: error("missing structuredContent")
                 JsonRpc.json.decodeFromJsonElement(GetSessionResult.serializer(), result)
             }
             .onSuccess { result ->
@@ -1142,7 +1142,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .mapCatching { resp ->
                     val err = resp.error
                     if (err != null) error(err.message)
-                    val result = resp.result ?: error("missing result")
+                    val result = resp.structuredContent() ?: error("missing structuredContent")
                     JsonRpc.json.decodeFromJsonElement(GetSessionResult.serializer(), result)
                 }
                 .onSuccess { result ->
@@ -1226,7 +1226,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .mapCatching { resp ->
                     val err = resp.error
                     if (err != null) error(err.message)
-                    val result = resp.result ?: error("missing result")
+                    val result = resp.structuredContent() ?: error("missing structuredContent")
                     JsonRpc.json.decodeFromJsonElement(GetSessionResult.serializer(), result)
                 }
                 .onSuccess { result ->
@@ -1310,7 +1310,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .mapCatching { resp ->
                     val err = resp.error
                     if (err != null) error(err.message)
-                    val result = resp.result ?: error("missing result")
+                    val result = resp.structuredContent() ?: error("missing structuredContent")
                     JsonRpc.json.decodeFromJsonElement(GetSessionResult.serializer(), result)
                 }
                 .onSuccess { result ->
@@ -1439,7 +1439,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .mapCatching { resp ->
                     val err = resp.error
                     if (err != null) error(err.message)
-                    val result = resp.result ?: error("missing result")
+                    val result = resp.structuredContent() ?: error("missing structuredContent")
                     JsonRpc.json
                         .decodeFromJsonElement(ListAgentsResult.serializer(), result)
                         .agents
@@ -1543,7 +1543,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val resp = active.call("remote.solution_agent.create_session", params)
             val err = resp.error
             if (err != null) error(err.message)
-            val result = resp.result ?: error("missing result")
+            val result = resp.structuredContent() ?: error("missing structuredContent")
             JsonRpc.json
                 .decodeFromJsonElement(CreateSessionResult.serializer(), result)
                 .sessionId

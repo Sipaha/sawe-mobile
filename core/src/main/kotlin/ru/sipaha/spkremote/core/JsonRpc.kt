@@ -4,6 +4,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 
 /**
  * JSON-RPC 2.0 envelopes spoken between the Android client and the editor's
@@ -48,6 +49,28 @@ data class JsonRpcResponse(
     val error: JsonRpcError? = null,
 ) {
     val isSuccess: Boolean get() = error == null && result != null
+
+    /**
+     * The R-4 server-side proxy wraps every `remote.X.Y` call in an
+     * MCP `tools/call { name, arguments }` envelope and passes the
+     * response back through verbatim. So `result` carries the
+     * `CallToolResponse` shape — `{content, isError, structuredContent,
+     * meta}` — and the actual tool result our DTOs deserialise into is
+     * one level deeper at `structuredContent`.
+     *
+     * Returns null when:
+     *   - the call errored (callers should check [error] first),
+     *   - the tool produced no structured output (some tools only
+     *     return free-form `content` text),
+     *   - the server response is malformed (unlikely — pre-R-4 we'd
+     *     have crashed at decode-time).
+     *
+     * See `docs/findings/2026-05-remote-control-r4-mcp-envelope.md`.
+     */
+    fun structuredContent(): JsonElement? {
+        val obj = result as? JsonObject ?: return null
+        return obj["structuredContent"]
+    }
 }
 
 object JsonRpc {
