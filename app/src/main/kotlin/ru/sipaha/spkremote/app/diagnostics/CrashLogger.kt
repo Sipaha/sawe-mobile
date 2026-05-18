@@ -122,7 +122,7 @@ object CrashLogger {
         } ?: "unknown"
 
         val sw = StringWriter()
-        sw.append("# spk-editor-android-client crash report\n")
+        sw.append("# spk-editor-mobile crash report\n")
         sw.append("time: $timestampIso\n")
         sw.append("app:  $versionName ($versionCode)\n")
         sw.append("device: ${Build.MANUFACTURER} ${Build.MODEL}\n")

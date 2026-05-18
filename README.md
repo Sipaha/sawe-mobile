@@ -1,4 +1,4 @@
-# spk-editor-android-client
+# spk-editor-mobile
 
 The mobile companion for [SPK Editor](https://github.com/Sipaha/spk-editor) —
 pair via QR, see your open solutions and AI sessions, send messages and watch
@@ -16,7 +16,7 @@ in the spk-editor main repo. The roadmap docs that drove this client live there
 ## Modules
 
 ```
-spk-editor-android-client/
+spk-editor-mobile/
   core/   # Pure JVM library (Kotlin). Pairing URL parsing, TLS pinning,
           # HMAC handshake, JSON-RPC envelope, reconnect with backoff,
           # outbound queue. JDK-only, no Android dependencies — easy to
