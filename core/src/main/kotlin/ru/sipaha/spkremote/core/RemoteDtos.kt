@@ -344,7 +344,7 @@ fun parseDisplayState(raw: String): DisplayState = when {
  * matches the upstream-emitted set. Anything else (a model-written
  * `## Step 1`) is preserved verbatim.
  */
-fun stripRoleHeading(md: String): String = ROLE_HEADING_REGEX.replaceFirst(md, "").trimStart()
+fun stripRoleHeading(md: String): String = ROLE_HEADING_REGEX.replaceFirst(md, "").trim()
 
 private val ROLE_HEADING_REGEX = Regex(
     pattern = """^\s*##\s+(?:User(?:\s+\(checkpoint\))?|Assistant|Plan|Tool|System)\s*\n+""",
