@@ -42,6 +42,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import ru.sipaha.spkremote.app.vm.MainViewModel
 import ru.sipaha.spkremote.app.vm.UiData
+import ru.sipaha.spkremote.core.ConnectionState
 import ru.sipaha.spkremote.core.DisplayState
 import ru.sipaha.spkremote.core.SessionSummary
 import ru.sipaha.spkremote.core.SolutionSummary
@@ -70,6 +71,19 @@ fun SolutionDetailScreen(
         viewModel.refreshSessions(solutionId)
         viewModel.startObservingSessions(solutionId)
         onDispose { viewModel.stopObservingSessions() }
+    }
+
+    // Re-fetch when the connection actually lands. The DisposableEffect
+    // above runs at mount time, but on cold start the async connect
+    // inside switchToServer hasn't finished yet, so that first call
+    // hits the offline-cache fallback and returns without a wire fetch.
+    // Without this observer the sessions list would stay frozen at the
+    // cached (or Loading) state until the user manually pulled.
+    val connectionState by viewModel.rawConnectionState.collectAsState()
+    LaunchedEffect(connectionState) {
+        if (connectionState is ConnectionState.Connected) {
+            viewModel.refreshSessions(solutionId)
+        }
     }
 
     LaunchedEffect(sessionsState) {

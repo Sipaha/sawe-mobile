@@ -705,6 +705,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (activeSession != null) {
                         resumeSession(activeSession)
                     }
+                    // Refresh the solutions list now that we actually have
+                    // a connected client. The Solutions screen's mount-time
+                    // LaunchedEffect runs BEFORE this transition during
+                    // cold start (the connect inside switchToServer is
+                    // async), so without this auto-refresh the list stays
+                    // empty / on Loading until the user taps the refresh
+                    // button.
+                    refreshSolutions()
                     // Stamp last-connected on the active server so the
                     // Servers screen reflects "most recently used" order.
                     _activeServerId.value?.let { sid ->
