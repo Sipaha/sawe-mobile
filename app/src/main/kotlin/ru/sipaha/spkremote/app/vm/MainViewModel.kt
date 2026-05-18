@@ -959,6 +959,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             "agent_session_message_appended",
                             "agent_session_state_changed",
                             "agent_session_created",
+                            "agent_session_title_changed",
                         ),
                     )
                 }
@@ -1025,6 +1026,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         fetchAndReplaceEntry(sessionId, payload.entryIndex)
                     }
                     "agent_session_state_changed" -> {
+                        val notifSessionId = data?.get("session_id")?.jsonPrimitive?.content
+                        if (notifSessionId != null && notifSessionId != openSessionId) return@collect
+                        refreshSession(sessionId)
+                    }
+                    "agent_session_title_changed" -> {
+                        // Title was renamed (by us via renameSession, or
+                        // by the desktop UI). Re-poll get_session so the
+                        // SlimTopBar title text updates immediately.
                         val notifSessionId = data?.get("session_id")?.jsonPrimitive?.content
                         if (notifSessionId != null && notifSessionId != openSessionId) return@collect
                         refreshSession(sessionId)
