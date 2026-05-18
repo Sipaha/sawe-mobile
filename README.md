@@ -211,4 +211,4 @@ logs stay on-device.
 
 ## License
 
-GPL-3.0-or-later. © 2026 Pavel Simonov. See [LICENSE](LICENSE).
+Apache License 2.0. © 2026 Pavel Simonov. See [LICENSE](LICENSE).

@@ -366,7 +366,7 @@ private fun AboutInfo(onOpenGithub: () -> Unit) {
             Text("Sipaha/spk-editor on GitHub")
         }
         Text(
-            text = "GPL-3.0-or-later · © 2026 Pavel Simonov",
+            text = "Apache 2.0 · © 2026 Pavel Simonov",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
