@@ -705,6 +705,60 @@ class RemoteDtosTest {
     }
 
     @Test
+    fun `SessionSummary round-trips with max_tokens populated`() {
+        // Mobile R-6c-token-meter: `SessionSummary` gained `max_tokens`
+        // (Option<u64> on the wire) so the context-fill meter in the
+        // chat header can render `used / max` percent. The DTO must
+        // survive a decode + re-encode + decode cycle so the cross-ref
+        // in `SessionDetailScreen` returns the same value the wire
+        // reported.
+        val text = """
+            {
+              "id": "ses-meter",
+              "solution_id": "sol-1",
+              "agent_id": "claude",
+              "title": "Big context",
+              "state": "Running",
+              "created_at": 1715900000000,
+              "last_activity_at": 1715900200000,
+              "total_tokens": 245000,
+              "max_tokens": 1000000
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(SessionSummary.serializer(), text)
+        assertEquals(245000L, parsed.totalTokens)
+        assertEquals(1_000_000L, parsed.maxTokens)
+
+        val reencoded = JsonRpc.json.encodeToString(SessionSummary.serializer(), parsed)
+        val again = JsonRpc.json.decodeFromString(SessionSummary.serializer(), reencoded)
+        assertEquals(parsed, again)
+        assertEquals(1_000_000L, again.maxTokens)
+    }
+
+    @Test
+    fun `SessionSummary defaults max_tokens to null when omitted by pre-meter server`() {
+        // Back-compat — a server that hasn't shipped the field yet emits
+        // a payload without `max_tokens`; the DTO must decode it with
+        // `maxTokens = null` so a mixed-version mobile/server pair keeps
+        // working and the meter Composable just renders nothing.
+        val text = """
+            {
+              "id": "ses-pre-meter",
+              "solution_id": "sol-1",
+              "agent_id": "claude",
+              "title": "Pre-meter",
+              "state": "Idle",
+              "created_at": 0,
+              "last_activity_at": 0,
+              "total_tokens": 138000
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(SessionSummary.serializer(), text)
+        assertEquals(138000L, parsed.totalTokens)
+        assertNull(parsed.maxTokens)
+    }
+
+    @Test
     fun `SessionSummary defaults total_tokens and parent_session_id to null when omitted`() {
         // Back-compat with pre-F-server payloads: both fields absent →
         // both decode to null. Critical so a mixed-version mobile/server

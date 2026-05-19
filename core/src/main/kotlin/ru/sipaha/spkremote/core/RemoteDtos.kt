@@ -75,6 +75,15 @@ data class SessionSummary(
      */
     @SerialName("total_tokens") val totalTokens: Long? = null,
     /**
+     * Model context window in tokens — `totalTokens / maxTokens` is the
+     * "context fill" fraction the chat header's meter renders. Mirrors
+     * the desktop status row's `used / max` readout. `null` until the
+     * agent reports its first usage update or on pre-`max_tokens` server
+     * builds; the meter Composable renders nothing in that case so the
+     * top bar stays clean.
+     */
+    @SerialName("max_tokens") val maxTokens: Long? = null,
+    /**
      * Parent session id when this session was spawned by another agent
      * (Claude Code Task dispatch, etc.). Null at the top of the tree.
      * Drives the sub-agent chip row on `SessionDetailScreen` (F-phone).

@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -51,6 +52,7 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -228,6 +230,15 @@ fun SessionDetailScreen(
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showResetConfirm by rememberSaveable { mutableStateOf(false) }
     var showCompactConfirm by rememberSaveable { mutableStateOf(false) }
+
+    // Cross-reference the open session in the list cache to pull its
+    // `total_tokens` / `max_tokens`. `GetSessionResult` doesn't carry
+    // those today; the list-side `SessionSummary` does (post-F-server /
+    // R-6g), and the list cache is already loaded by the time the
+    // detail surface is on screen.
+    val activeSummary: SessionSummary? = sessionsCache.firstOrNull { it.id == sessionId }
+    val activeTotalTokens: Long? = activeSummary?.totalTokens
+    val activeMaxTokens: Long? = activeSummary?.maxTokens
     Scaffold(
         topBar = {
             SlimTopBar(
@@ -236,6 +247,10 @@ fun SessionDetailScreen(
                 onTitleClick = { if (sessionState is UiData.Loaded) showRenameDialog = true },
                 trailing = {
                     if (sessionState is UiData.Loaded) {
+                        ContextFillMeter(
+                            totalTokens = activeTotalTokens,
+                            maxTokens = activeMaxTokens,
+                        )
                         StatePill(state = displayState, raw = rawState)
                         // Overflow menu — Reset / Compact context. The
                         // anchor's `Box` wrapping is what lets DropdownMenu
@@ -1422,6 +1437,50 @@ private fun stateIconAndTint(state: DisplayState): Pair<androidx.compose.ui.grap
  * doesn't leak in for users in locales like ru-RU; the chip label is a
  * compact technical readout, not a localized currency.
  */
+/**
+ * Slim context-fill meter rendered in [SlimTopBar] between the title and
+ * the [StatePill]. Shows `used / max` token usage as a 64dp linear
+ * progress bar plus a percent label.
+ *
+ * Renders nothing when either value is missing so a pre-`max_tokens`
+ * server build or an agent that hasn't reported usage yet doesn't leave
+ * an empty pill cluttering the bar.
+ *
+ * Color thresholds match the desktop's `status_row` pattern:
+ *   - ≥80% used → `error` (red zone, near context exhaustion);
+ *   - 50-80% → `tertiary` (warning-ish — M3 has no dedicated warning
+ *     slot, tertiary is the closest semantic approximation);
+ *   - <50% → `primary` (healthy headroom).
+ */
+@Composable
+private fun ContextFillMeter(totalTokens: Long?, maxTokens: Long?) {
+    if (totalTokens == null || maxTokens == null || maxTokens <= 0L) return
+    val fraction: Float = (totalTokens.toFloat() / maxTokens.toFloat()).coerceIn(0f, 1f)
+    val percent: Int = (fraction * 100f).toInt()
+    val color: Color = when {
+        fraction >= 0.80f -> MaterialTheme.colorScheme.error
+        fraction >= 0.50f -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.primary
+    }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier.padding(horizontal = 4.dp),
+    ) {
+        LinearProgressIndicator(
+            progress = { fraction },
+            color = color,
+            trackColor = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier.width(64.dp),
+        )
+        Text(
+            text = "$percent%",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
 internal fun abbreviateTokens(n: Long): String {
     if (n < 0) return n.toString()
     return when {
