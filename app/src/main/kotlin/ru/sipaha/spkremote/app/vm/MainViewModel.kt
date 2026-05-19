@@ -139,6 +139,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
         sessionList = sessionList,
     )
 
+    init {
+        // Foreground-refresh hook (see ForegroundEventBus KDoc + the
+        // mobile-session-stuck-running finding). On every genuine
+        // background-to-foreground transition, treat the server as
+        // authoritative and re-fetch the session pill state +
+        // sessions-list summaries that an
+        // `agent_session_state_changed` notification might have been
+        // delivered for while we were backgrounded. The first
+        // cold-start ON_START is suppressed inside the bus, so this
+        // collector only sees genuine resume edges.
+        viewModelScope.launch {
+            ForegroundEventBus.events.collect {
+                onForegroundResume()
+            }
+        }
+    }
+
+    /**
+     * Called from the [ForegroundEventBus] collector on every
+     * background-to-foreground transition.
+     *
+     * Gated on `activeClient() != null` so that a foreground
+     * transition while the connection is down (the reconnect logic
+     * from R-6a will recover separately, and [ConnectionLifecycle.onReconnected]
+     * already triggers a resume + solutions-refresh) doesn't queue a
+     * spurious "not connected" snackbar via
+     * [SessionListStore.refreshSessions]'s offline branch.
+     */
+    private fun onForegroundResume() {
+        if (connectionMgr.activeClient() == null) return
+        val openSid = sessionDetail.openSessionId
+        if (openSid != null) {
+            sessionDetail.resumeSession(openSid)
+        }
+        val observingSid = sessionList.currentObservingSolutionId()
+        if (observingSid != null) {
+            sessionList.refreshSessions(observingSid)
+        }
+    }
+
     // ---- ConnectionLifecycle impl (audit Fix T light variant) ----
 
     override fun onClientBound(url: PairingUrl, client: RemoteClient) {

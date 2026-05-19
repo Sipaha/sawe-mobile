@@ -89,6 +89,14 @@ internal class SessionListStore(
     @Volatile
     private var observingSolutionId: String? = null
 
+    /**
+     * Read-only accessor for the coordinator's foreground-refresh hook.
+     * Returns the solution whose sessions list is currently being
+     * observed (i.e. the SolutionDetailScreen is mounted), or null when
+     * no list screen is visible.
+     */
+    fun currentObservingSolutionId(): String? = observingSolutionId
+
     private var refreshSessionsJob: Job? = null
 
     /** Tear-down hook called from coordinator on server switch / disconnect. */
