@@ -960,48 +960,16 @@ internal class SessionDetailStore(
 
     fun sendMessage(text: String) {
         if (text.isBlank()) return
-        val active = context.activeClient() ?: return
-        val sessionId = openSessionId ?: return
-        val optimistic = EntrySummary(role = "user", preview = text)
-        val localId = optimisticIdGen.incrementAndGet()
-        // Legacy text-only path uses `send_message` which carries `content`
-        // (a string), not a ContentBlock list — there's no `_meta` seam to
-        // stamp. We record `null` in the csid slot so [reconcileOptimistic]
-        // falls through to the content-match path; previews from
-        // `send_message` are short enough that the server preview equals
-        // the optimistic preview verbatim.
-        scope.launch {
-            sessionMutex.withLock {
-                _optimisticEntries.value = _optimisticEntries.value + optimistic
-                optimisticIds.add(localId)
-                optimisticClientSendIds.add(null)
-            }
-            val params = buildJsonObject {
-                put("session_id", sessionId)
-                put("content", text)
-            }
-            runCatching { active.queueCall("remote.solution_agent.send_message", params) }
-                .mapCatching { resp ->
-                    val err = resp.error
-                    if (err != null) error(err.message)
-                    // Match the envelope-error precedent set by
-                    // [decodeResultOrThrow]: tool-level `isError: true`
-                    // must surface to the user the same way.
-                    val toolErr = resp.toolError()
-                    if (toolErr != null) error(toolErr)
-                }
-                .onFailure {
-                    removeOptimisticById(localId)
-                    val msg = when (it) {
-                        is QueueTtlException ->
-                            "send timed out — the editor was offline for too long"
-                        is RemoteClient.ClosedException ->
-                            "send cancelled — connection closed"
-                        else -> it.message ?: "send failed"
-                    }
-                    context.emitError(msg)
-                }
-        }
+        // Route text-only sends through `sendMessageBlocks` so the
+        // payload carries a `_meta.spk_client_send_id` stamp the
+        // server echoes back on the user entry. The legacy
+        // `send_message` RPC (raw `content: String`, no _meta seam)
+        // produced no csid → reconcile fell through to a content-
+        // match path that briefly let the local optimistic and the
+        // server echo coexist as two visible bubbles. Diagnosed
+        // 2026-05-20 via a "duplicate bubble that resolves a beat
+        // later" report from a plain text send to an Idle agent.
+        sendMessageBlocks(listOf(ContentBlockDto.Text(text)))
     }
 
     /**

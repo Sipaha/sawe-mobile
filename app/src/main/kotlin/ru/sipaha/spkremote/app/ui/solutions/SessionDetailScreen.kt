@@ -1588,14 +1588,33 @@ private fun hasVisibleAssistantBody(raw: String): Boolean {
  * filter and the renderer feed so a thought-only turn is hidden AND a
  * mixed thought+answer turn renders flush-top.
  */
-internal fun stripThinkingBlocks(md: String): String =
-    THINKING_BLOCK.replace(md, "").trim()
+internal fun stripThinkingBlocks(md: String): String {
+    // First pass: drop every COMPLETE `<thinking>…</thinking>` block.
+    var stripped = THINKING_BLOCK.replace(md, "")
+    // Second pass: if a partial `<thinking>` is still mid-stream
+    // (open tag without a matching close yet), drop everything from
+    // that opener onward. Without this guard the assistant bubble
+    // oscillates during streaming — partial thinking text renders
+    // and grows the bubble, then disappears the instant
+    // `</thinking>` arrives, then the next thinking block repeats
+    // the cycle. Discarding the trailing partial keeps the visible
+    // body monotonic across streaming snapshots.
+    val openIdx = OPEN_THINKING.find(stripped)?.range?.first
+    if (openIdx != null) {
+        stripped = stripped.substring(0, openIdx)
+    }
+    return stripped.trim()
+}
 
 // `[\s\S]` matches across newlines so multi-line `<thinking>` payloads
 // are removed in one pass. The lazy `*?` keeps each match minimal so two
 // thinking blocks in the same body each shed independently.
 private val THINKING_BLOCK = Regex(
     pattern = """<thinking>[\s\S]*?</thinking>""",
+    options = setOf(RegexOption.IGNORE_CASE),
+)
+private val OPEN_THINKING = Regex(
+    pattern = """<thinking>""",
     options = setOf(RegexOption.IGNORE_CASE),
 )
 
