@@ -12,12 +12,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
@@ -128,8 +127,23 @@ class RemoteClient internal constructor(
     private val auth = HmacChallengeAuth(url.secret)
     private val nextId = AtomicLong(1L)
     private val pending = ConcurrentHashMap<Long, CompletableDeferred<JsonRpcResponse>>()
-    private val _notifications = MutableSharedFlow<JsonElement>(extraBufferCapacity = 64)
-    val notifications: SharedFlow<JsonElement> = _notifications.asSharedFlow()
+    /**
+     * Server-initiated `editor/notification` frames. Backed by an
+     * UNLIMITED channel exposed as a single-consumer [Flow] so that
+     * bursts of state-update notifications during a long agent turn
+     * (text streaming + tool-call arg deltas, easily 100+ frames in
+     * rapid succession on a multi-step reply) never get dropped. An
+     * earlier revision used `MutableSharedFlow(extraBufferCapacity = 64)`
+     * + `tryEmit`, which silently discarded the overflow tail; the
+     * symptom was tool-call cards stuck on the initial empty
+     * `args_preview = "{}"` (the [acp_thread::ToolCall.raw_input] is
+     * absent on the create event and only arrives via later updates)
+     * and assistant text bubbles stuck at the first preview chunk
+     * (e.g. "Также для" / "Build +"). FIFO is preserved because the
+     * WS dispatcher pumps frames serially.
+     */
+    private val notificationChannel = Channel<JsonElement>(capacity = Channel.UNLIMITED)
+    val notifications: Flow<JsonElement> = notificationChannel.receiveAsFlow()
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -144,6 +158,19 @@ class RemoteClient internal constructor(
 
     /** Events the lifecycle coroutine consumes. */
     private val events = Channel<LifecycleEvent>(Channel.UNLIMITED)
+
+    /**
+     * Pokes the lifecycle loop to short-circuit the current backoff
+     * delay and retry NOW. CONFLATED so a burst of foreground-edge
+     * pokes collapses to one wake — only the most recent matters.
+     *
+     * Listened to ONLY while the loop is sitting in the
+     * `Reconnecting → delay(delayMs) → Connecting` step. Pokes that
+     * arrive in other states (Connecting / Connected / FailedTerminal)
+     * are silently dropped — interrupting an in-flight handshake or a
+     * live socket would only churn state for no benefit.
+     */
+    private val wakeRequests = Channel<Unit>(Channel.CONFLATED)
 
     /** Set after the first successful [connect]; reused by subsequent reconnects. */
     @Volatile private var scope: CoroutineScope? = null
@@ -216,6 +243,33 @@ class RemoteClient internal constructor(
             lifecycleJob = target.launch { lifecycleLoop() }
         }
         gate.await()
+    }
+
+    /**
+     * Short-circuit the current reconnect backoff and try to connect
+     * NOW. Wired into the foreground-edge hook so a phone waking from
+     * Doze doesn't sit staring at "next try in 30s" — the screen lights
+     * up, the connection retry fires within a frame.
+     *
+     * Gated on the loop ACTUALLY sitting in [ConnectionState.Reconnecting].
+     * Without this guard a wake fired while [runOneAttempt] is mid-flight
+     * would buffer on the CONFLATED channel and short-circuit the NEXT
+     * backoff the moment a handshake fails — turning a single foreground
+     * edge into a tight retry storm. On a flaky link each retry then
+     * trips the server's pre-auth transport-error path, which (before
+     * the matching server fix) escalated the subnet through the
+     * 30s→5min→1h→24h ban ladder. Skipping the wake during
+     * Connecting / Connected / FailedTerminal also makes alt-tab
+     * patterns (user flipping to logs and back) safe: each foreground
+     * fires `wakeReconnect()`, but only the rare in-Reconnecting one
+     * actually pokes the channel.
+     *
+     * Safe to call from any coroutine / thread.
+     */
+    fun wakeReconnect() {
+        if (_connectionState.value is ConnectionState.Reconnecting) {
+            wakeRequests.trySend(Unit)
+        }
     }
 
     /** Whether a programmatic close has been requested (lifecycle ends). */
@@ -422,6 +476,10 @@ class RemoteClient internal constructor(
 
     private suspend fun lifecycleLoop() {
         var attempt = 0
+        // Drain any pre-loop wake pokes so a wakeReconnect() that fires
+        // before the loop is observing the channel doesn't short-circuit
+        // the very first connect (attempt==0 already runs immediately).
+        while (wakeRequests.tryReceive().isSuccess) { /* drain */ }
         // scope is non-null and active inside the lifecycle loop; the close()
         // path nulls scope via teardown, but `closing=true` is the actual
         // exit signal that this coroutine observes first.
@@ -432,8 +490,16 @@ class RemoteClient internal constructor(
                 val delayMs = backoff.nextDelayMs(attempt)
                 _connectionState.value =
                     ConnectionState.Reconnecting(attempt, delayMs, lastConnectFailure)
-                delay(delayMs)
+                // Race the backoff timer against a wakeReconnect() poke.
+                // Receiving null = timer fired naturally; receiving Unit =
+                // wake fired, reset the attempt counter so a subsequent
+                // failure restarts the 1s → 2s → … schedule rather than
+                // pinning at the 30s cap forever.
+                val woken = withTimeoutOrNull(delayMs) { wakeRequests.receive() } != null
                 if (closing) break
+                if (woken) {
+                    attempt = 0
+                }
                 _connectionState.value = ConnectionState.Connecting
             }
             val outcome = runOneAttempt()
@@ -484,9 +550,28 @@ class RemoteClient internal constructor(
     private suspend fun runOneAttempt(): AttemptOutcome {
         val handshake = CompletableDeferred<AttemptOutcome>()
         val stage = HandshakeStageRef()
-        val listener = HandshakeListener(handshake, stage)
+        // Handshake-private transport ref. The HandshakeListener uses
+        // THIS to send the HMAC response (it can't read the shared
+        // `transport` field because we deliberately don't publish to
+        // it until handshake completes — see below). After Established
+        // the listener stops using this and the shared field takes
+        // over for app-side RPC traffic.
+        val handshakeTransportRef =
+            java.util.concurrent.atomic.AtomicReference<RemoteTransport?>(null)
+        val listener = HandshakeListener(handshake, stage, handshakeTransportRef)
         val tx = transportFactory.connect(url, listener)
-        transport = tx
+        handshakeTransportRef.set(tx)
+        // DO NOT publish to the shared `transport` field yet. Doing so
+        // pre-handshake opens a TOCTOU window where any `client.call(...)`
+        // path (e.g. a post-reconnect `SessionDetailStore.refreshSession`
+        // firing on `ConnectionState.Reconnecting`) reads a non-null
+        // `transport` and ships a JSON-RPC frame to the server BEFORE
+        // the HMAC response. The server is mid-handshake-read at that
+        // point, treats the unsolicited frame as a malformed handshake
+        // response, and adds the subnet to the auth-failure ladder.
+        // Diagnosed 2026-05-19 via the server's payload-preview WARN
+        // log; the offending payload was a literal
+        // `{"jsonrpc":"2.0","method":"remote.solution_agent.get_session",…}`.
         return try {
             // Bound the full attempt by the handshake timeout — if the
             // server never sends a nonce, the WS would otherwise hang
@@ -498,6 +583,12 @@ class RemoteClient internal constructor(
                 ConnectFailure.HandshakeTimeout(ConnectFailure.HANDSHAKE_TIMEOUT_MS)
             )
             if (outcome is AttemptOutcome.Connected) {
+                // Handshake passed → it's safe to publish. Order is
+                // important: `transport` first so `onConnected`'s queue
+                // flush + resubscribe (which both call through
+                // `callInternal`) see a non-null transport.
+                transport = tx
+                handshakeTransportRef.set(null)
                 // Re-subscribe BEFORE transitioning to Connected — R-6a
                 // reconnect-handshake atomicity. Also serializes the
                 // queue flush after resubscribe so queued calls hit a
@@ -507,12 +598,14 @@ class RemoteClient internal constructor(
                 firstConnect?.takeIf { !it.isCompleted }?.complete(Unit)
             } else {
                 tx.close()
-                transport = null
+                handshakeTransportRef.set(null)
+                // `transport` was never published this attempt — nothing
+                // to clear on the shared field.
             }
             outcome
         } catch (t: Throwable) {
             tx.close()
-            transport = null
+            handshakeTransportRef.set(null)
             AttemptOutcome.TransientFailure(ConnectFailure.classify(t))
         }
     }
@@ -582,6 +675,17 @@ class RemoteClient internal constructor(
     private inner class HandshakeListener(
         private val handshake: CompletableDeferred<AttemptOutcome>,
         private val ref: HandshakeStageRef,
+        /**
+         * Transport handle for THIS handshake only — used to send the
+         * HMAC response. Read instead of the shared [transport] field
+         * because that field is deliberately not published until
+         * handshake completion (see [runOneAttempt]'s rationale on
+         * the TOCTOU between `transport = tx` and the post-Established
+         * publish). Cleared by [runOneAttempt] once the listener's
+         * state advances past AwaitingNonce, so post-Established
+         * onText paths fall back to whatever the shared field carries.
+         */
+        private val handshakeTx: java.util.concurrent.atomic.AtomicReference<RemoteTransport?>,
     ) : RemoteTransportListener {
 
         override fun onBinary(bytes: ByteArray) {
@@ -610,7 +714,11 @@ class RemoteClient internal constructor(
                         )
                         return
                     }
-                    val tx = transport ?: return
+                    // Use the per-handshake transport ref, not the
+                    // shared `transport` field — the shared field is
+                    // deliberately null until handshake completes (see
+                    // `runOneAttempt`).
+                    val tx = handshakeTx.get() ?: return
                     val responseBytes = auth.respond(challengeBytes)
                     val responseFrame = JsonRpc.json.encodeToString(
                         HandshakeResponseFrame.serializer(),
@@ -709,8 +817,11 @@ class RemoteClient internal constructor(
             )
             return
         }
-        // No id at all — server-initiated notification.
-        _notifications.tryEmit(parsed)
+        // No id at all — server-initiated notification. Channel is
+        // UNLIMITED so `trySend` always succeeds; see
+        // [notificationChannel] kdoc for why we don't use a bounded
+        // SharedFlow with `tryEmit` here.
+        notificationChannel.trySend(parsed)
     }
 
     // ---------------------------------------------------------------------

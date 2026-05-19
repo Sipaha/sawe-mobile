@@ -439,6 +439,147 @@ class RemoteClientLifecycleTest {
     }
 
     @Test
+    fun `wakeReconnect short-circuits backoff without advancing time`() =
+        runTest(StandardTestDispatcher()) {
+            // 10-minute fixed backoff — without wakeReconnect the next
+            // attempt would sit waiting 600 000 ms of virtual time. The
+            // whole point is that we DON'T need to advance time for the
+            // retry to fire.
+            val (client, factory) = newClient(backoff = BackoffStrategy.fixed(10 * 60 * 1000L))
+            connectAndHandshake(client, factory)
+            val transportsBefore = factory.transports.size
+
+            factory.latest().closeFromServer(reason = "Doze-simulated")
+            runCurrent()
+            assertTrue(
+                client.connectionState.value is ConnectionState.Reconnecting,
+                "should be Reconnecting after drop: ${client.connectionState.value}",
+            )
+
+            // Foreground edge — no time advance, just the wake poke.
+            client.wakeReconnect()
+            runCurrent()
+            assertEquals(
+                transportsBefore + 1,
+                factory.transports.size,
+                "wakeReconnect must spawn a fresh transport without time advance",
+            )
+            factory.latest().completeHandshake()
+            runCurrent()
+            assertTrue(
+                client.connectionState.value is ConnectionState.Connected,
+                "should reach Connected via wake: ${client.connectionState.value}",
+            )
+
+            // A second drop after the wake-driven Connected proves the
+            // attempt counter was reset: the next Reconnecting state
+            // reports attempt=1, not attempt=2.
+            factory.latest().closeFromServer(reason = "post-wake drop")
+            runCurrent()
+            val recPostWake = client.connectionState.value as ConnectionState.Reconnecting
+            assertEquals(
+                1,
+                recPostWake.attempt,
+                "attempt counter must reset after wake-driven reconnect: $recPostWake",
+            )
+
+            client.close()
+            runCurrent()
+        }
+
+    @Test
+    fun `wakeReconnect is a no-op while connected`() = runTest(StandardTestDispatcher()) {
+        val (client, factory) = newClient()
+        connectAndHandshake(client, factory)
+        val transportsBefore = factory.transports.size
+        // Multiple pokes while live should not churn the transport — the
+        // wake signal is only honoured by the backoff-delay step.
+        client.wakeReconnect()
+        client.wakeReconnect()
+        runCurrent()
+        assertEquals(
+            transportsBefore,
+            factory.transports.size,
+            "wakeReconnect must not interrupt a live connection",
+        )
+        assertTrue(
+            client.connectionState.value is ConnectionState.Connected,
+            "still Connected after a no-op wake",
+        )
+        client.close()
+        runCurrent()
+    }
+
+    @Test
+    fun `wakeReconnect during Connecting handshake does not buffer for next backoff`() =
+        runTest(StandardTestDispatcher()) {
+            // Long backoff so the "did the wake buffer fire" check is
+            // unambiguous: any short-circuit must come from a fresh poke,
+            // not a stale buffered one from while we were Connecting.
+            val (client, factory) = newClient(backoff = BackoffStrategy.fixed(10 * 60 * 1000L))
+            // Drive into Connecting (the initial handshake is in flight).
+            val connectJob = async { client.connect(scope = this@runTest) }
+            runCurrent()
+            assertTrue(
+                client.connectionState.value is ConnectionState.Connecting,
+                "should be Connecting while handshake is in flight: ${client.connectionState.value}",
+            )
+
+            // Alt-tab burst: user flips between app and screenshot tool,
+            // hammering wakeReconnect mid-handshake. None of these pokes
+            // must accumulate on the channel — the loop isn't sleeping
+            // yet, so a buffered Unit would short-circuit the FIRST real
+            // backoff to fire and produce a tight retry storm against
+            // the server (the exact pattern that tripped the pre-auth
+            // ban ladder).
+            repeat(5) { client.wakeReconnect() }
+            runCurrent()
+
+            // Complete the in-flight handshake so we leave Connecting.
+            factory.latest().completeHandshake()
+            runCurrent()
+            connectJob.await()
+            assertTrue(
+                client.connectionState.value is ConnectionState.Connected,
+                "connection should settle Connected: ${client.connectionState.value}",
+            )
+
+            // Drop, observe Reconnecting → backoff delay sleep with a
+            // 10-min timer pending.
+            factory.latest().closeFromServer(reason = "post-test drop")
+            runCurrent()
+            val transportsBeforeWait = factory.transports.size
+            assertTrue(
+                client.connectionState.value is ConnectionState.Reconnecting,
+                "should enter Reconnecting after drop: ${client.connectionState.value}",
+            )
+
+            // Advance a sliver of virtual time — if any wakeReconnect
+            // during Connecting had buffered, this would already have
+            // produced a fresh transport. It must not have.
+            advanceTimeBy(100L)
+            runCurrent()
+            assertEquals(
+                transportsBeforeWait,
+                factory.transports.size,
+                "no transport should spawn from stale wakes buffered during Connecting",
+            )
+
+            // Now fire wakeReconnect properly (while in Reconnecting) —
+            // THIS one IS honoured, spawns a new transport immediately.
+            client.wakeReconnect()
+            runCurrent()
+            assertEquals(
+                transportsBeforeWait + 1,
+                factory.transports.size,
+                "wakeReconnect during Reconnecting must spawn a fresh transport",
+            )
+
+            client.close()
+            runCurrent()
+        }
+
+    @Test
     fun `queueCall persists to QueueStore while disconnected`() = runTest(StandardTestDispatcher()) {
         val store = InMemoryQueueStore()
         val (client, factory) = newClient(
