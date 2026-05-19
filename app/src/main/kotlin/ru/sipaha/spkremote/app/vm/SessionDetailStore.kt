@@ -295,6 +295,32 @@ internal class SessionDetailStore(
     )
 
     /**
+     * Per-session in-memory "ghost bubble" that accumulates additional
+     * presses while the agent is mid-turn. Mirrors the desktop
+     * behaviour described in
+     * `solution_agent::store::queue::send_message_blocks` — subsequent
+     * queued sends merge into the existing pending entry separated by
+     * a blank line so the user sees a single bubble that grows, not a
+     * stack of fragments. Only the FIRST press in a Running window
+     * mints a fresh csid + optimistic row; later presses append to
+     * its `accumulatedBlocks` and refresh the row's preview through
+     * [updateOptimisticPreviewLocked]. The dispatcher that the first
+     * press launched drains [accumulatedBlocks] at flush time and
+     * sends the merged payload as one queueCall, so the server gets a
+     * single user entry with a single csid (no orphaned optimistic
+     * bubbles to clean up). Keyed by sessionId so a user juggling
+     * multiple chat sessions accumulates one draft per session.
+     */
+    private val mergedQueueDrafts: MutableMap<String, MergedQueueDraft> = mutableMapOf()
+
+    private data class MergedQueueDraft(
+        val csid: Long,
+        val localId: Long,
+        val sessionId: String,
+        val accumulatedBlocks: MutableList<ContentBlockDto>,
+    )
+
+    /**
      * One-shot signal emitted after a successful Reset context. Carries the
      * new session id the server minted; the UI collector hops navigation
      * onto the fresh session so the open chat surface stops pointing at
@@ -979,21 +1005,72 @@ internal class SessionDetailStore(
         if (blocks.isEmpty()) return
         val active = context.activeClient() ?: return
         val sessionId = openSessionId ?: return
-        val preview = buildBlocksPreview(blocks)
-        val optimistic = EntrySummary(role = "user", preview = preview)
-        val localId = optimisticIdGen.incrementAndGet()
-        // Monotonic counter seeded with currentTimeMillis at startup —
-        // see [clientSendIdGen] for the rationale on why a raw timestamp
-        // isn't enough. Generated up-front so the meta stamp on the wire
-        // and the local optimisticClientSendIds slot agree.
-        val clientSendId = clientSendIdGen.incrementAndGet()
-        val stamped = stampClientSendId(blocks, clientSendId)
         scope.launch {
-            sessionMutex.withLock {
-                _optimisticEntries.value = _optimisticEntries.value + optimistic
-                optimisticIds.add(localId)
-                optimisticClientSendIds.add(clientSendId)
+            // Merge-or-spawn decision under sessionMutex so a fast
+            // double-press can't race the dispatcher into thinking
+            // there's no existing draft when there is.
+            val dispatchCsid: Long? = sessionMutex.withLock {
+                val isBusy = currentSessionDisplayStateLocked()?.let {
+                    it == DisplayState.Running || it == DisplayState.AwaitingInput
+                } ?: false
+                val existing = if (isBusy) mergedQueueDrafts[sessionId] else null
+                if (existing != null) {
+                    // Merge into the existing ghost bubble. Two-block
+                    // separator ("\n\n") matches the desktop
+                    // `send_message_blocks` queue-merge so the agent
+                    // sees the same prompt shape as it would from a
+                    // single-client run.
+                    existing.accumulatedBlocks.add(
+                        ContentBlockDto.Text("\n\n"),
+                    )
+                    existing.accumulatedBlocks.addAll(blocks)
+                    val mergedPreview = buildBlocksPreview(existing.accumulatedBlocks)
+                    updateOptimisticPreviewLocked(existing.csid, mergedPreview)
+                    null
+                } else {
+                    val localId = optimisticIdGen.incrementAndGet()
+                    val csid = clientSendIdGen.incrementAndGet()
+                    val preview = buildBlocksPreview(blocks)
+                    _optimisticEntries.value = _optimisticEntries.value + EntrySummary(
+                        role = "user",
+                        preview = preview,
+                        clientSendId = csid,
+                    )
+                    optimisticIds.add(localId)
+                    optimisticClientSendIds.add(csid)
+                    if (isBusy) {
+                        // Stash for merging by subsequent presses.
+                        // Dropped on flush — see drain step below.
+                        mergedQueueDrafts[sessionId] = MergedQueueDraft(
+                            csid = csid,
+                            localId = localId,
+                            sessionId = sessionId,
+                            accumulatedBlocks = blocks.toMutableList(),
+                        )
+                    }
+                    csid
+                }
             }
+            val csid = dispatchCsid ?: return@launch
+            // Hold the wire dispatch until the agent's turn settles
+            // (auto-path) OR [forceFlushQueue] fires the unblock
+            // signal (manual path). Returns immediately if the
+            // session was already idle when we spawned.
+            gateOnSessionIdle(csid)
+            // Drain the merged draft if it's still ours — fast
+            // double-presses while we waited on the gate may have
+            // appended more content, and we want the merged payload
+            // to fire as one call, not a stale snapshot.
+            val finalBlocks: List<ContentBlockDto> = sessionMutex.withLock {
+                val draft = mergedQueueDrafts[sessionId]
+                if (draft?.csid == csid) {
+                    mergedQueueDrafts.remove(sessionId)
+                    draft.accumulatedBlocks.toList()
+                } else {
+                    blocks
+                }
+            }
+            val stamped = stampClientSendId(finalBlocks, csid)
             val blocksJson = JsonRpc.json.encodeToJsonElement(
                 ListSerializer(ContentBlockDto.serializer()),
                 stamped,
@@ -1002,14 +1079,6 @@ internal class SessionDetailStore(
                 put("session_id", sessionId)
                 put("blocks", blocksJson)
             }
-            // Gate the dispatch on the agent turn settling. When the
-            // user types into the compose row while the agent is
-            // mid-turn we still want the bubble to appear immediately
-            // (UX: "the queue accepted my message") but we hold off
-            // hitting the wire until the current turn finishes —
-            // otherwise the server would dispatch it as a follow-up
-            // bundle that races the in-flight reply.
-            gateOnSessionIdle(clientSendId)
             runCatching {
                 active.queueCall("remote.solution_agent.send_message_blocks", params)
             }
@@ -1020,7 +1089,15 @@ internal class SessionDetailStore(
                     if (toolErr != null) error(toolErr)
                 }
                 .onFailure {
-                    removeOptimisticById(localId)
+                    // The localId is the FIRST press's id — that's
+                    // the one we created the optimistic entry under
+                    // and the only one in the optimistic list (later
+                    // merges didn't create their own rows).
+                    val draftLocalId = mergedQueueDrafts[sessionId]?.localId
+                    if (draftLocalId != null) {
+                        sessionMutex.withLock { mergedQueueDrafts.remove(sessionId) }
+                    }
+                    removeOptimisticByClientSendId(csid)
                     val msg = when (it) {
                         is QueueTtlException ->
                             "send timed out — the editor was offline for too long"
@@ -1030,6 +1107,55 @@ internal class SessionDetailStore(
                     }
                     context.emitError(msg)
                 }
+        }
+    }
+
+    /**
+     * Read the current session's parsed [DisplayState]. Must be called
+     * while holding [sessionMutex] — both the read and any merge-or-
+     * spawn decision keyed off the result need to land atomically with
+     * the optimistic-list / [mergedQueueDrafts] mutation that follows.
+     */
+    private fun currentSessionDisplayStateLocked(): DisplayState? {
+        val loaded = (_session.value as? UiData.Loaded)?.value ?: return null
+        return parseDisplayState(loaded.state)
+    }
+
+    /**
+     * Replace the preview of an optimistic entry identified by [csid]
+     * (used by merge presses to grow the ghost bubble's content in
+     * place). Must be called while holding [sessionMutex]. No-op when
+     * no matching entry exists — defensive against a race where the
+     * bubble was popped (e.g. server echo landed) between the merge
+     * append and this update.
+     */
+    private fun updateOptimisticPreviewLocked(csid: Long, newPreview: String) {
+        val current = _optimisticEntries.value
+        var hit = false
+        val next = current.map { entry ->
+            if (entry.clientSendId == csid) {
+                hit = true
+                entry.copy(preview = newPreview)
+            } else entry
+        }
+        if (hit) _optimisticEntries.value = next
+    }
+
+    /**
+     * Remove an optimistic entry by its `clientSendId`. Used by the
+     * failure path in [sendMessageBlocks] where we don't have the
+     * original `localId` after the merge fan-in (subsequent presses
+     * appended to an existing draft without remembering their own
+     * localId).
+     */
+    private suspend fun removeOptimisticByClientSendId(csid: Long) {
+        sessionMutex.withLock {
+            val current = _optimisticEntries.value
+            val filtered = current.filter { it.clientSendId != csid }
+            if (filtered.size != current.size) {
+                _optimisticEntries.value = filtered
+                optimisticClientSendIds.remove(csid)
+            }
         }
     }
 
