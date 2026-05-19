@@ -274,7 +274,23 @@ internal class SessionListStore(
         // List handler — refresh sessions list when a session-shaped
         // event arrives, regardless of whether a detail screen is also
         // mounted.
-        val solutionId = observingSolutionId
+        //
+        // Fallback when no solution-list screen is observing: derive the
+        // solution id from the currently-loaded sessions cache. This is
+        // the SessionDetailScreen-mounted case where SolutionDetailScreen
+        // already disposed and reset `observingSolutionId = null` —
+        // without the fallback, an `agent_session_state_changed`
+        // notification fired by a /compact (rotate_context sets
+        // `cached_total_tokens = None` then emits SessionStateChanged)
+        // wouldn't re-refresh the list, so the chat header's
+        // ContextFillMeter would keep rendering the pre-compact
+        // percentage until the user backed out and pulled the list
+        // manually.
+        val cachedSolutionId = (_sessions.value as? UiData.Loaded)
+            ?.value
+            ?.firstOrNull()
+            ?.solutionId
+        val solutionId = observingSolutionId ?: cachedSolutionId
         when (kind) {
             "agent_session_state_changed",
             "agent_session_created",

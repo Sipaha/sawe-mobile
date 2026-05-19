@@ -8,6 +8,7 @@ import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -624,7 +625,31 @@ private fun ChatList(
                 // so newest-at-the-bottom maps to item 0. itemsIndexed
                 // keeps the stable original index for any future need
                 // (e.g. jump-to-message), even though we don't expose it.
-                itemsIndexed(combined.asReversed()) { _, entry ->
+                //
+                // STABLE KEYS: without `key = ...` LazyColumn falls back
+                // on positional identity, which means every
+                // `agent_session_message_appended` notification (and
+                // there can be ~5/s now that EntryUpdated is throttled
+                // through to the wire) rebinds and re-composes every
+                // bubble on screen — visible as a scroll jump and a
+                // brief "square" placeholder before the real content
+                // re-renders. Identity preference:
+                //   1. `clientSendId` for user entries — preserved
+                //      across the optimistic-bubble → server-echo
+                //      handoff so the row keeps its slot identity.
+                //   2. `index` for any server-known entry (post-R-6e).
+                //   3. A role+preview hash as last-resort fallback for
+                //      optimistic entries without csid (shouldn't
+                //      happen — see [[csid-required-on-every-optimistic-entry]]
+                //      — but defensive).
+                itemsIndexed(
+                    items = combined.asReversed(),
+                    key = { _, entry ->
+                        entry.clientSendId?.let { csid -> "csid:$csid" }
+                            ?: if (entry.index >= 0) "idx:${entry.index}"
+                            else "role:${entry.role}#${entry.preview.hashCode()}"
+                    },
+                ) { _, entry ->
                     val status = userBubbleStatusFor(
                         entry = entry,
                         isOptimistic = entry in optimisticIdentitySet,
@@ -812,7 +837,14 @@ private fun UserBubble(entry: EntrySummary, status: UserBubbleStatus = UserBubbl
             color = MaterialTheme.colorScheme.primary,
             contentColor = MaterialTheme.colorScheme.onPrimary,
             shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = 16.dp, bottomEnd = 4.dp),
-            modifier = Modifier.widthIn(max = 360.dp),
+            // animateContentSize: smooth tween between the placeholder
+            // preview ("...", a short ellipsised string) and the full
+            // markdown body that arrives a few hundred ms later via
+            // [fetchAndReplaceEntry]. Without it the bubble would pop
+            // from "square narrow" to "wide" in a single frame.
+            modifier = Modifier
+                .widthIn(max = 360.dp)
+                .animateContentSize(),
         ) {
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                 // Users overwhelmingly send plain text — but accept markdown when
@@ -920,7 +952,14 @@ private fun AssistantBubble(entry: EntrySummary) {
             color = MaterialTheme.colorScheme.surfaceVariant,
             contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
             shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = 4.dp, bottomEnd = 16.dp),
-            modifier = Modifier.widthIn(max = 360.dp),
+            // animateContentSize: see UserBubble. Especially important
+            // for assistant bubbles because the markdown body grows
+            // through a series of debounced EntryUpdated notifications
+            // during the streaming reply — each new tween snapshot
+            // would otherwise visibly snap.
+            modifier = Modifier
+                .widthIn(max = 360.dp)
+                .animateContentSize(),
         ) {
             Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                 // SelectionContainer wraps the assistant body so the rendered
@@ -1110,8 +1149,13 @@ private fun ToolCallBubble(call: ToolCallSummary, positionKey: Int) {
             color = MaterialTheme.colorScheme.tertiaryContainer,
             contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
             shape = RoundedCornerShape(12.dp),
+            // animateContentSize: tool-call args + status arrive
+            // through a stream of debounced EntryUpdated notifications
+            // (raw_input deltas, pending → running → done flips). Without
+            // it each notification snaps the bubble to a new size.
             modifier = Modifier
                 .widthIn(max = 360.dp)
+                .animateContentSize()
                 .clickable { expanded = !expanded }
                 .semantics {
                     role = Role.Button
