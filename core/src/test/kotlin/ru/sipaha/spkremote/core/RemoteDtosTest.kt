@@ -369,6 +369,48 @@ class RemoteDtosTest {
     }
 
     @Test
+    fun `ToolCallSummary round-trips with tool_status_started_at_ms populated`() {
+        // Per-tool elapsed badge — server stamps the unix-ms when the
+        // call entered `running` and preserves it across the transition
+        // to terminal statuses. The DTO must round-trip the value
+        // verbatim so the live "Xs" tick math reads the same stamp the
+        // server reported.
+        val text = """
+            {
+              "name": "Edit",
+              "status": "running",
+              "args_preview": "edit args",
+              "tool_status_started_at_ms": 1715900123456
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(ToolCallSummary.serializer(), text)
+        assertEquals(1_715_900_123_456L, parsed.toolStatusStartedAtMs)
+        assertEquals("running", parsed.status)
+
+        val reencoded = JsonRpc.json.encodeToString(ToolCallSummary.serializer(), parsed)
+        val again = JsonRpc.json.decodeFromString(ToolCallSummary.serializer(), reencoded)
+        assertEquals(parsed, again)
+        assertEquals(1_715_900_123_456L, again.toolStatusStartedAtMs)
+    }
+
+    @Test
+    fun `ToolCallSummary defaults tool_status_started_at_ms to null when omitted`() {
+        // Back-compat with pre-tool-elapsed server builds AND with
+        // pending / cold-rehydrated terminal calls that never entered
+        // `running` — `skip_serializing_if = "Option::is_none"` on the
+        // Rust side omits the field entirely in those cases.
+        val text = """
+            {
+              "name": "Read",
+              "status": "pending",
+              "args_preview": "{ \"path\": \"foo.kt\" }"
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(ToolCallSummary.serializer(), text)
+        assertNull(parsed.toolStatusStartedAtMs)
+    }
+
+    @Test
     fun `ToolCallSummary defaults result_preview to empty when omitted`() {
         // Pending / running tool-calls won't yet have a result; the server
         // omits the field entirely rather than emit `""`. The DTO must

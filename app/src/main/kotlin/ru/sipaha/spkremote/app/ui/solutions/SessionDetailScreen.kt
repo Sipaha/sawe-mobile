@@ -95,6 +95,7 @@ import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
 import com.mikepenz.markdown.model.ImageData
 import com.mikepenz.markdown.model.ImageTransformer
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -862,6 +863,31 @@ private fun ToolCallBubble(call: ToolCallSummary, positionKey: Int) {
                         style = MaterialTheme.typography.labelLarge,
                         modifier = Modifier.weight(1f),
                     )
+                    // Live elapsed badge — only on running tool calls
+                    // (the desktop's status_row uses the same gating).
+                    // The tick is scoped to the row's composition so it
+                    // cancels naturally when the status leaves "running"
+                    // (LaunchedEffect rekeys on `call.status` and the
+                    // re-keyed effect, seeing a non-running status,
+                    // returns immediately without scheduling more delays).
+                    val startedAt: Long? = call.toolStatusStartedAtMs
+                    if (startedAt != null && call.status == "running") {
+                        var elapsedSeconds by remember(startedAt) {
+                            mutableStateOf(((System.currentTimeMillis() - startedAt) / 1000L).coerceAtLeast(0L))
+                        }
+                        LaunchedEffect(startedAt, call.status) {
+                            if (call.status != "running") return@LaunchedEffect
+                            while (true) {
+                                delay(1000L)
+                                elapsedSeconds = ((System.currentTimeMillis() - startedAt) / 1000L)
+                                    .coerceAtLeast(0L)
+                            }
+                        }
+                        Text(
+                            text = formatElapsed(elapsedSeconds),
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
                     ToolStatusPill(status = call.status)
                 }
                 Spacer(Modifier.padding(top = 4.dp))
@@ -1437,6 +1463,28 @@ private fun stateIconAndTint(state: DisplayState): Pair<androidx.compose.ui.grap
  * doesn't leak in for users in locales like ru-RU; the chip label is a
  * compact technical readout, not a localized currency.
  */
+/**
+ * Mirror of the desktop `solution_agent::status_row::format_elapsed`
+ * helper. Output strings match verbatim so a session viewed on both
+ * surfaces shows the same elapsed string:
+ *   - `secs < 60` → `"Xs"` (e.g. `"4s"`),
+ *   - `60 <= secs < 3600` → `"MmSSs"` (e.g. `"1m02s"`),
+ *   - `secs >= 3600` → `"HhMMm"` (e.g. `"1h05m"`).
+ *
+ * `String.format` with the root locale keeps the `%02d` zero-padding
+ * culture-neutral (a comma decimal separator would never apply to an
+ * integer specifier, but the locale choice is still good hygiene for a
+ * compact technical readout).
+ */
+internal fun formatElapsed(secs: Long): String {
+    val s = if (secs < 0L) 0L else secs
+    return when {
+        s < 60L -> "${s}s"
+        s < 3600L -> String.format(java.util.Locale.ROOT, "%dm%02ds", s / 60L, s % 60L)
+        else -> String.format(java.util.Locale.ROOT, "%dh%02dm", s / 3600L, (s % 3600L) / 60L)
+    }
+}
+
 /**
  * Slim context-fill meter rendered in [SlimTopBar] between the title and
  * the [StatePill]. Shows `used / max` token usage as a 64dp linear

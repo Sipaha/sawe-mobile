@@ -218,6 +218,18 @@ data class ToolCallSummary(
     val status: String,
     @SerialName("args_preview") val argsPreview: String,
     @SerialName("result_preview") val resultPreview: String = "",
+    /**
+     * Unix epoch in milliseconds captured the first time this tool
+     * call transitioned into `running`. Server-side it's preserved
+     * across the transition to terminal statuses so a completed tool
+     * row could read "ran for Xs" too, but the chat surface only
+     * shows the live "Xs" badge while `status == "running"` (the
+     * tick is cancelled the moment the status changes). `null` for
+     * tool calls that never entered `running` (e.g. cold-rehydrated
+     * entries restored straight into a terminal status, or pending
+     * calls that haven't started yet) — the badge stays hidden.
+     */
+    @SerialName("tool_status_started_at_ms") val toolStatusStartedAtMs: Long? = null,
 )
 
 /**
