@@ -257,6 +257,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
 
     fun refreshSolutions() = solutionStore.refreshSolutions()
     fun loadSolutionDetails(solutionId: String) = solutionStore.loadSolutionDetails(solutionId)
+    fun createSolution(name: String) = solutionStore.createSolution(name)
+    fun deleteSolution(solutionId: String) = solutionStore.deleteSolution(solutionId)
 
     // ---- Sessions surface ----
 
