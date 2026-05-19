@@ -8,6 +8,8 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -17,6 +19,9 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import ru.sipaha.spkremote.app.data.CachedSessionHistory
 import ru.sipaha.spkremote.app.data.DraftRepository
+import ru.sipaha.spkremote.app.data.PendingSendsRepository
+import ru.sipaha.spkremote.app.data.PersistedPendingAttachment
+import ru.sipaha.spkremote.app.data.PersistedPendingSend
 import ru.sipaha.spkremote.app.data.SessionHistoryRepository
 import ru.sipaha.spkremote.core.AppendedPlaceholderOutcome
 import ru.sipaha.spkremote.core.ContentBlockDto
@@ -40,6 +45,63 @@ import java.util.concurrent.atomic.AtomicLong
 
 /** Page size for [SessionDetailStore.openSession] / [SessionDetailStore.loadOlder]. */
 private const val SESSION_PAGE_SIZE = 50
+
+/**
+ * Per-attachment grand timeout for deferred-send. `UploadManager` has
+ * its own 30s per-ack timeout that flips to Paused (= "waiting for
+ * server"), but Paused isn't terminal — without this outer guard a
+ * permanently-stuck upload would hold the optimistic bubble in
+ * "Uploading" state forever. Five minutes is generous enough that a
+ * paused→resumed cycle (Doze wake / WiFi flap) finishes inside it;
+ * beyond five minutes the user almost certainly wants a retry, not
+ * an infinite spinner.
+ */
+private const val DEFERRED_UPLOAD_TIMEOUT_MS: Long = 5L * 60_000L
+
+private fun totalBytesFromState(state: UploadManager.State): Long = when (state) {
+    is UploadManager.State.Queued -> state.total
+    is UploadManager.State.Uploading -> state.total
+    is UploadManager.State.Paused -> state.total
+    is UploadManager.State.Done -> 0L // handle is opaque — caller has size hint elsewhere
+    is UploadManager.State.Failed -> 0L
+}
+
+/**
+ * Per-send upload progress badge model.
+ *
+ * Granularity is BYTES (across all attachments for one send) so the
+ * bubble can show real-time progress within a single attachment —
+ * "Uploading 1.2 / 4.8 MB" — instead of just an attachment count
+ * ("0/1") that stays static while a 5 MB image is being chunked.
+ *
+ * [status] disambiguates "actively uploading" vs "stalled" (e.g.
+ * waiting on a server ack, no chunks moving). The bubble UI shows a
+ * different icon/text for each.
+ */
+data class PendingUploadProgress(
+    val sentBytes: Long,
+    val totalBytes: Long,
+    val status: Status = Status.Uploading,
+) {
+    enum class Status {
+        /** Chunks are moving (or the loop is mid-init). */
+        Uploading,
+        /** Connection dropped / ack timed out — waiting to retry. */
+        Paused,
+    }
+}
+
+/**
+ * One attachment scheduled for a deferred send — the upload may still
+ * be in flight or already Done. [SessionDetailStore.sendMessageBlocksDeferred]
+ * resolves each [localKey] via the upload manager and turns the result
+ * into a `ResourceLink` block with `displayName` as `name`.
+ */
+data class DeferredUpload(
+    val localKey: String,
+    val displayName: String,
+    val mime: String,
+)
 
 /**
  * Currently-open session detail — transcript, optimistic bubbles, draft
@@ -81,6 +143,7 @@ internal class SessionDetailStore(
     private val lastSeen: LastSeenIndex,
     private val sessionList: SessionListStore,
     private val sessionHistoryRepository: SessionHistoryRepository,
+    private val pendingSendsRepository: PendingSendsRepository,
 ) : DetailNotificationRouter {
 
     /**
@@ -147,6 +210,48 @@ internal class SessionDetailStore(
      * around the same shape mismatch on multi-block sends).
      */
     private val optimisticClientSendIds: MutableList<Long?> = mutableListOf()
+
+    /**
+     * Per-optimistic-bubble upload progress keyed by `client_send_id`.
+     * Populated by [sendMessageBlocksDeferred] when a Send was fired
+     * while attachments were still uploading; updated as each upload
+     * reaches a terminal state; removed when the deferred send finally
+     * fires (or fails). The UI surfaces this as a "Загружается N/M
+     * вложений…" sub-label inside the user bubble plus a cloud-upload
+     * status icon — see [userBubbleStatusFor].
+     */
+    private val _pendingUploadProgress =
+        MutableStateFlow<Map<Long, PendingUploadProgress>>(emptyMap())
+    val pendingUploadProgress: StateFlow<Map<Long, PendingUploadProgress>> =
+        _pendingUploadProgress.asStateFlow()
+
+    /**
+     * Process-lifetime registry of in-flight deferred sends keyed by
+     * `client_send_id`. Holds the full send payload so:
+     *   - if the user navigates AWAY from the originating session
+     *     mid-send and back, [openSession] can rehydrate the optimistic
+     *     bubble from this map (the previous openSession cleared
+     *     `_optimisticEntries`, but the runtime waiter coroutine is
+     *     still alive and tracked here);
+     *   - on cold start, [resumeDeferredSendsFromDisk] revives one
+     *     coroutine per persisted entry and seeds this map so the
+     *     same rehydrate path runs when the user eventually opens
+     *     the matching session.
+     *
+     * Entries are removed in [cleanupDeferred] (success / failure
+     * terminals). Thread-safe map because reads happen on the UI
+     * thread via [openSession] and writes happen on the deferred-send
+     * coroutine + disk-resume path.
+     */
+    private val inflightDeferred = java.util.concurrent.ConcurrentHashMap<Long, InflightDeferredSend>()
+
+    private data class InflightDeferredSend(
+        val csid: Long,
+        val localId: Long,
+        val sessionId: String,
+        val text: String?,
+        val attachments: List<DeferredUpload>,
+    )
 
     private val _cancelInFlight = MutableStateFlow(false)
     val cancelInFlight: StateFlow<Boolean> = _cancelInFlight.asStateFlow()
@@ -238,6 +343,34 @@ internal class SessionDetailStore(
                 optimisticIds.clear()
                 optimisticClientSendIds.clear()
                 lastSeen.primeFromDisk(sessionId)
+                // Re-materialise optimistic state for every deferred
+                // send whose waiter coroutine is still alive for THIS
+                // session (the user may have navigated away and back,
+                // or this is a cold-start session-open after
+                // [resumeDeferredSendsFromDisk] revived background
+                // waiters). The runtime registry [inflightDeferred] is
+                // the source of truth — disk is just the cold-start
+                // seed.
+                for (s in inflightDeferred.values) {
+                    if (s.sessionId != sessionId) continue
+                    if (s.csid in optimisticClientSendIds) continue
+                    val preview = buildDeferredPreview(s)
+                    _optimisticEntries.value = _optimisticEntries.value +
+                        EntrySummary(role = "user", preview = preview, clientSendId = s.csid)
+                    optimisticIds.add(s.localId)
+                    optimisticClientSendIds.add(s.csid)
+                    // Initial render: zero bytes, unknown total.
+                    // The waiter coroutine overwrites this with real
+                    // sent/total values on its next StateFlow tick
+                    // (typically within tens of ms — the StateFlow
+                    // always has a non-null current value).
+                    _pendingUploadProgress.value = _pendingUploadProgress.value +
+                        (s.csid to PendingUploadProgress(
+                            sentBytes = 0L,
+                            totalBytes = 1L,
+                            status = PendingUploadProgress.Status.Uploading,
+                        ))
+                }
                 if (cached != null && cached.entries.isNotEmpty()) {
                     // Render the cached transcript immediately so the
                     // chat surface is interactive while the diff fetch
@@ -851,6 +984,371 @@ internal class SessionDetailStore(
                     }
                     context.emitError(msg)
                 }
+        }
+    }
+
+    /**
+     * Fire a multi-block send whose attachments may not be uploaded
+     * yet. Creates the optimistic bubble immediately so the user sees
+     * their message land in the chat with a "Uploading N/M" badge,
+     * then awaits each upload to a terminal state, swaps in the
+     * `spk-upload://<id>` handles, and finally dispatches
+     * `send_message_blocks` over the wire.
+     *
+     * Failure modes:
+     *   - any upload reaches a `Failed` terminal → drop the bubble +
+     *     surface the upload's reason via [ConnectionContext.emitError].
+     *   - the eventual `queueCall` fails → drop the bubble + surface
+     *     the queue / server reason, same as [sendMessageBlocks].
+     *
+     * The `awaitTerminal` callback is the seam to
+     * [UploadManager.awaitTerminal]; it returns the resolved
+     * `spk-upload://<id>` handle on success or `null` on failure
+     * (matching the upload manager's contract).
+     */
+    fun sendMessageBlocksDeferred(
+        textBlock: ContentBlockDto.Text?,
+        uploads: List<DeferredUpload>,
+        stateFlowOf: (localKey: String) -> StateFlow<UploadManager.State>?,
+        forgetUpload: (localKey: String) -> Unit,
+    ) {
+        if (textBlock == null && uploads.isEmpty()) return
+        val sessionId = openSessionId ?: return
+        val localId = optimisticIdGen.incrementAndGet()
+        val clientSendId = clientSendIdGen.incrementAndGet()
+        // Persist BEFORE spawning so a force-kill between the spawn
+        // and the first await survives — the cold-start
+        // resumeDeferredSendsFromDisk path will pick the record up
+        // and re-spawn an identical waiter coroutine.
+        pendingSendsRepository.saveOrUpdate(
+            PersistedPendingSend(
+                csid = clientSendId,
+                localId = localId,
+                sessionId = sessionId,
+                text = textBlock?.text,
+                attachments = uploads.map {
+                    PersistedPendingAttachment(
+                        localKey = it.localKey,
+                        displayName = it.displayName,
+                        mime = it.mime,
+                    )
+                },
+            ),
+        )
+        runDeferredSend(
+            send = InflightDeferredSend(
+                csid = clientSendId,
+                localId = localId,
+                sessionId = sessionId,
+                text = textBlock?.text,
+                attachments = uploads,
+            ),
+            seedOptimistic = true,
+            stateFlowOf = stateFlowOf,
+            forgetUpload = forgetUpload,
+        )
+    }
+
+    /**
+     * Cold-start recovery: revives a waiter coroutine for every
+     * pending send that was on disk when the process died. Called
+     * from the coordinator's `onClientBound` AFTER the upload manager
+     * has rehydrated its per-upload state — otherwise [awaitTerminal]
+     * for a persisted `localKey` would resolve null before the upload
+     * coroutine had a chance to register its StateFlow.
+     *
+     * The UI side does NOT seed an optimistic entry here: the user
+     * may not even be on the matching session yet. When they DO open
+     * it, [openSession] reads [inflightDeferred] and re-creates the
+     * bubble from the held metadata.
+     */
+    fun resumeDeferredSendsFromDisk(
+        stateFlowOf: (localKey: String) -> StateFlow<UploadManager.State>?,
+        forgetUpload: (localKey: String) -> Unit,
+    ) {
+        val persisted = pendingSendsRepository.list()
+        for (p in persisted) {
+            if (inflightDeferred.containsKey(p.csid)) continue
+            runDeferredSend(
+                send = InflightDeferredSend(
+                    csid = p.csid,
+                    localId = p.localId,
+                    sessionId = p.sessionId,
+                    text = p.text,
+                    attachments = p.attachments.map {
+                        DeferredUpload(
+                            localKey = it.localKey,
+                            displayName = it.displayName,
+                            mime = it.mime,
+                        )
+                    },
+                ),
+                seedOptimistic = false,
+                stateFlowOf = stateFlowOf,
+                forgetUpload = forgetUpload,
+            )
+        }
+    }
+
+    private fun runDeferredSend(
+        send: InflightDeferredSend,
+        seedOptimistic: Boolean,
+        stateFlowOf: (localKey: String) -> StateFlow<UploadManager.State>?,
+        forgetUpload: (localKey: String) -> Unit,
+    ) {
+        inflightDeferred[send.csid] = send
+        scope.launch {
+            if (seedOptimistic && openSessionId == send.sessionId) {
+                seedOptimisticForDeferred(send)
+            }
+            // Per-attachment byte-level progress observation. The
+            // bubble's "Uploading X / Y MB" badge updates on every
+            // upstream ack; on Paused (no chunks moving, e.g. ack
+            // timeout, ws drop) the badge flips to the Paused
+            // variant so the user can tell stuck-vs-slow.
+            //
+            // `bytesDoneFromPrior` accumulates the COMPLETED
+            // attachments' totalSize, so byte progress on the
+            // currently-being-uploaded attachment lifts the bar
+            // monotonically across all N attachments.
+            val handles = ArrayList<String>(send.attachments.size)
+            var bytesDoneFromPrior = 0L
+            var totalBytesAcrossAll = 0L
+            for (u in send.attachments) {
+                val flow = stateFlowOf(u.localKey)
+                if (flow != null) {
+                    totalBytesAcrossAll += totalBytesFromState(flow.value)
+                }
+            }
+            for ((idx, u) in send.attachments.withIndex()) {
+                val flow = stateFlowOf(u.localKey)
+                if (flow == null) {
+                    cleanupDeferred(
+                        send,
+                        failureReason =
+                            "`${u.displayName}` upload state lost — re-attach to retry",
+                        forgetUpload = forgetUpload,
+                    )
+                    return@launch
+                }
+                val perAttachmentTotal = totalBytesFromState(flow.value)
+                // Per-attachment grand timeout safety net. The chunk
+                // loop in UploadManager has a 30s per-ack timeout that
+                // transitions to Paused — but Paused isn't terminal,
+                // so without this withTimeout the deferred coroutine
+                // would wait forever on a permanently-stuck upload.
+                // 5 minutes is generous: a 5 MB file on bad LTE
+                // typically completes within 60-90s; 5 min lets
+                // a paused→resumed cycle settle.
+                val terminal = kotlinx.coroutines.withTimeoutOrNull(DEFERRED_UPLOAD_TIMEOUT_MS) {
+                    flow
+                        .onEach { state ->
+                            val (sent, status) = when (state) {
+                                is UploadManager.State.Queued ->
+                                    0L to PendingUploadProgress.Status.Uploading
+                                is UploadManager.State.Uploading ->
+                                    state.sent to PendingUploadProgress.Status.Uploading
+                                is UploadManager.State.Paused ->
+                                    state.sent to PendingUploadProgress.Status.Paused
+                                is UploadManager.State.Done ->
+                                    perAttachmentTotal to PendingUploadProgress.Status.Uploading
+                                is UploadManager.State.Failed ->
+                                    0L to PendingUploadProgress.Status.Uploading
+                            }
+                            if (openSessionId == send.sessionId) {
+                                sessionMutex.withLock {
+                                    val map = _pendingUploadProgress.value.toMutableMap()
+                                    map[send.csid] = PendingUploadProgress(
+                                        sentBytes = bytesDoneFromPrior + sent,
+                                        totalBytes = totalBytesAcrossAll.coerceAtLeast(1L),
+                                        status = status,
+                                    )
+                                    _pendingUploadProgress.value = map
+                                }
+                            }
+                        }
+                        .first { state ->
+                            state is UploadManager.State.Done ||
+                                state is UploadManager.State.Failed
+                        }
+                }
+                if (terminal == null) {
+                    cleanupDeferred(
+                        send,
+                        failureReason =
+                            "`${u.displayName}` upload stalled — try again (no progress within ${DEFERRED_UPLOAD_TIMEOUT_MS / 60_000}m)",
+                        forgetUpload = forgetUpload,
+                    )
+                    return@launch
+                }
+                when (terminal) {
+                    is UploadManager.State.Failed -> {
+                        cleanupDeferred(
+                            send,
+                            failureReason =
+                                "`${u.displayName}` failed to upload: ${terminal.reason}",
+                            forgetUpload = forgetUpload,
+                        )
+                        return@launch
+                    }
+                    is UploadManager.State.Done -> {
+                        handles += terminal.handle
+                        bytesDoneFromPrior += perAttachmentTotal
+                    }
+                    else -> {
+                        // Defensive: `first` returns only on Done/Failed.
+                        cleanupDeferred(
+                            send,
+                            failureReason = "`${u.displayName}` upload ended in unexpected state",
+                            forgetUpload = forgetUpload,
+                        )
+                        return@launch
+                    }
+                }
+                // Index variable is unused after Done; suppress.
+                @Suppress("UNUSED_VARIABLE")
+                val _idx = idx
+            }
+            val finalBlocks = buildList<ContentBlockDto> {
+                if (send.text != null) add(ContentBlockDto.Text(send.text))
+                for ((idx, u) in send.attachments.withIndex()) {
+                    add(
+                        ContentBlockDto.ResourceLink(
+                            name = u.displayName,
+                            uri = handles[idx],
+                        ),
+                    )
+                }
+            }
+            val stamped = stampClientSendId(finalBlocks, send.csid)
+            // Clear the upload-progress badge BEFORE the network call —
+            // the bubble transitions to "Sending" (clock icon) for the
+            // RTT window between queueCall enqueue and server echo.
+            sessionMutex.withLock {
+                val map = _pendingUploadProgress.value
+                if (send.csid in map) _pendingUploadProgress.value = map - send.csid
+            }
+            val blocksJson = JsonRpc.json.encodeToJsonElement(
+                ListSerializer(ContentBlockDto.serializer()),
+                stamped,
+            )
+            val params = buildJsonObject {
+                put("session_id", send.sessionId)
+                put("blocks", blocksJson)
+            }
+            val active = context.activeClient()
+            if (active == null) {
+                // No client right now (rare — we shouldn't reach here
+                // unless the connection dropped between Done and the
+                // fire). Keep the disk record so a future
+                // resumeDeferredSendsFromDisk picks it up; drop the
+                // in-memory runtime so the next resume can re-spawn.
+                inflightDeferred.remove(send.csid)
+                return@launch
+            }
+            runCatching {
+                active.queueCall("remote.solution_agent.send_message_blocks", params)
+            }
+                .mapCatching { resp ->
+                    val err = resp.error
+                    if (err != null) error(err.message)
+                    val toolErr = resp.toolError()
+                    if (toolErr != null) error(toolErr)
+                }
+                .fold(
+                    onSuccess = {
+                        cleanupDeferred(send, failureReason = null, forgetUpload = forgetUpload)
+                    },
+                    onFailure = {
+                        val msg = when (it) {
+                            is QueueTtlException ->
+                                "send timed out — the editor was offline for too long"
+                            is RemoteClient.ClosedException ->
+                                "send cancelled — connection closed"
+                            else -> it.message ?: "send failed"
+                        }
+                        cleanupDeferred(send, failureReason = msg, forgetUpload = forgetUpload)
+                    },
+                )
+        }
+    }
+
+    private suspend fun seedOptimisticForDeferred(send: InflightDeferredSend) {
+        val preview = buildDeferredPreview(send)
+        // The csid stamp is mandatory: the chat surface routes the
+        // "Uploading …" badge off `entry.clientSendId == send.csid`
+        // — without it userBubbleStatusFor falls through to "Sending"
+        // and the whole upload-progress UI silently dies.
+        val optimistic = EntrySummary(role = "user", preview = preview, clientSendId = send.csid)
+        sessionMutex.withLock {
+            // Defensive: don't re-seed if the bubble is already present
+            // (shouldn't happen — runDeferredSend is the only producer
+            // — but the cost of an extra check is one indexOf).
+            if (send.csid in optimisticClientSendIds) return@withLock
+            _optimisticEntries.value = _optimisticEntries.value + optimistic
+            optimisticIds.add(send.localId)
+            optimisticClientSendIds.add(send.csid)
+            // Initial placeholder — the runDeferredSend observer's
+            // first StateFlow tick replaces this with real byte counts
+            // typically within tens of ms.
+            _pendingUploadProgress.value = _pendingUploadProgress.value +
+                (send.csid to PendingUploadProgress(
+                    sentBytes = 0L,
+                    totalBytes = 1L,
+                    status = PendingUploadProgress.Status.Uploading,
+                ))
+        }
+    }
+
+    private fun buildDeferredPreview(send: InflightDeferredSend): String {
+        val parts = mutableListOf<String>()
+        send.text?.lineSequence()?.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+            ?.let { parts += it }
+        for (u in send.attachments) {
+            parts += if (u.mime.startsWith("image/")) "[image]" else "[file ${u.displayName}]"
+        }
+        val joined = parts.joinToString(" ")
+        return if (joined.length > 200) joined.take(197) + "..." else joined
+    }
+
+    private suspend fun cleanupDeferred(
+        send: InflightDeferredSend,
+        failureReason: String?,
+        forgetUpload: (localKey: String) -> Unit,
+    ) {
+        inflightDeferred.remove(send.csid)
+        pendingSendsRepository.remove(send.csid)
+        // Release the upload bookkeeping for every attachment regardless
+        // of outcome:
+        //   - success → server consumed the bytes on resolve; the local
+        //     StateFlow + InFlightUploadsRepository disk record are
+        //     dead weight that would otherwise leak until server switch
+        //   - failure (upload failed OR queueCall failed AFTER uploads
+        //     completed) → the bubble drops and the user re-attaches if
+        //     they want to retry; there's no path that re-uses the
+        //     existing localKey
+        // Mirrors the all-Done path in ComposeBar.onClick which calls
+        // onForgetUpload(localKey) right after onSend(...).
+        for (att in send.attachments) {
+            runCatching { forgetUpload(att.localKey) }
+        }
+        // Always clear the pending-upload badge entry. The success path
+        // also nuked it just before queueCall to flip the bubble from
+        // "Uploading" → "Sending", but a race with [openSession]
+        // re-seeding `0/N` between that pre-call clear and this
+        // post-terminal cleanup could leave a permanent dead entry
+        // until the next reset. Idempotent — `- csid` on a missing key
+        // is a no-op.
+        sessionMutex.withLock {
+            val map = _pendingUploadProgress.value
+            if (send.csid in map) _pendingUploadProgress.value = map - send.csid
+        }
+        if (failureReason != null) {
+            // Pop the optimistic bubble (if visible) and surface the
+            // reason. After this the user sees the message disappear
+            // and a snackbar with the failure reason.
+            removeOptimisticById(send.localId)
+            context.emitError(failureReason)
         }
     }
 

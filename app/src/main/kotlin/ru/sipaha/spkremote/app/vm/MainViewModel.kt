@@ -12,6 +12,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.sipaha.spkremote.app.data.DraftRepository
 import ru.sipaha.spkremote.app.data.InFlightUploadsRepository
+import ru.sipaha.spkremote.app.data.PendingSendsRepository
 import ru.sipaha.spkremote.app.data.LastSeenRepository
 import ru.sipaha.spkremote.app.data.ListCacheRepository
 import ru.sipaha.spkremote.app.data.NavStateRepository
@@ -115,6 +116,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
     private val inFlightUploadsRepository: InFlightUploadsRepository =
         InFlightUploadsRepository.get(application) { connectionMgr.activeServerId.value }
 
+    private val pendingSendsRepository: PendingSendsRepository =
+        PendingSendsRepository.get(application) { connectionMgr.activeServerId.value }
+
     // ---- Collaborators (internal names suffixed with `Mgr` / `Store` so
     // they don't clash with the public state-flow names below). ----
 
@@ -150,6 +154,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
         lastSeen = lastSeenIndex,
         sessionList = sessionList,
         sessionHistoryRepository = sessionHistoryRepository,
+        pendingSendsRepository = pendingSendsRepository,
     )
 
     /**
@@ -201,7 +206,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
      * [SessionListStore.refreshSessions]'s offline branch.
      */
     private fun onForegroundResume() {
-        if (connectionMgr.activeClient() == null) return
+        val client = connectionMgr.activeClient() ?: return
+        // Doze / app-suspend silently kills the WS but the lifecycle
+        // loop is mid-backoff (often pinned at the 30s cap by attempt
+        // ≥ 5). Short-circuit it so the user doesn't sit on the
+        // "next try in 30s" banner the moment they unlock the phone.
+        // No-op when we're already Connected/Connecting.
+        client.wakeReconnect()
         val openSid = sessionDetail.openSessionId
         if (openSid != null) {
             sessionDetail.resumeSession(openSid)
@@ -223,6 +234,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
         // it twice on a rapid re-bind is fine, the second call's list
         // will skip entries that are already registered in memory.
         uploadManager.resumeAllFromDisk()
+        // Pending sends (Send-while-uploads-pending) MUST resume
+        // AFTER uploadManager.resumeAllFromDisk — each waiter
+        // coroutine calls UploadManager.awaitTerminal(localKey),
+        // which only resolves once the upload's StateFlow exists
+        // (created by the resume call above).
+        sessionDetail.resumeDeferredSendsFromDisk(
+            stateFlowOf = { localKey -> uploadManager.stateFlowOf(localKey) },
+            forgetUpload = { localKey -> uploadManager.forget(localKey) },
+        )
     }
 
     override fun onTearDown() {
@@ -333,6 +353,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
             // attempt a resume against a wire that knows nothing
             // about those upload_ids.
             uploadManager.forgetAllForServer(serverId)
+            // Deferred-send records reference upload_ids in that
+            // removed server's namespace — drop them too, otherwise
+            // the next cold start would try to resume an orphan send
+            // whose attachments live on a server we no longer pair
+            // with.
+            pendingSendsRepository.removeForServer(serverId)
             connectionMgr.removeServer(serverId)
         }
     }
@@ -360,6 +386,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
     val session: StateFlow<UiData<GetSessionResult>> get() = sessionDetail.session
     val isLoadingOlder: StateFlow<Boolean> get() = sessionDetail.isLoadingOlder
     val optimisticEntries: StateFlow<List<EntrySummary>> get() = sessionDetail.optimisticEntries
+    val pendingUploadProgress: StateFlow<Map<Long, PendingUploadProgress>>
+        get() = sessionDetail.pendingUploadProgress
     val cancelInFlight: StateFlow<Boolean> get() = sessionDetail.cancelInFlight
     val sessionChildren: StateFlow<Map<String, List<SessionSummary>>> get() = sessionList.sessionChildren
     val agents: StateFlow<UiData<List<AgentSummary>>> get() = sessionList.agents
@@ -377,6 +405,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
     fun sendMessage(text: String) = sessionDetail.sendMessage(text)
     fun sendMessageBlocks(blocks: List<ContentBlockDto>) =
         sessionDetail.sendMessageBlocks(blocks)
+    /**
+     * Pending-send variant for the chat compose row: caller pressed
+     * Send while one or more attachments were still uploading. The
+     * store creates the optimistic bubble immediately, waits for each
+     * upload's terminal state via [awaitAttachmentUploadTerminal], and
+     * fires `send_message_blocks` once every handle is available.
+     */
+    fun sendMessageBlocksDeferred(
+        textBlock: ContentBlockDto.Text?,
+        uploads: List<DeferredUpload>,
+    ) = sessionDetail.sendMessageBlocksDeferred(
+        textBlock = textBlock,
+        uploads = uploads,
+        stateFlowOf = { localKey -> uploadManager.stateFlowOf(localKey) },
+        forgetUpload = { localKey -> uploadManager.forget(localKey) },
+    )
     fun cancelTurn() = sessionDetail.cancelTurn()
 
     /**

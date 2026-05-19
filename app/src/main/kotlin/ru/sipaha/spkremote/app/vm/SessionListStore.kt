@@ -232,8 +232,23 @@ internal class SessionListStore(
                 val params = (frame as? JsonObject)?.get("params") as? JsonObject
                     ?: return@collect
                 val kind = params["kind"]?.jsonPrimitive?.content ?: return@collect
-                val data = params["data"] as? JsonObject
-                handleNotification(kind, data)
+                // The server (`editor_mcp::notifications::emit`) wraps each
+                // notification as `params: { kind, payload }`. An earlier
+                // mobile revision read `params["data"]` — that key never
+                // exists on the wire, so EVERY notification arrived with
+                // `data = null`. Most handlers had a "data missing →
+                // refresh-all" fallback, which masked the bug for text
+                // chat (`agent_session_message_appended` triggered a
+                // full re-fetch and the new entry appeared via that
+                // path). `upload_chunk_acked` has no fallback (its only
+                // job is to forward the ack offset into the per-upload
+                // channel), so the silent null sent every chunk-ack
+                // straight to /dev/null and the upload coroutine timed
+                // out at 30 s → Paused at 0 B. Diagnosed 2026-05-19
+                // via server-side `binary frame written: offset=0` +
+                // mobile `Paused at 0 B / 3.0 MB`.
+                val payload = params["payload"] as? JsonObject
+                handleNotification(kind, payload)
             }
         }
     }

@@ -52,10 +52,12 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material3.AssistChip
@@ -123,7 +125,9 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import ru.sipaha.spkremote.app.vm.DeferredUpload
 import ru.sipaha.spkremote.app.vm.MainViewModel
+import ru.sipaha.spkremote.app.vm.PendingUploadProgress
 import ru.sipaha.spkremote.app.vm.UiData
 import ru.sipaha.spkremote.app.vm.UploadManager
 import ru.sipaha.spkremote.core.ContentBlockDto
@@ -168,6 +172,7 @@ fun SessionDetailScreen(
 ) {
     val sessionState by viewModel.session.collectAsState()
     val optimistic by viewModel.optimisticEntries.collectAsState()
+    val pendingUploads by viewModel.pendingUploadProgress.collectAsState()
     val cancelInFlight by viewModel.cancelInFlight.collectAsState()
     val isLoadingOlder by viewModel.isLoadingOlder.collectAsState()
     val childrenMap by viewModel.sessionChildren.collectAsState()
@@ -380,6 +385,15 @@ fun SessionDetailScreen(
                         // handled separately by handleExpiredMessage.
                         viewModel.clearDraft(sessionId)
                     },
+                    onSendDeferred = { text, uploads ->
+                        // User pressed Send while ≥1 upload is still in
+                        // flight. The store places an optimistic bubble
+                        // with an "Uploading X/Y" badge and dispatches
+                        // the real send once every upload reaches Done.
+                        val textBlock = if (text.isNotBlank()) ContentBlockDto.Text(text) else null
+                        viewModel.sendMessageBlocksDeferred(textBlock, uploads)
+                        viewModel.clearDraft(sessionId)
+                    },
                     onAttachmentError = { reason ->
                         scope.launch { snackbarHostState.showSnackbar(reason) }
                     },
@@ -418,6 +432,7 @@ fun SessionDetailScreen(
                 is UiData.Loaded -> ChatList(
                     server = s.value,
                     optimistic = optimistic,
+                    pendingUploads = pendingUploads,
                     isLoadingOlder = isLoadingOlder,
                     onRequestOlder = { viewModel.loadOlder(sessionId) },
                 )
@@ -519,10 +534,19 @@ private fun RenameSessionDialog(
 private fun ChatList(
     server: GetSessionResult,
     optimistic: List<EntrySummary>,
+    pendingUploads: Map<Long, PendingUploadProgress>,
     isLoadingOlder: Boolean,
     onRequestOlder: () -> Unit,
 ) {
     val combined: List<EntrySummary> = server.entries + optimistic
+    // Identity of every optimistic entry is referential — they are the
+    // same objects the store published — so we can use `===` to flip
+    // the per-bubble status icon without touching server entries.
+    val optimisticIdentitySet = remember(optimistic) {
+        java.util.IdentityHashMap<EntrySummary, Unit>().also { map ->
+            for (e in optimistic) map[e] = Unit
+        }
+    }
     val lazyState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
@@ -601,7 +625,12 @@ private fun ChatList(
                 // keeps the stable original index for any future need
                 // (e.g. jump-to-message), even though we don't expose it.
                 itemsIndexed(combined.asReversed()) { _, entry ->
-                    ChatBubble(entry = entry)
+                    val status = userBubbleStatusFor(
+                        entry = entry,
+                        isOptimistic = entry in optimisticIdentitySet,
+                        pendingUploads = pendingUploads,
+                    )
+                    ChatBubble(entry = entry, userStatus = status)
                 }
                 // R-6e: history-edge affordance. Sits at the LOGICAL TOP
                 // of the visible list (= last item in the reverse-layout
@@ -645,11 +674,77 @@ private fun ChatList(
     }
 }
 
+/**
+ * Per-user-bubble status badge.
+ *
+ *   - [None]: historic message (not sent during this session) — no badge.
+ *   - [Uploading]: send queued but waiting for attachment uploads; the
+ *     badge shows progress as `done/total`. Set by the pending-send
+ *     coroutine in [SessionDetailStore.sendMessageBlocksDeferred].
+ *   - [Sending]: optimistic bubble fired and the queueCall is in flight
+ *     (or queued offline). Server hasn't echoed yet.
+ *   - [Delivered]: server echoed the user entry back. Derived directly
+ *     from `entry.clientSendId != null && !isOptimistic` — every recent
+ *     client stamps a csid on outbound user messages, so the presence
+ *     of the field on a server entry IS proof of delivery. No
+ *     client-side set to maintain, no rehydrate path; persists naturally
+ *     across app restarts because the csid lives on the persisted
+ *     server entry itself.
+ */
+internal sealed class UserBubbleStatus {
+    object None : UserBubbleStatus()
+    data class Uploading(
+        val sentBytes: Long,
+        val totalBytes: Long,
+        val paused: Boolean,
+    ) : UserBubbleStatus()
+    object Sending : UserBubbleStatus()
+    object Delivered : UserBubbleStatus()
+}
+
+private fun userBubbleStatusFor(
+    entry: EntrySummary,
+    isOptimistic: Boolean,
+    pendingUploads: Map<Long, PendingUploadProgress>,
+): UserBubbleStatus {
+    if (entry.role != "user") return UserBubbleStatus.None
+    val csid = entry.clientSendId
+    if (isOptimistic) {
+        if (csid != null) {
+            val pending = pendingUploads[csid]
+            if (pending != null && pending.totalBytes > 0) {
+                return UserBubbleStatus.Uploading(
+                    sentBytes = pending.sentBytes,
+                    totalBytes = pending.totalBytes,
+                    paused = pending.status == PendingUploadProgress.Status.Paused,
+                )
+            }
+        }
+        return UserBubbleStatus.Sending
+    }
+    // Server-echoed user entry — if it carries a client_send_id (every
+    // recent client stamps one) the server obviously received it. The
+    // check stays put across app restarts because the csid lives on the
+    // persisted server entry itself; no client-side set to rehydrate.
+    if (csid != null) return UserBubbleStatus.Delivered
+    return UserBubbleStatus.None
+}
+
+/** Pretty-print bytes as "N.N MB" / "NN KB" / "NNN B" for the bubble badge. */
+private fun formatBytes(b: Long): String = when {
+    b >= 1024L * 1024L -> String.format("%.1f MB", b / (1024.0 * 1024.0))
+    b >= 1024L -> "${b / 1024L} KB"
+    else -> "$b B"
+}
+
 @Composable
-private fun ChatBubble(entry: EntrySummary) {
+private fun ChatBubble(
+    entry: EntrySummary,
+    userStatus: UserBubbleStatus = UserBubbleStatus.None,
+) {
     val role = parseEntryRole(entry.role)
     when (role) {
-        EntryRole.User -> UserBubble(entry = entry)
+        EntryRole.User -> UserBubble(entry = entry, status = userStatus)
         EntryRole.Assistant -> {
             // Skip assistant turns whose body is effectively invisible:
             //  - tool-call-only turns produce `## Assistant\n\n\n\n` (no
@@ -703,7 +798,7 @@ private fun ChatBubble(entry: EntrySummary) {
 }
 
 @Composable
-private fun UserBubble(entry: EntrySummary) {
+private fun UserBubble(entry: EntrySummary, status: UserBubbleStatus = UserBubbleStatus.None) {
     Row(
         // start = 48 dp gives the right-aligned user bubble a clear left
         // gutter so even when it grows to its widthIn max the gradient of
@@ -719,25 +814,98 @@ private fun UserBubble(entry: EntrySummary) {
             shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = 16.dp, bottomEnd = 4.dp),
             modifier = Modifier.widthIn(max = 360.dp),
         ) {
-            // Users overwhelmingly send plain text — but accept markdown when
-            // the server returns it (e.g. a paste from a markdown source).
-            // The pinned light-on-primary palette would clobber inline-code
-            // colours, so for user bubbles we never run the markdown
-            // renderer (stays as legible plain Text). Strip the upstream
-            // `## User` header so bubbles don't echo what alignment+color
-            // already encode.
-            //
-            // SelectionContainer enables long-press text selection + the
-            // system Copy/Share toolbar without us shipping our own context
-            // menu. Scoped per-bubble so handles stay inside the bubble's
-            // visual bounds; cross-bubble selection isn't a common UX.
-            SelectionContainer {
+            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                // Users overwhelmingly send plain text — but accept markdown when
+                // the server returns it (e.g. a paste from a markdown source).
+                // The pinned light-on-primary palette would clobber inline-code
+                // colours, so for user bubbles we never run the markdown
+                // renderer (stays as legible plain Text). Strip the upstream
+                // `## User` header so bubbles don't echo what alignment+color
+                // already encode.
+                //
+                // SelectionContainer enables long-press text selection + the
+                // system Copy/Share toolbar without us shipping our own context
+                // menu. Scoped per-bubble so handles stay inside the bubble's
+                // visual bounds; cross-bubble selection isn't a common UX.
+                SelectionContainer {
+                    Text(
+                        text = stripRoleHeading(entry.markdown ?: entry.preview),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+                UserBubbleStatusRow(status = status)
+            }
+        }
+    }
+}
+
+/**
+ * Tiny status row underneath the user-bubble body — shows a per-message
+ * delivery / upload state badge. Omits itself entirely for
+ * [UserBubbleStatus.None] (historic entries) so the bubble height
+ * doesn't bounce when scrolling through old conversations.
+ */
+@Composable
+private fun UserBubbleStatusRow(status: UserBubbleStatus) {
+    if (status is UserBubbleStatus.None) return
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp),
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        when (status) {
+            is UserBubbleStatus.Uploading -> {
+                if (status.paused) {
+                    // No spinner — the loop is NOT making progress.
+                    // Schedule icon (clock) signals "waiting, will retry"
+                    // so the user can tell stalled-vs-progressing.
+                    Icon(
+                        imageVector = Icons.Filled.Schedule,
+                        contentDescription = "Upload paused",
+                        modifier = Modifier.size(12.dp),
+                        tint = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.75f),
+                    )
+                } else {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(12.dp),
+                        strokeWidth = 1.5.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                }
+                Spacer(Modifier.size(6.dp))
+                val pct = if (status.totalBytes > 0L) {
+                    (status.sentBytes * 100L / status.totalBytes).coerceIn(0L, 100L)
+                } else 0L
+                val label = if (status.paused) {
+                    "Paused at ${formatBytes(status.sentBytes)} / ${formatBytes(status.totalBytes)}"
+                } else {
+                    "Uploading ${formatBytes(status.sentBytes)} / ${formatBytes(status.totalBytes)} ($pct%)"
+                }
                 Text(
-                    text = stripRoleHeading(entry.markdown ?: entry.preview),
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    text = label,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.75f),
                 )
             }
+            UserBubbleStatus.Sending -> {
+                Icon(
+                    imageVector = Icons.Filled.Schedule,
+                    contentDescription = "Sending",
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.75f),
+                )
+            }
+            UserBubbleStatus.Delivered -> {
+                Icon(
+                    imageVector = Icons.Filled.Done,
+                    contentDescription = "Delivered",
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f),
+                )
+            }
+            UserBubbleStatus.None -> Unit
         }
     }
 }
@@ -1249,6 +1417,14 @@ private fun ComposeBar(
      */
     onSend: (text: String, blocks: List<ContentBlockDto>) -> Unit,
     /**
+     * Deferred-send entry point used when the user taps Send while one
+     * or more attachments are still uploading. The bubble appears in
+     * chat immediately (with a per-message "Uploading X/Y" badge) and
+     * the wire send fires once every upload reaches Done. Drains the
+     * ComposeBar field + attachment row synchronously like [onSend].
+     */
+    onSendDeferred: (text: String, uploads: List<DeferredUpload>) -> Unit,
+    /**
      * Invoked when an attachment can't be processed (size cap, upload
      * failed). The caller surfaces the reason via the snackbar host and
      * the failing item is silently dropped from the send.
@@ -1396,15 +1572,21 @@ private fun ComposeBar(
     val uploadStates: List<UploadManager.State> = pickedAttachments.map {
         it.uploadState.collectAsState().value
     }
-    // Either there is body text OR there's at least one attachment and
-    // every attachment has reached Done. Refusing the press until every
-    // attachment is Done matches the spec — server resolves
-    // spk-upload://N handles, so a half-uploaded attachment can't be
-    // sent (the handle wouldn't dereference).
-    val attachmentsAllDone = pickedAttachments.isNotEmpty() &&
-        uploadStates.all { it is UploadManager.State.Done }
-    val sendEnabled = enabled && !isRunning &&
-        (draft.isNotBlank() || attachmentsAllDone)
+    // Either there is body text OR there's at least one attachment.
+    // Half-uploaded attachments NO LONGER block Send: tapping while
+    // uploads are in flight routes through [onSendDeferred], which
+    // posts the optimistic bubble immediately and defers the wire
+    // send until every upload's StateFlow reaches Done. A bubble that
+    // can't reach Done (Failed) drops the whole message — see
+    // SessionDetailStore.sendMessageBlocksDeferred.
+    //
+    // Block Send when an upload is in a Failed state — there's no
+    // handle for that one, so the deferred path would just drop the
+    // message after the bubble appears. Better to refuse the press +
+    // tell the user to remove / retry the failing attachment first.
+    val anyUploadFailed = uploadStates.any { it is UploadManager.State.Failed }
+    val sendEnabled = enabled && !isRunning && !anyUploadFailed &&
+        (draft.isNotBlank() || pickedAttachments.isNotEmpty())
     val showCancel = isRunning
 
     Surface(
@@ -1566,41 +1748,68 @@ private fun ComposeBar(
                             val toSendText = draft.trim()
                             val attachments = pickedAttachments
                             if (toSendText.isEmpty() && attachments.isEmpty()) return@FilledIconButton
-                            // No byte-level work on the press: every
-                            // attachment already uploaded its bytes to
-                            // the server via UploadManager and the row's
-                            // upload state is Done (gated by sendEnabled).
-                            // We just need to await the terminal state
-                            // — race-safe vs reading state.value here —
-                            // and assemble the ResourceLink blocks.
-                            composeScope.launch {
-                                val blocks = mutableListOf<ContentBlockDto>()
-                                for (item in attachments) {
-                                    val handle = awaitUploadTerminal(item.localKey)
-                                    if (handle == null) {
-                                        onAttachmentError(
-                                            "`${item.displayName}` failed to upload — drop it and retry",
-                                        )
-                                        continue
-                                    }
-                                    blocks += ContentBlockDto.ResourceLink(
-                                        name = item.displayName,
-                                        uri = handle,
-                                    )
+
+                            // Branch on whether every attachment is
+                            // already Done. If so, fire the existing
+                            // single-shot path — the optimistic bubble
+                            // transitions straight to "Sending →
+                            // Delivered". If any upload is still in
+                            // flight, route through the deferred path:
+                            // the bubble appears immediately with an
+                            // "Uploading X/Y" badge and the store
+                            // dispatches send_message_blocks once
+                            // every upload terminates Done. Failed
+                            // attachments are already blocked by
+                            // [sendEnabled].
+                            val allDone = attachments.isNotEmpty() &&
+                                attachments.all {
+                                    it.uploadState.value is UploadManager.State.Done
                                 }
-                                // Skip the send entirely if every
-                                // attachment failed AND there's no text
-                                // — nothing left worth sending. The
-                                // optimistic bubble would be empty too.
-                                if (toSendText.isEmpty() && blocks.isEmpty()) return@launch
-                                onSend(toSendText, blocks)
-                                // Server consumed the handles on
-                                // resolve — drop the local upload
-                                // bookkeeping. Done outside the send
-                                // (no atomicity required: if the send
-                                // queue retries with a stale handle the
-                                // generic error path surfaces it).
-                                attachments.forEach { onForgetUpload(it.localKey) }
+                            if (attachments.isEmpty() || allDone) {
+                                composeScope.launch {
+                                    val blocks = mutableListOf<ContentBlockDto>()
+                                    for (item in attachments) {
+                                        val handle = awaitUploadTerminal(item.localKey)
+                                        if (handle == null) {
+                                            onAttachmentError(
+                                                "`${item.displayName}` failed to upload — drop it and retry",
+                                            )
+                                            continue
+                                        }
+                                        blocks += ContentBlockDto.ResourceLink(
+                                            name = item.displayName,
+                                            uri = handle,
+                                        )
+                                    }
+                                    if (toSendText.isEmpty() && blocks.isEmpty()) return@launch
+                                    onSend(toSendText, blocks)
+                                    attachments.forEach { onForgetUpload(it.localKey) }
+                                    draft = ""
+                                    pickedAttachments = emptyList()
+                                }
+                            } else {
+                                // Deferred path. We pass DeferredUpload
+                                // descriptors to the store (NOT the
+                                // StateFlows themselves, since the
+                                // store doesn't know about the
+                                // collector — it dereferences localKey
+                                // through the upload manager). The
+                                // store's `cleanupDeferred` calls
+                                // `uploadManager.forget(localKey)` for
+                                // every attachment on both success and
+                                // failure terminals, so no manual
+                                // forget here — same net effect as the
+                                // all-Done path above.
+                                onSendDeferred(
+                                    toSendText,
+                                    attachments.map {
+                                        DeferredUpload(
+                                            localKey = it.localKey,
+                                            displayName = it.displayName,
+                                            mime = it.mimeType,
+                                        )
+                                    },
+                                )
                                 draft = ""
                                 pickedAttachments = emptyList()
                             }
@@ -1746,14 +1955,33 @@ private fun AttachmentPreviewCard(
     val context = LocalContext.current
     val isImage = attachment.mimeType.startsWith("image/", ignoreCase = true)
     val uploadState by attachment.uploadState.collectAsState()
+    // Shared modal trigger for both image and file variants: failure
+    // reasons regularly exceed any inline label or banner clamp
+    // (`upload_init failed: Network error: Software caused connection abort`
+    // is already 4 lines on a phone), and the only place the reason
+    // is visible is on this card. A tap on either the bottom banner
+    // (image) or the body Surface itself (any failed card) opens an
+    // AlertDialog with the selectable full text.
+    var failureDialogOpen by rememberSaveable(attachment.localKey) {
+        mutableStateOf(false)
+    }
     Box(
         modifier = Modifier
             .size(width = 96.dp, height = 72.dp),
     ) {
+        val cardClickable = uploadState is UploadManager.State.Failed
         Surface(
             shape = RoundedCornerShape(8.dp),
             color = MaterialTheme.colorScheme.surfaceVariant,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .then(
+                    if (cardClickable) {
+                        Modifier.clickable { failureDialogOpen = true }
+                    } else {
+                        Modifier
+                    }
+                ),
         ) {
             if (isImage) {
                 val painter: Painter? = remember(attachment.uri) {
@@ -1811,6 +2039,34 @@ private fun AttachmentPreviewCard(
         // Failed. Positioned opposite the × dismiss button (top-right)
         // so the two never collide.
         UploadStateOverlay(state = uploadState)
+        // For image-thumbnail variants the only failure feedback was
+        // the tiny ⚠ overlay icon — text labels live on the file
+        // variant. Surface the failure reason as a bottom-banner so
+        // the user can tell "size mismatch" from "URI permission
+        // expired" etc. without long-pressing for an accessibility
+        // tooltip.
+        if (isImage && uploadState is UploadManager.State.Failed) {
+            // Compact 2-line preview clamped on the thumbnail; the full
+            // text lives in the modal that any tap opens (the parent
+            // Surface above is also `.clickable` when failed, so the
+            // user doesn't have to hit the thin banner exactly).
+            Surface(
+                color = MaterialTheme.colorScheme.errorContainer,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .clickable { failureDialogOpen = true },
+            ) {
+                Text(
+                    text = (uploadState as UploadManager.State.Failed).reason,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                )
+            }
+        }
         // Dismiss × in the top-right corner. Tiny tap target by design
         // (compose row real estate is tight) — paired with the larger
         // card body so an accidental dismiss is rare.
@@ -1835,6 +2091,34 @@ private fun AttachmentPreviewCard(
                     modifier = Modifier.size(12.dp),
                 )
             }
+        }
+        if (failureDialogOpen && uploadState is UploadManager.State.Failed) {
+            val reason = (uploadState as UploadManager.State.Failed).reason
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { failureDialogOpen = false },
+                title = {
+                    androidx.compose.material3.Text("Upload failed: ${attachment.displayName}")
+                },
+                text = {
+                    // SelectionContainer lets the user long-press to
+                    // copy the reason for a bug report — the strings
+                    // come straight from server / exception messages
+                    // and are often the only diagnostic info available.
+                    SelectionContainer {
+                        androidx.compose.material3.Text(
+                            text = reason,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(
+                        onClick = { failureDialogOpen = false },
+                    ) {
+                        androidx.compose.material3.Text("OK")
+                    }
+                },
+            )
         }
     }
 }
@@ -1890,7 +2174,7 @@ private fun uploadStatusLabel(state: UploadManager.State, sizeBytes: Long): Stri
     is UploadManager.State.Paused ->
         if (state.total <= 0L) "paused" else "${(state.sent * 100L / state.total).coerceIn(0L, 100L)}% (paused)"
     is UploadManager.State.Done -> humanReadableSize(sizeBytes)
-    is UploadManager.State.Failed -> "failed"
+    is UploadManager.State.Failed -> state.reason.take(60)
 }
 
 private fun humanReadableSize(bytes: Long): String = when {

@@ -2,12 +2,15 @@ package ru.sipaha.spkremote.app.vm
 
 import android.content.ContentResolver
 import android.net.Uri
+import android.util.Log
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -181,6 +184,10 @@ class UploadManager internal constructor(
             displayName = displayName,
             totalSize = totalSize,
         )
+        Log.i(
+            TAG,
+            "start: localKey=$localKey mime=$mime size=$totalSize displayName=$displayName",
+        )
         launchUploadCoroutine(localKey, resumeFromDisk = false)
         return localKey to state.asStateFlow()
     }
@@ -208,6 +215,16 @@ class UploadManager internal constructor(
      * null when no upload is registered (already forgotten / cancelled).
      */
     fun stateOf(localKey: String): State? = states[localKey]?.value
+
+    /**
+     * Subscribe to per-upload state transitions — used by the deferred-
+     * send coroutine to translate each chunk-ack tick into a byte-level
+     * progress update in the chat bubble. `null` when the upload was
+     * never started (or already forgotten); the caller should fall
+     * through with no-progress in that case.
+     */
+    fun stateFlowOf(localKey: String): StateFlow<State>? =
+        states[localKey]?.asStateFlow()
 
     /**
      * Revive uploads persisted to disk by a previous process. Called by
@@ -367,7 +384,18 @@ class UploadManager internal constructor(
      * value.
      */
     fun onChunkAcked(payload: UploadChunkAckedPayload) {
-        val channel = ackChannels[payload.uploadId] ?: return
+        val channel = ackChannels[payload.uploadId]
+        if (channel == null) {
+            Log.w(
+                TAG,
+                "onChunkAcked: no channel for uploadId=${payload.uploadId} received=${payload.receivedBytes}",
+            )
+            return
+        }
+        Log.i(
+            TAG,
+            "onChunkAcked: uploadId=${payload.uploadId} received=${payload.receivedBytes}",
+        )
         // CONFLATED channels return false on offer when capacity is
         // full — we explicitly drop the older value in that case.
         channel.trySend(payload.receivedBytes)
@@ -385,8 +413,10 @@ class UploadManager internal constructor(
     private suspend fun runUploadLoop(localKey: String, resumeFromDisk: Boolean) {
         val state = states[localKey] ?: return
         val meta = metadata[localKey] ?: return
+        Log.i(TAG, "runUploadLoop start: localKey=$localKey resumeFromDisk=$resumeFromDisk")
         val client = context.activeClient()
         if (client == null) {
+            Log.w(TAG, "runUploadLoop: no active client for $localKey — pausing")
             state.value = State.Paused(0L, meta.totalSize, "no connection")
             // Persist on Queued→Paused transition only when we already
             // had an upload_id (came back from disk). Brand-new
@@ -462,31 +492,87 @@ class UploadManager internal constructor(
                 displayName = meta.displayName,
                 totalSize = meta.totalSize,
             )
-            val initOutcome = runCatching {
-                client.call(
-                    "remote.solution_agent.upload_init",
-                    JsonRpc.json.encodeToJsonElement(UploadInitParams.serializer(), initParams),
-                )
-            }.mapCatching { resp ->
-                val err = resp.error
-                if (err != null) error(err.message)
-                val toolErr = resp.toolError()
-                if (toolErr != null) error(toolErr)
-                val structured = resp.structuredContent()
-                    ?: error("upload_init returned no structuredContent")
-                JsonRpc.json.decodeFromJsonElement(
-                    UploadInitResult.serializer(),
-                    structured,
-                )
-            }
-            val init = initOutcome.getOrElse {
-                state.value = State.Failed("upload_init failed: ${it.message ?: "?"}")
-                cleanupOnTerminal(localKey)
-                return
+            // Retry-on-transient loop. Network blips between the
+            // [RemoteClient] socket and the server (Software-caused
+            // connection abort, dropped Wi-Fi, OS-level TCP reset,
+            // [NotConnectedException] during a reconnect cycle, frame
+            // refused, request-side [TimeoutCancellationException]) all
+            // surface from [RemoteClient.call] as a raised exception
+            // BEFORE we ever look at the response envelope. Treat all
+            // of those as retryable: keep banging on upload_init with
+            // exponential backoff (capped at 30 s, no attempt cap) so
+            // the upload survives a connection blip without forcing
+            // the user to re-attach and re-send. Cancellation of the
+            // job by the user (× on the card → abort(localKey) cancels
+            // [job]) propagates via CancellationException — we re-throw
+            // explicitly because [runCatching] otherwise swallows it.
+            //
+            // The MAPCatching block, by contrast, only fires once we
+            // have a parsed [JsonRpcResponse] back from the server.
+            // Anything caught there is a deterministic server-side or
+            // protocol-level failure (`error.message` from the server,
+            // tool error, malformed structured content) — re-trying
+            // would just reproduce the same response. Those go straight
+            // to [State.Failed].
+            val init: UploadInitResult = run {
+                var attempt = 0
+                while (true) {
+                    val callResult = runCatching {
+                        client.call(
+                            "remote.solution_agent.upload_init",
+                            JsonRpc.json.encodeToJsonElement(
+                                UploadInitParams.serializer(),
+                                initParams,
+                            ),
+                        )
+                    }
+                    if (callResult.isFailure) {
+                        val cause = callResult.exceptionOrNull()!!
+                        if (cause is CancellationException) throw cause
+                        val backoffMs = uploadInitBackoffMs(attempt)
+                        Log.w(
+                            TAG,
+                            "upload_init transient for $localKey " +
+                                "(attempt ${attempt + 1}): ${cause.message ?: cause::class.simpleName} " +
+                                "— retry in ${backoffMs}ms",
+                        )
+                        attempt++
+                        delay(backoffMs)
+                        continue
+                    }
+                    val parsed = runCatching {
+                        val resp = callResult.getOrThrow()
+                        val err = resp.error
+                        if (err != null) error(err.message)
+                        val toolErr = resp.toolError()
+                        if (toolErr != null) error(toolErr)
+                        val structured = resp.structuredContent()
+                            ?: error("upload_init returned no structuredContent")
+                        JsonRpc.json.decodeFromJsonElement(
+                            UploadInitResult.serializer(),
+                            structured,
+                        )
+                    }
+                    val ok = parsed.getOrElse {
+                        if (it is CancellationException) throw it
+                        Log.e(
+                            TAG,
+                            "upload_init FAILED (non-retryable) for $localKey: ${it.message}",
+                            it,
+                        )
+                        state.value =
+                            State.Failed("upload_init failed: ${it.message ?: "?"}")
+                        cleanupOnTerminal(localKey)
+                        return
+                    }
+                    return@run ok
+                }
+                @Suppress("UNREACHABLE_CODE") error("unreachable")
             }
             uploadId = init.uploadId
             startOffset = 0L
             meta.uploadId = uploadId
+            Log.i(TAG, "upload_init OK: localKey=$localKey uploadId=$uploadId")
             persistence.saveOrUpdate(
                 PersistedUpload(
                     localKey = localKey,
@@ -613,7 +699,12 @@ class UploadManager internal constructor(
             }
             val chunk = if (n == buf.size) buf else buf.copyOf(n)
             val frame = buildUploadChunkFrame(uploadId, offset, chunk)
+            Log.i(
+                TAG,
+                "sendBinary: uploadId=$uploadId offset=$offset chunk=$n frame=${frame.size}",
+            )
             val sent = client.sendBinary(frame)
+            Log.i(TAG, "sendBinary result: uploadId=$uploadId offset=$offset sent=$sent")
             if (!sent) {
                 state.value = State.Paused(offset, totalSize, "websocket refused binary frame")
                 return null
@@ -630,9 +721,14 @@ class UploadManager internal constructor(
                 latest
             }
             if (acked == null) {
+                Log.w(
+                    TAG,
+                    "ack timeout: uploadId=$uploadId offset=$offset (waited ${ACK_TIMEOUT_MS}ms)",
+                )
                 state.value = State.Paused(offset, totalSize, "ack timeout — server may be unreachable")
                 return null
             }
+            Log.i(TAG, "ack received: uploadId=$uploadId new_offset=$acked")
             offset = acked
             persistence.saveOrUpdate(
                 PersistedUpload(
@@ -666,6 +762,22 @@ class UploadManager internal constructor(
         // Do NOT touch `persistence` on Done — forget() handles it.
     }
 
+    /**
+     * Backoff schedule for retrying [upload_init] on transient
+     * transport failures. Exponential (500ms × 2^attempt) up to 30s,
+     * jittered ±10% so a herd of attachments queued at the same
+     * disconnect edge doesn't synchronise their wakeups against the
+     * reconnect handshake. No attempt cap — the user explicitly asked
+     * for indefinite retry; the only path out is a non-transient
+     * server response or job cancellation via [abort].
+     */
+    private fun uploadInitBackoffMs(attempt: Int): Long {
+        val exp = 500L shl attempt.coerceAtMost(6)
+        val capped = exp.coerceAtMost(30_000L)
+        val jitter = (capped.toDouble() * 0.1 * (Math.random() * 2 - 1)).toLong()
+        return (capped + jitter).coerceAtLeast(100L)
+    }
+
     companion object {
         /**
          * Maximum wall time to wait for one chunk's ack before
@@ -674,6 +786,7 @@ class UploadManager internal constructor(
          * disk write on the server side spuriously pauses uploads,
          * looser and a half-open NAT pinch silently strands the UI.
          */
+        private const val TAG = "UploadManager"
         private const val ACK_TIMEOUT_MS: Long = 30_000L
     }
 }
