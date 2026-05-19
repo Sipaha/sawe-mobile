@@ -929,14 +929,18 @@ private fun UserBubble(entry: EntrySummary, status: UserBubbleStatus = UserBubbl
             color = MaterialTheme.colorScheme.primary,
             contentColor = MaterialTheme.colorScheme.onPrimary,
             shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = 16.dp, bottomEnd = 4.dp),
-            // animateContentSize: smooth tween between the placeholder
-            // preview ("...", a short ellipsised string) and the full
-            // markdown body that arrives a few hundred ms later via
-            // [fetchAndReplaceEntry]. Without it the bubble would pop
-            // from "square narrow" to "wide" in a single frame.
-            modifier = Modifier
-                .widthIn(max = 360.dp)
-                .animateContentSize(),
+            // No animateContentSize here. The user's own bubble doesn't
+            // grow over time the way an assistant streaming bubble
+            // does; the only width transition is the one-shot
+            // optimistic→server-echo replacement, which on a fresh
+            // send delivers near-identical content. Animating that
+            // single sub-pixel layout shift produced a visible "small
+            // → big → small" oscillation through the spring tween's
+            // overshoot stages, especially when the markdown widget
+            // re-measured a new EntrySummary instance on every
+            // throttled `agent_session_message_appended` arrival.
+            // Discrete one-frame jumps are fine here.
+            modifier = Modifier.widthIn(max = 360.dp),
         ) {
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                 // Users overwhelmingly send plain text — but accept markdown when
@@ -1148,18 +1152,24 @@ private fun AssistantBubble(entry: EntrySummary) {
             color = MaterialTheme.colorScheme.surfaceVariant,
             contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
             shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = 4.dp, bottomEnd = 16.dp),
-            // No `animateContentSize` here. The bubble's body grows
-            // through ~5 debounced EntryUpdated emits per second
-            // during a streaming reply; the default spring-based
-            // content-size animation stacks across those updates and
-            // produces a visible vertical jitter (compress/expand
-            // cycle reported by the user 2026-05-20). Discrete snaps
-            // between updates are barely noticeable and avoid the
-            // stacked-animation artefact entirely. The
-            // [UserBubble]'s analogous animation stays — user bubbles
-            // get at most one placeholder→full-markdown transition
-            // per send, never a streaming sequence.
-            modifier = Modifier.widthIn(max = 360.dp),
+            // Fast, linear animateContentSize for the streaming-grow
+            // case. The default `spring()` overshoots and stacks
+            // across the throttled update sequence (a fresh emit
+            // arriving while the previous spring is still settling
+            // produces compounding bounce — visible as the user-
+            // reported "compress/expand dozens of times" jitter).
+            // 80 ms linear tween is fast enough to complete between
+            // two emits at our 500 ms server-side debounce, slow
+            // enough to mask the discrete per-fetch reflow as a
+            // continuous grow.
+            modifier = Modifier
+                .widthIn(max = 360.dp)
+                .animateContentSize(
+                    animationSpec = androidx.compose.animation.core.tween(
+                        durationMillis = 80,
+                        easing = androidx.compose.animation.core.LinearEasing,
+                    ),
+                ),
         ) {
             Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                 // SelectionContainer wraps the assistant body so the rendered
