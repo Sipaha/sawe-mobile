@@ -12,13 +12,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import ru.sipaha.spkremote.app.data.CachedSessionHistory
 import ru.sipaha.spkremote.app.data.DraftRepository
 import ru.sipaha.spkremote.app.data.SessionHistoryRepository
 import ru.sipaha.spkremote.core.AppendedPlaceholderOutcome
+import ru.sipaha.spkremote.core.ContentBlockDto
 import ru.sipaha.spkremote.core.EntrySummary
+import ru.sipaha.spkremote.core.JsonRpc
 import ru.sipaha.spkremote.core.GetSessionResult
 import ru.sipaha.spkremote.core.MergeOutcome
 import ru.sipaha.spkremote.core.MessageAppendedPayload
@@ -106,6 +109,23 @@ internal class SessionDetailStore(
     private val optimisticIds: MutableList<Long> = mutableListOf()
     private val optimisticIdGen = AtomicLong(0L)
 
+    /**
+     * Per-optimistic-bubble flag marking whether the bubble was produced by
+     * a multi-block send (`sendMessageBlocks`) rather than a plain text
+     * [sendMessage]. Paired with [optimisticIds] by list index. Mutated
+     * together with the entry / id lists under [sessionMutex].
+     *
+     * **Why a separate list?** The content-match dedupe in
+     * `reconcileOptimisticContent` compares the optimistic `preview` (the
+     * user's typed text + a `[image]` / `[file]` annotation) against the
+     * server-echoed user entry. For a blocks send the server formats the
+     * user entry with ACP rendering — different structure, different
+     * preview — so the content-match fires for plain-text bubbles only.
+     * We use this flag to drive the FIFO "drop oldest blocks bubble when
+     * any user-role echo arrives" fallback in [reconcileOptimisticLocked].
+     */
+    private val optimisticBlocksFlags: MutableList<Boolean> = mutableListOf()
+
     private val _cancelInFlight = MutableStateFlow(false)
     val cancelInFlight: StateFlow<Boolean> = _cancelInFlight.asStateFlow()
 
@@ -151,6 +171,7 @@ internal class SessionDetailStore(
                 _session.value = UiData.Loading
                 _optimisticEntries.value = emptyList()
                 optimisticIds.clear()
+                optimisticBlocksFlags.clear()
             }
         }
     }
@@ -193,6 +214,7 @@ internal class SessionDetailStore(
                 _isLoadingOlder.value = false
                 _optimisticEntries.value = emptyList()
                 optimisticIds.clear()
+                optimisticBlocksFlags.clear()
                 lastSeen.primeFromDisk(sessionId)
                 if (cached != null && cached.entries.isNotEmpty()) {
                     // Render the cached transcript immediately so the
@@ -232,6 +254,7 @@ internal class SessionDetailStore(
                 _isLoadingOlder.value = false
                 _optimisticEntries.value = emptyList()
                 optimisticIds.clear()
+                optimisticBlocksFlags.clear()
             }
         }
     }
@@ -665,14 +688,55 @@ internal class SessionDetailStore(
      */
     private fun reconcileOptimisticLocked(serverEntries: List<EntrySummary>) {
         if (_optimisticEntries.value.isEmpty()) return
+        // Snapshot the pre-reconcile state so we can rewrite the parallel
+        // [optimisticBlocksFlags] list to match the kept-id ordering that
+        // the pure reconciler returns.
+        val priorEntries = _optimisticEntries.value
+        val priorIds = optimisticIds.toList()
+        val priorBlocks = optimisticBlocksFlags.toList()
         val (keptEntries, keptIds) = reconcileOptimisticContent(
-            optimistic = _optimisticEntries.value,
-            optimisticIds = optimisticIds.toList(),
+            optimistic = priorEntries,
+            optimisticIds = priorIds,
             serverUserEntries = serverEntries,
         )
-        _optimisticEntries.value = keptEntries
+        // Rebuild the blocks-flag list against the post-reconcile id list
+        // so positional pairing with entries/ids stays consistent.
+        val keptBlocks = keptIds.map { id ->
+            val idx = priorIds.indexOf(id)
+            if (idx >= 0) priorBlocks.getOrElse(idx) { false } else false
+        }
+        // Fallback dedupe (block-bearing bubbles): the content-match
+        // above cannot dedup a blocks-bearing optimistic bubble because
+        // the server-side rendered user entry doesn't equal the local
+        // preview. If the server emitted at least one user entry that
+        // the content-match consumed (or that wasn't in `priorEntries`
+        // at all), pop the oldest still-pending blocks bubble — under
+        // the assumption the user can't fire two blocks sends faster
+        // than a round-trip. Worst case the wrong bubble disappears for
+        // a fraction of a second before the next refresh restores it.
+        val serverUserCount = serverEntries.count { it.role == "user" }
+        val poppedByContent = priorEntries.size - keptEntries.size
+        val remainingUserEchoes = (serverUserCount - poppedByContent).coerceAtLeast(0)
+        var blocksToDrop = remainingUserEchoes
+        val finalEntries = keptEntries.toMutableList()
+        val finalIds = keptIds.toMutableList()
+        val finalBlocks = keptBlocks.toMutableList()
+        var i = 0
+        while (i < finalBlocks.size && blocksToDrop > 0) {
+            if (finalBlocks[i]) {
+                finalEntries.removeAt(i)
+                finalIds.removeAt(i)
+                finalBlocks.removeAt(i)
+                blocksToDrop -= 1
+            } else {
+                i += 1
+            }
+        }
+        _optimisticEntries.value = finalEntries
         optimisticIds.clear()
-        optimisticIds.addAll(keptIds)
+        optimisticIds.addAll(finalIds)
+        optimisticBlocksFlags.clear()
+        optimisticBlocksFlags.addAll(finalBlocks)
     }
 
     fun sendMessage(text: String) {
@@ -685,6 +749,7 @@ internal class SessionDetailStore(
             sessionMutex.withLock {
                 _optimisticEntries.value = _optimisticEntries.value + optimistic
                 optimisticIds.add(localId)
+                optimisticBlocksFlags.add(false)
             }
             val params = buildJsonObject {
                 put("session_id", sessionId)
@@ -701,22 +766,7 @@ internal class SessionDetailStore(
                     if (toolErr != null) error(toolErr)
                 }
                 .onFailure {
-                    sessionMutex.withLock {
-                        // Match by stable id (audit Fix Q) — referential
-                        // equality breaks when reconcileOptimistic has
-                        // rebuilt the list. The two lists stay in sync
-                        // because we mutate them together under the
-                        // mutex.
-                        val idx = optimisticIds.indexOf(localId)
-                        if (idx >= 0) {
-                            optimisticIds.removeAt(idx)
-                            val list = _optimisticEntries.value.toMutableList()
-                            if (idx < list.size) {
-                                list.removeAt(idx)
-                                _optimisticEntries.value = list
-                            }
-                        }
-                    }
+                    removeOptimisticById(localId)
                     val msg = when (it) {
                         is QueueTtlException ->
                             "send timed out — the editor was offline for too long"
@@ -727,6 +777,110 @@ internal class SessionDetailStore(
                     context.emitError(msg)
                 }
         }
+    }
+
+    /**
+     * Multi-block variant of [sendMessage] backing the mobile attach flow.
+     * The block list is encoded as `Vec<acp::ContentBlock>` on the wire
+     * and dispatched via `remote.solution_agent.send_message_blocks`.
+     *
+     * The optimistic bubble carries a flattened text preview (text blocks
+     * concatenated, plus `[image]` / `[file]` annotations for non-text
+     * payloads) so the chat surface shows immediate feedback. The bubble
+     * is dropped on the next user-role server echo — see
+     * [reconcileOptimisticLocked]'s fallback path. Failure removes the
+     * bubble synchronously and surfaces the reason via [ConnectionContext.emitError].
+     */
+    fun sendMessageBlocks(blocks: List<ContentBlockDto>) {
+        if (blocks.isEmpty()) return
+        val active = context.activeClient() ?: return
+        val sessionId = openSessionId ?: return
+        val preview = buildBlocksPreview(blocks)
+        val optimistic = EntrySummary(role = "user", preview = preview)
+        val localId = optimisticIdGen.incrementAndGet()
+        scope.launch {
+            sessionMutex.withLock {
+                _optimisticEntries.value = _optimisticEntries.value + optimistic
+                optimisticIds.add(localId)
+                optimisticBlocksFlags.add(true)
+            }
+            val blocksJson = JsonRpc.json.encodeToJsonElement(
+                ListSerializer(ContentBlockDto.serializer()),
+                blocks,
+            )
+            val params = buildJsonObject {
+                put("session_id", sessionId)
+                put("blocks", blocksJson)
+            }
+            runCatching {
+                active.queueCall("remote.solution_agent.send_message_blocks", params)
+            }
+                .mapCatching { resp ->
+                    val err = resp.error
+                    if (err != null) error(err.message)
+                    val toolErr = resp.toolError()
+                    if (toolErr != null) error(toolErr)
+                }
+                .onFailure {
+                    removeOptimisticById(localId)
+                    val msg = when (it) {
+                        is QueueTtlException ->
+                            "send timed out — the editor was offline for too long"
+                        is RemoteClient.ClosedException ->
+                            "send cancelled — connection closed"
+                        else -> it.message ?: "send failed"
+                    }
+                    context.emitError(msg)
+                }
+        }
+    }
+
+    /**
+     * Drop one optimistic bubble matched by stable [localId]. Both
+     * [optimisticIds] and [optimisticBlocksFlags] stay paired by index
+     * with [_optimisticEntries] because we always mutate the three lists
+     * under [sessionMutex] together; the indexOf lookup here is therefore
+     * referentially safe even after a content-match reconcile.
+     */
+    private suspend fun removeOptimisticById(localId: Long) {
+        sessionMutex.withLock {
+            val idx = optimisticIds.indexOf(localId)
+            if (idx < 0) return@withLock
+            optimisticIds.removeAt(idx)
+            if (idx < optimisticBlocksFlags.size) {
+                optimisticBlocksFlags.removeAt(idx)
+            }
+            val list = _optimisticEntries.value.toMutableList()
+            if (idx < list.size) {
+                list.removeAt(idx)
+                _optimisticEntries.value = list
+            }
+        }
+    }
+
+    /**
+     * Render a one-line preview of a [blocks] list for the optimistic
+     * bubble. Text blocks' first line wins (truncated); image / file
+     * blocks contribute a short bracketed annotation so the user
+     * recognises what they just sent before the server echoes the full
+     * rendering back.
+     */
+    private fun buildBlocksPreview(blocks: List<ContentBlockDto>): String {
+        val parts = mutableListOf<String>()
+        for (block in blocks) {
+            when (block) {
+                is ContentBlockDto.Text -> {
+                    val first = block.text.lineSequence().firstOrNull()?.trim().orEmpty()
+                    if (first.isNotEmpty()) parts += first
+                }
+                is ContentBlockDto.Image -> parts += "[image ${block.mimeType}]"
+                is ContentBlockDto.ResourceLink -> parts += "[link ${block.name}]"
+                is ContentBlockDto.Audio -> parts += "[audio ${block.mimeType}]"
+                is ContentBlockDto.Resource -> parts += "[resource]"
+            }
+        }
+        val joined = parts.joinToString(" ")
+        return if (joined.length > 200) joined.take(197) + "..." else joined
     }
 
     fun cancelTurn() {

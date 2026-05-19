@@ -1,11 +1,18 @@
 package ru.sipaha.spkremote.app.ui.solutions
 
+import android.content.Context
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.util.Base64
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -31,11 +38,15 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
@@ -53,9 +64,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -77,6 +91,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.painter.Painter
@@ -95,16 +110,21 @@ import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
 import com.mikepenz.markdown.model.ImageData
 import com.mikepenz.markdown.model.ImageTransformer
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import ru.sipaha.spkremote.app.vm.MainViewModel
 import ru.sipaha.spkremote.app.vm.UiData
+import ru.sipaha.spkremote.core.AttachmentEncoding
+import ru.sipaha.spkremote.core.ContentBlockDto
 import ru.sipaha.spkremote.core.DisplayState
 import ru.sipaha.spkremote.core.EntryImage
 import ru.sipaha.spkremote.core.EntryRole
 import ru.sipaha.spkremote.core.EntrySummary
+import ru.sipaha.spkremote.core.encodeAttachment
 import ru.sipaha.spkremote.core.GetSessionResult
 import ru.sipaha.spkremote.core.PlanSummary
 import ru.sipaha.spkremote.core.SessionSummary
@@ -146,6 +166,7 @@ fun SessionDetailScreen(
     val childrenMap by viewModel.sessionChildren.collectAsState()
     val sessionsList by viewModel.sessions.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
 
     DisposableEffect(sessionId) {
         viewModel.openSession(sessionId)
@@ -312,14 +333,31 @@ fun SessionDetailScreen(
                     enabled = sessionState is UiData.Loaded,
                     state = displayState,
                     cancelInFlight = cancelInFlight,
-                    onSend = { text ->
-                        viewModel.sendMessage(text)
+                    onSend = { text, blocks ->
+                        // The compose row hands us a finished block list.
+                        // When the list is non-empty we route through
+                        // sendMessageBlocks; the text-only path stays on
+                        // sendMessage so the optimistic-bubble dedupe
+                        // continues to fire by content equality.
+                        if (blocks.isEmpty()) {
+                            viewModel.sendMessage(text)
+                        } else {
+                            val finalBlocks = if (text.isNotBlank()) {
+                                listOf<ContentBlockDto>(ContentBlockDto.Text(text)) + blocks
+                            } else {
+                                blocks
+                            }
+                            viewModel.sendMessageBlocks(finalBlocks)
+                        }
                         // On send, the regular draft is invalidated. We
                         // optimistically clear here so a quick re-open
                         // doesn't repopulate the field even before the
                         // server echo lands. Bounce-on-failure is handled
                         // separately by handleExpiredMessage.
                         viewModel.clearDraft(sessionId)
+                    },
+                    onAttachmentError = { reason ->
+                        scope.launch { snackbarHostState.showSnackbar(reason) }
                     },
                     onCancel = viewModel::cancelTurn,
                     rawState = rawState,
@@ -1116,13 +1154,26 @@ private fun SlimTopBar(
     }
 }
 
-@OptIn(kotlinx.coroutines.FlowPreview::class)
+@OptIn(kotlinx.coroutines.FlowPreview::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun ComposeBar(
     enabled: Boolean,
     state: DisplayState,
     cancelInFlight: Boolean,
-    onSend: (String) -> Unit,
+    /**
+     * Invoked when the user taps Send. [text] is the trimmed input field
+     * contents; [blocks] is the encoded list of successfully-resolved
+     * attachments (empty when nothing is attached). Pure-text sends go via
+     * sendMessage; mixed sends go via sendMessageBlocks.
+     */
+    onSend: (text: String, blocks: List<ContentBlockDto>) -> Unit,
+    /**
+     * Invoked once per attachment that failed to encode (size cap, binary
+     * mime, invalid UTF-8). The caller surfaces the reason via the
+     * snackbar host and the failing item is silently dropped from the
+     * send.
+     */
+    onAttachmentError: (reason: String) -> Unit,
     onCancel: () -> Unit,
     rawState: String,
     sessionId: String,
@@ -1130,6 +1181,54 @@ private fun ComposeBar(
     seedLoaded: Boolean,
     onDraftChanged: suspend (String) -> Unit,
 ) {
+    val context = LocalContext.current
+    val composeScope = rememberCoroutineScope()
+    // Live, non-persisted V1: attachments survive config changes (would
+    // need to round-trip Uri/displayName/mime through Bundle, doable but
+    // out of scope) but are dropped on process death. The expected flow
+    // is "pick → optionally type → Send" within seconds.
+    var pickedAttachments by remember(sessionId) {
+        mutableStateOf<List<PickedAttachment>>(emptyList())
+    }
+    var showAttachSheet by remember { mutableStateOf(false) }
+    val attachSheetState = rememberModalBottomSheetState()
+
+    val photosLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(maxItems = MAX_PHOTOS_PER_PICK),
+    ) { uris ->
+        if (!uris.isNullOrEmpty()) {
+            composeScope.launch {
+                val resolved = withContext(Dispatchers.IO) {
+                    uris.mapNotNull { resolvePickedAttachment(context, it) }
+                }
+                val (accepted, rejected) = resolved.partition { it.sizeBytes <= MAX_ATTACHMENT_BYTES }
+                rejected.forEach {
+                    onAttachmentError("`${it.displayName}` exceeds the 5 MB attachment cap")
+                }
+                if (accepted.isNotEmpty()) {
+                    pickedAttachments = pickedAttachments + accepted
+                }
+            }
+        }
+    }
+    val fileLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            composeScope.launch {
+                val resolved = withContext(Dispatchers.IO) {
+                    resolvePickedAttachment(context, uri)
+                }
+                if (resolved != null) {
+                    if (resolved.sizeBytes > MAX_ATTACHMENT_BYTES) {
+                        onAttachmentError("`${resolved.displayName}` exceeds the 5 MB attachment cap")
+                    } else {
+                        pickedAttachments = pickedAttachments + resolved
+                    }
+                }
+            }
+        }
+    }
     // R-6d: rememberSaveable for config-change resilience + draft-on-disk
     // for cross-restart resilience. `mutableStateOf(initialDraft)` keyed
     // on sessionId resets when the user navigates between sessions; the
@@ -1163,7 +1262,8 @@ private fun ComposeBar(
             .collect { text -> onDraftChanged(text) }
     }
     val isRunning = state == DisplayState.Running
-    val sendEnabled = enabled && !isRunning && draft.isNotBlank()
+    val sendEnabled = enabled && !isRunning &&
+        (draft.isNotBlank() || pickedAttachments.isNotEmpty())
     val showCancel = isRunning
 
     Surface(
@@ -1210,12 +1310,50 @@ private fun ComposeBar(
                 }
             }
 
+            // Picked-attachments preview strip — only when the user has
+            // actually picked something. Horizontal scroll because we cap
+            // photo picks at 4 + 1 file but a long filename can still
+            // make the row wider than the screen.
+            if (pickedAttachments.isNotEmpty()) {
+                LazyRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(pickedAttachments, key = { it.uri.toString() }) { item ->
+                        AttachmentPreviewCard(
+                            attachment = item,
+                            onRemove = {
+                                pickedAttachments = pickedAttachments.filter {
+                                    it.uri != item.uri
+                                }
+                            },
+                        )
+                    }
+                }
+            }
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // Attach affordance — opens a ModalBottomSheet offering
+                // Photos / File pickers. Disabled when the field itself is
+                // disabled (no session loaded). Visually balances the send
+                // IconButton on the right.
+                IconButton(
+                    onClick = { showAttachSheet = true },
+                    enabled = enabled,
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.AttachFile,
+                        contentDescription = "Attach file or image",
+                    )
+                }
                 // Custom pill-shaped input — M3 OutlinedTextField has a
                 // hard-coded 56 dp minimum that's too tall for a chat row.
                 // A BasicTextField wrapped in a Surface lets us shrink to
@@ -1280,10 +1418,32 @@ private fun ComposeBar(
                 } else {
                     FilledIconButton(
                         onClick = {
-                            val toSend = draft.trim()
-                            if (toSend.isNotEmpty()) {
-                                onSend(toSend)
+                            val toSendText = draft.trim()
+                            val attachments = pickedAttachments
+                            if (toSendText.isEmpty() && attachments.isEmpty()) return@FilledIconButton
+                            // Encode attachments off the main thread —
+                            // ContentResolver.openInputStream + readBytes is
+                            // blocking, and a 5 MB file read on the UI thread
+                            // would stutter the press feedback.
+                            composeScope.launch {
+                                val encoded = withContext(Dispatchers.IO) {
+                                    encodeAll(context, attachments)
+                                }
+                                val blocks = mutableListOf<ContentBlockDto>()
+                                encoded.forEach { result ->
+                                    when (result) {
+                                        is AttachmentEncoding.Block -> blocks += result.block
+                                        is AttachmentEncoding.Failure -> onAttachmentError(result.reason)
+                                    }
+                                }
+                                // Skip the send entirely if every attachment
+                                // failed AND there's no text — nothing left
+                                // worth sending. The optimistic bubble would
+                                // be empty too.
+                                if (toSendText.isEmpty() && blocks.isEmpty()) return@launch
+                                onSend(toSendText, blocks)
                                 draft = ""
+                                pickedAttachments = emptyList()
                             }
                         },
                         enabled = sendEnabled,
@@ -1294,6 +1454,225 @@ private fun ComposeBar(
             }
         }
     }
+
+    if (showAttachSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showAttachSheet = false },
+            sheetState = attachSheetState,
+        ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                ListItem(
+                    headlineContent = { Text("Photos") },
+                    leadingContent = {
+                        Icon(Icons.Filled.Image, contentDescription = null)
+                    },
+                    supportingContent = {
+                        Text("Pick up to $MAX_PHOTOS_PER_PICK images")
+                    },
+                    modifier = Modifier.clickable {
+                        showAttachSheet = false
+                        photosLauncher.launch(
+                            androidx.activity.result.PickVisualMediaRequest(
+                                ActivityResultContracts.PickVisualMedia.ImageOnly,
+                            ),
+                        )
+                    },
+                )
+                ListItem(
+                    headlineContent = { Text("File") },
+                    leadingContent = {
+                        Icon(Icons.AutoMirrored.Filled.InsertDriveFile, contentDescription = null)
+                    },
+                    supportingContent = { Text("Text-like files only in V1") },
+                    modifier = Modifier.clickable {
+                        showAttachSheet = false
+                        fileLauncher.launch(arrayOf("*/*"))
+                    },
+                )
+                Spacer(Modifier.height(16.dp))
+            }
+        }
+    }
+}
+
+/**
+ * Live (non-persisted) representation of one file the user has picked
+ * for attaching. URI is the canonical handle — the actual bytes get read
+ * on Send via [ContentResolver.openInputStream]. [sizeBytes] is the
+ * resolver-reported size at pick time; can be `-1` when the SAF provider
+ * refuses to enumerate it, in which case we treat the file as
+ * over-cap (safer than letting an unbounded read into memory).
+ */
+data class PickedAttachment(
+    val uri: Uri,
+    val displayName: String,
+    val mimeType: String,
+    val sizeBytes: Long,
+)
+
+private const val MAX_PHOTOS_PER_PICK = 4
+private const val MAX_ATTACHMENT_BYTES: Long = 5L * 1024 * 1024
+
+/**
+ * Resolve a SAF / PhotoPicker [Uri] into a [PickedAttachment] by
+ * querying the content resolver for `_display_name` + `_size` and the
+ * resolver's MIME type. Unknown size is reported as
+ * [MAX_ATTACHMENT_BYTES] + 1 so the caller rejects it the same as a
+ * genuine over-cap file — better than reading into memory blindly.
+ */
+private fun resolvePickedAttachment(context: Context, uri: Uri): PickedAttachment? {
+    val resolver = context.contentResolver
+    val mime = resolver.getType(uri) ?: "application/octet-stream"
+    var displayName: String = uri.lastPathSegment?.substringAfterLast('/') ?: "attachment"
+    var size: Long = MAX_ATTACHMENT_BYTES + 1
+    runCatching {
+        resolver.query(uri, null, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (nameIndex >= 0 && !cursor.isNull(nameIndex)) {
+                    displayName = cursor.getString(nameIndex) ?: displayName
+                }
+                val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
+                    size = cursor.getLong(sizeIndex)
+                }
+            }
+        }
+    }
+    return PickedAttachment(uri = uri, displayName = displayName, mimeType = mime, sizeBytes = size)
+}
+
+/**
+ * Read each [PickedAttachment]'s bytes off the IO dispatcher and run
+ * them through [encodeAttachment]. A per-item failure (mime not
+ * supported / invalid UTF-8 / read error) yields an
+ * [AttachmentEncoding.Failure] in the corresponding slot — the caller
+ * surfaces every failure via the snackbar and drops the failing item
+ * from the send. A successful slot carries the encoded block.
+ */
+private fun encodeAll(
+    context: Context,
+    attachments: List<PickedAttachment>,
+): List<AttachmentEncoding> = attachments.map { item ->
+    val bytes = runCatching {
+        context.contentResolver.openInputStream(item.uri)?.use { stream ->
+            stream.readBytes()
+        }
+    }.getOrNull()
+    if (bytes == null) {
+        AttachmentEncoding.Failure("Couldn't read `${item.displayName}`")
+    } else {
+        encodeAttachment(bytes = bytes, mimeType = item.mimeType, displayName = item.displayName)
+    }
+}
+
+/**
+ * One picked attachment rendered as a small card in the compose-row
+ * preview strip. Images get a thumbnail decoded at low resolution
+ * (`inSampleSize = 4`) so a 5 MB photo doesn't blow the heap; files get
+ * an icon + name + size readout. The corner × button removes the item
+ * from the live list.
+ */
+@Composable
+private fun AttachmentPreviewCard(
+    attachment: PickedAttachment,
+    onRemove: () -> Unit,
+) {
+    val context = LocalContext.current
+    val isImage = attachment.mimeType.startsWith("image/", ignoreCase = true)
+    Box(
+        modifier = Modifier
+            .size(width = 96.dp, height = 72.dp),
+    ) {
+        Surface(
+            shape = RoundedCornerShape(8.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            if (isImage) {
+                val painter: Painter? = remember(attachment.uri) {
+                    runCatching {
+                        context.contentResolver.openInputStream(attachment.uri)?.use { stream ->
+                            val options = BitmapFactory.Options().apply { inSampleSize = 4 }
+                            val bitmap = BitmapFactory.decodeStream(stream, null, options)
+                            bitmap?.let { BitmapPainter(it.asImageBitmap()) }
+                        }
+                    }.getOrNull()
+                }
+                if (painter != null) {
+                    androidx.compose.foundation.Image(
+                        painter = painter,
+                        contentDescription = attachment.displayName,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Filled.Image, contentDescription = null)
+                    }
+                }
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(6.dp),
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.InsertDriveFile,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Text(
+                        text = attachment.displayName,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = humanReadableSize(attachment.sizeBytes),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        // Dismiss × in the top-right corner. Tiny tap target by design
+        // (compose row real estate is tight) — paired with the larger
+        // card body so an accidental dismiss is rare.
+        Surface(
+            shape = RoundedCornerShape(50),
+            color = MaterialTheme.colorScheme.scrim.copy(alpha = 0.6f),
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(2.dp)
+                .size(18.dp)
+                .clickable(onClick = onRemove)
+                .semantics {
+                    contentDescription = "Remove ${attachment.displayName}"
+                    role = Role.Button
+                },
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    imageVector = Icons.Filled.Close,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(12.dp),
+                )
+            }
+        }
+    }
+}
+
+private fun humanReadableSize(bytes: Long): String = when {
+    bytes < 0 -> "?"
+    bytes < 1024 -> "$bytes B"
+    bytes < 1024 * 1024 -> "${(bytes / 1024)} KB"
+    else -> String.format(java.util.Locale.ROOT, "%.1f MB", bytes / 1024.0 / 1024.0)
 }
 
 /**

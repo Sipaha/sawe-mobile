@@ -18,6 +18,7 @@ import ru.sipaha.spkremote.app.data.PairedServer
 import ru.sipaha.spkremote.app.data.SessionHistoryRepository
 import ru.sipaha.spkremote.core.AgentSummary
 import ru.sipaha.spkremote.core.ConnectionState
+import ru.sipaha.spkremote.core.ContentBlockDto
 import ru.sipaha.spkremote.core.EntrySummary
 import ru.sipaha.spkremote.core.GetSessionResult
 import ru.sipaha.spkremote.core.GetSolutionResult
@@ -331,6 +332,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
     fun closeSession(sessionId: String) = sessionList.closeSession(sessionId)
     fun loadOlder(sessionId: String) = sessionDetail.loadOlder(sessionId)
     fun sendMessage(text: String) = sessionDetail.sendMessage(text)
+    fun sendMessageBlocks(blocks: List<ContentBlockDto>) =
+        sessionDetail.sendMessageBlocks(blocks)
     fun cancelTurn() = sessionDetail.cancelTurn()
 
     /**
