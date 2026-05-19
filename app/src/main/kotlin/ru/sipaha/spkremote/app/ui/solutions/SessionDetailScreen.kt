@@ -610,9 +610,13 @@ private fun AssistantMarkdownBody(markdown: String, images: List<EntryImage>) {
     // model-generated headings stay readable in the bubble.
     Markdown(
         content = markdown,
+        // markdown-renderer 0.39.0 dropped the dedicated `codeText` param —
+        // inline code text now inherits from `text`. Visual regression is
+        // minor (code text loses its onSurface tint, picks up onSurfaceVariant
+        // alongside body text); revisit when the lib exposes a finer-grained
+        // theming API again.
         colors = markdownColor(
             text = MaterialTheme.colorScheme.onSurfaceVariant,
-            codeText = MaterialTheme.colorScheme.onSurface,
             codeBackground = MaterialTheme.colorScheme.surface,
         ),
         typography = markdownTypography(

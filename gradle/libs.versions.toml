@@ -6,7 +6,7 @@ kotlinx-coroutines = "1.11.0"
 kotlinx-serialization = "1.11.0"
 junit-jupiter = "5.12.0"
 junit-platform = "1.12.0"
-compose-bom = "2026.04.00"
+compose-bom = "2026.04.01"
 activity-compose = "1.13.0"
 lifecycle = "2.9.0"
 navigation-compose = "2.9.8"
@@ -26,6 +26,12 @@ junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "jun
 junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version.ref = "junit-platform" }
 compose-bom = { module = "androidx.compose:compose-bom", version.ref = "compose-bom" }
 compose-material3 = { module = "androidx.compose.material3:material3" }
+# Compose BOM 2026.04+ no longer pulls material-icons-* transitively
+# through material3; declare explicitly so Icons.* references resolve.
+# `material-icons-extended` pulls the core artifact for free, so the
+# `Icons.Filled.*` base set + every extended icon both resolve from one
+# dep declaration.
+compose-material-icons-extended = { module = "androidx.compose.material:material-icons-extended" }
 compose-ui = { module = "androidx.compose.ui:ui" }
 compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
 activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activity-compose" }
