@@ -13,69 +13,12 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class UserMessageBlocksTest {
 
-    // ---- encodeAttachment branch coverage ----
-
-    @Test
-    fun `image bytes encode to an Image block carrying base64 + mimeType`() {
-        // 4 raw bytes — 0xDE 0xAD 0xBE 0xEF base64-encodes to "3q2+7w==".
-        val bytes = byteArrayOf(0xDE.toByte(), 0xAD.toByte(), 0xBE.toByte(), 0xEF.toByte())
-        val result = encodeAttachment(bytes, "image/png", "cat.png")
-        val block = (result as AttachmentEncoding.Block).block
-        assertTrue(block is ContentBlockDto.Image, "expected Image, got $block")
-        assertEquals("3q2+7w==", block.data)
-        assertEquals("image/png", block.mimeType)
-    }
-
-    @Test
-    fun `image mime is lowercased before being placed on the wire`() {
-        val result = encodeAttachment(byteArrayOf(0x00), "Image/JPEG", "x.jpg")
-        val block = (result as AttachmentEncoding.Block).block as ContentBlockDto.Image
-        assertEquals("image/jpeg", block.mimeType)
-    }
-
-    @Test
-    fun `text-like bytes become a Text block with a 4-backtick fenced body`() {
-        val body = "println(\"hi\")\n"
-        val bytes = body.toByteArray(Charsets.UTF_8)
-        val result = encodeAttachment(bytes, "text/x-kotlin", "snippet.kt")
-        val block = (result as AttachmentEncoding.Block).block
-        assertTrue(block is ContentBlockDto.Text, "expected Text, got $block")
-        val text = (block as ContentBlockDto.Text).text
-        // Filename appears in the header, fence is exactly 4 backticks.
-        assertTrue(text.contains("`snippet.kt`"), "missing filename in $text")
-        assertTrue(text.contains("````kotlin\n"), "missing 4-backtick opener in $text")
-        assertTrue(text.endsWith("````\n"), "missing 4-backtick closer in $text")
-        // Three-backtick blocks embedded in the file body must not break out
-        // of the outer 4-backtick fence — by construction they're shorter.
-        assertTrue(text.contains(body), "file body absent from $text")
-    }
-
-    @Test
-    fun `application_json is treated as a text-like mime`() {
-        val result = encodeAttachment("{}".toByteArray(), "application/json", "x.json")
-        val block = (result as AttachmentEncoding.Block).block
-        assertTrue(block is ContentBlockDto.Text)
-        assertTrue((block as ContentBlockDto.Text).text.contains("````json\n"))
-    }
-
-    @Test
-    fun `binary mime returns Failure carrying the filename and mime`() {
-        val result = encodeAttachment(byteArrayOf(0, 1, 2), "application/octet-stream", "blob.bin")
-        val failure = result as AttachmentEncoding.Failure
-        assertTrue(failure.reason.contains("blob.bin"), failure.reason)
-        assertTrue(failure.reason.contains("application/octet-stream"), failure.reason)
-    }
-
-    @Test
-    fun `invalid UTF-8 in a text-like mime returns Failure`() {
-        // 0xC3 0x28 — first byte announces a 2-byte sequence, second byte
-        // isn't a valid continuation. Strict UTF-8 decode must reject it.
-        val bytes = byteArrayOf(0xC3.toByte(), 0x28.toByte())
-        val result = encodeAttachment(bytes, "text/plain", "weird.txt")
-        val failure = result as AttachmentEncoding.Failure
-        assertTrue(failure.reason.contains("weird.txt"), failure.reason)
-        assertTrue(failure.reason.contains("UTF-8"), failure.reason)
-    }
+    // (The encodeAttachment branch-coverage tests were removed alongside
+    // the helper itself — the mobile attach flow now routes file bytes
+    // through UploadProtocol's chunked-upload path and the server
+    // resolves ResourceLink {uri = "spk-upload://<id>"} back into the
+    // Image / Text content blocks. See UploadProtocolTest for the
+    // replacement wire-shape coverage.)
 
     // ---- ContentBlockDto wire-shape round-trips ----
 

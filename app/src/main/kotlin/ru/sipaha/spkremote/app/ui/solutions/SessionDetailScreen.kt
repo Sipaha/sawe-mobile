@@ -125,14 +125,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ru.sipaha.spkremote.app.vm.MainViewModel
 import ru.sipaha.spkremote.app.vm.UiData
-import ru.sipaha.spkremote.core.AttachmentEncoding
+import ru.sipaha.spkremote.app.vm.UploadManager
 import ru.sipaha.spkremote.core.ContentBlockDto
 import ru.sipaha.spkremote.core.DisplayState
 import ru.sipaha.spkremote.core.EntryImage
 import ru.sipaha.spkremote.core.EntryRole
 import ru.sipaha.spkremote.core.EntrySummary
-import ru.sipaha.spkremote.core.encodeAttachment
 import ru.sipaha.spkremote.core.GetSessionResult
+import kotlinx.coroutines.flow.StateFlow
 import ru.sipaha.spkremote.core.PlanSummary
 import ru.sipaha.spkremote.core.SessionSummary
 import ru.sipaha.spkremote.core.ToolCallSummary
@@ -357,11 +357,12 @@ fun SessionDetailScreen(
                     state = displayState,
                     cancelInFlight = cancelInFlight,
                     onSend = { text, blocks ->
-                        // The compose row hands us a finished block list.
-                        // When the list is non-empty we route through
-                        // sendMessageBlocks; the text-only path stays on
+                        // Mixed sends (text + attachment handles) route
+                        // through sendMessageBlocks; pure-text stays on
                         // sendMessage so the optimistic-bubble dedupe
-                        // continues to fire by content equality.
+                        // continues to fire by content equality where
+                        // the legacy text-only payload has no _meta
+                        // seam to carry a client_send_id.
                         if (blocks.isEmpty()) {
                             viewModel.sendMessage(text)
                         } else {
@@ -372,11 +373,11 @@ fun SessionDetailScreen(
                             }
                             viewModel.sendMessageBlocks(finalBlocks)
                         }
-                        // On send, the regular draft is invalidated. We
+                        // On send the regular draft is invalidated. We
                         // optimistically clear here so a quick re-open
                         // doesn't repopulate the field even before the
-                        // server echo lands. Bounce-on-failure is handled
-                        // separately by handleExpiredMessage.
+                        // server echo lands. Bounce-on-failure is
+                        // handled separately by handleExpiredMessage.
                         viewModel.clearDraft(sessionId)
                     },
                     onAttachmentError = { reason ->
@@ -388,6 +389,12 @@ fun SessionDetailScreen(
                     initialDraft = seedText,
                     seedLoaded = seedLoaded,
                     onDraftChanged = { text -> viewModel.saveDraft(sessionId, text) },
+                    onStartUpload = { uri, sid, mime, name, size ->
+                        viewModel.startAttachmentUpload(uri, sid, mime, name, size)
+                    },
+                    onCancelUpload = viewModel::cancelAttachmentUpload,
+                    onForgetUpload = viewModel::forgetAttachmentUpload,
+                    awaitUploadTerminal = viewModel::awaitAttachmentUploadTerminal,
                 )
             }
         },
@@ -1233,16 +1240,18 @@ private fun ComposeBar(
     cancelInFlight: Boolean,
     /**
      * Invoked when the user taps Send. [text] is the trimmed input field
-     * contents; [blocks] is the encoded list of successfully-resolved
-     * attachments (empty when nothing is attached). Pure-text sends go via
-     * sendMessage; mixed sends go via sendMessageBlocks.
+     * contents; [blocks] is the list of ResourceLink blocks pointing at
+     * server-side upload handles for every successfully-completed
+     * attachment upload (empty when nothing is attached). Pure-text
+     * sends go via sendMessage; mixed sends go via sendMessageBlocks
+     * with the server resolving each spk-upload://N handle back into
+     * the original Image / Text content block.
      */
     onSend: (text: String, blocks: List<ContentBlockDto>) -> Unit,
     /**
-     * Invoked once per attachment that failed to encode (size cap, binary
-     * mime, invalid UTF-8). The caller surfaces the reason via the
-     * snackbar host and the failing item is silently dropped from the
-     * send.
+     * Invoked when an attachment can't be processed (size cap, upload
+     * failed). The caller surfaces the reason via the snackbar host and
+     * the failing item is silently dropped from the send.
      */
     onAttachmentError: (reason: String) -> Unit,
     onCancel: () -> Unit,
@@ -1251,6 +1260,30 @@ private fun ComposeBar(
     initialDraft: String,
     seedLoaded: Boolean,
     onDraftChanged: suspend (String) -> Unit,
+    /**
+     * Kick off a fresh chunked upload for [uri]. Returns the local key
+     * (used for cancel / forget) + the StateFlow the preview card
+     * collects to drive progress UI.
+     */
+    onStartUpload: (
+        uri: Uri,
+        sessionId: String,
+        mime: String,
+        displayName: String,
+        totalSize: Long,
+    ) -> Pair<String, StateFlow<UploadManager.State>>,
+    /** Abort the upload identified by [localKey] (× tap). */
+    onCancelUpload: (localKey: String) -> Unit,
+    /** Drop local upload state after a successful send consumed the handle. */
+    onForgetUpload: (localKey: String) -> Unit,
+    /**
+     * Suspend until the upload for [localKey] reaches a terminal state.
+     * Returns the server handle on Done, null on Failed. Used by Send
+     * to await the very-last ack rather than snapshotting `state.value`
+     * (the user can hit Send the instant the last chunk fires; the
+     * Done transition lands ~1 RTT later).
+     */
+    awaitUploadTerminal: suspend (localKey: String) -> String?,
 ) {
     val context = LocalContext.current
     val composeScope = rememberCoroutineScope()
@@ -1276,8 +1309,21 @@ private fun ComposeBar(
                 rejected.forEach {
                     onAttachmentError("`${it.displayName}` exceeds the 5 MB attachment cap")
                 }
-                if (accepted.isNotEmpty()) {
-                    pickedAttachments = pickedAttachments + accepted
+                val started = accepted.map { item ->
+                    val (key, flow) = onStartUpload(
+                        item.uri, sessionId, item.mimeType, item.displayName, item.sizeBytes,
+                    )
+                    PickedAttachment(
+                        uri = item.uri,
+                        displayName = item.displayName,
+                        mimeType = item.mimeType,
+                        sizeBytes = item.sizeBytes,
+                        localKey = key,
+                        uploadState = flow,
+                    )
+                }
+                if (started.isNotEmpty()) {
+                    pickedAttachments = pickedAttachments + started
                 }
             }
         }
@@ -1294,7 +1340,18 @@ private fun ComposeBar(
                     if (resolved.sizeBytes > MAX_ATTACHMENT_BYTES) {
                         onAttachmentError("`${resolved.displayName}` exceeds the 5 MB attachment cap")
                     } else {
-                        pickedAttachments = pickedAttachments + resolved
+                        val (key, flow) = onStartUpload(
+                            resolved.uri, sessionId, resolved.mimeType,
+                            resolved.displayName, resolved.sizeBytes,
+                        )
+                        pickedAttachments = pickedAttachments + PickedAttachment(
+                            uri = resolved.uri,
+                            displayName = resolved.displayName,
+                            mimeType = resolved.mimeType,
+                            sizeBytes = resolved.sizeBytes,
+                            localKey = key,
+                            uploadState = flow,
+                        )
                     }
                 }
             }
@@ -1333,8 +1390,21 @@ private fun ComposeBar(
             .collect { text -> onDraftChanged(text) }
     }
     val isRunning = state == DisplayState.Running
+    // Snapshot each attachment's upload state so the Send button reacts
+    // to Done / Failed transitions as they happen. collectAsState() is
+    // the standard Compose-side flow subscription primitive.
+    val uploadStates: List<UploadManager.State> = pickedAttachments.map {
+        it.uploadState.collectAsState().value
+    }
+    // Either there is body text OR there's at least one attachment and
+    // every attachment has reached Done. Refusing the press until every
+    // attachment is Done matches the spec — server resolves
+    // spk-upload://N handles, so a half-uploaded attachment can't be
+    // sent (the handle wouldn't dereference).
+    val attachmentsAllDone = pickedAttachments.isNotEmpty() &&
+        uploadStates.all { it is UploadManager.State.Done }
     val sendEnabled = enabled && !isRunning &&
-        (draft.isNotBlank() || pickedAttachments.isNotEmpty())
+        (draft.isNotBlank() || attachmentsAllDone)
     val showCancel = isRunning
 
     Surface(
@@ -1392,12 +1462,16 @@ private fun ComposeBar(
                         .padding(horizontal = 8.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    items(pickedAttachments, key = { it.uri.toString() }) { item ->
+                    items(pickedAttachments, key = { it.localKey }) { item ->
                         AttachmentPreviewCard(
                             attachment = item,
                             onRemove = {
+                                // Abort the in-flight upload server-side
+                                // (best-effort upload_abort) AND remove
+                                // the local row in one action.
+                                onCancelUpload(item.localKey)
                                 pickedAttachments = pickedAttachments.filter {
-                                    it.uri != item.uri
+                                    it.localKey != item.localKey
                                 }
                             },
                         )
@@ -1492,27 +1566,41 @@ private fun ComposeBar(
                             val toSendText = draft.trim()
                             val attachments = pickedAttachments
                             if (toSendText.isEmpty() && attachments.isEmpty()) return@FilledIconButton
-                            // Encode attachments off the main thread —
-                            // ContentResolver.openInputStream + readBytes is
-                            // blocking, and a 5 MB file read on the UI thread
-                            // would stutter the press feedback.
+                            // No byte-level work on the press: every
+                            // attachment already uploaded its bytes to
+                            // the server via UploadManager and the row's
+                            // upload state is Done (gated by sendEnabled).
+                            // We just need to await the terminal state
+                            // — race-safe vs reading state.value here —
+                            // and assemble the ResourceLink blocks.
                             composeScope.launch {
-                                val encoded = withContext(Dispatchers.IO) {
-                                    encodeAll(context, attachments)
-                                }
                                 val blocks = mutableListOf<ContentBlockDto>()
-                                encoded.forEach { result ->
-                                    when (result) {
-                                        is AttachmentEncoding.Block -> blocks += result.block
-                                        is AttachmentEncoding.Failure -> onAttachmentError(result.reason)
+                                for (item in attachments) {
+                                    val handle = awaitUploadTerminal(item.localKey)
+                                    if (handle == null) {
+                                        onAttachmentError(
+                                            "`${item.displayName}` failed to upload — drop it and retry",
+                                        )
+                                        continue
                                     }
+                                    blocks += ContentBlockDto.ResourceLink(
+                                        name = item.displayName,
+                                        uri = handle,
+                                    )
                                 }
-                                // Skip the send entirely if every attachment
-                                // failed AND there's no text — nothing left
-                                // worth sending. The optimistic bubble would
-                                // be empty too.
+                                // Skip the send entirely if every
+                                // attachment failed AND there's no text
+                                // — nothing left worth sending. The
+                                // optimistic bubble would be empty too.
                                 if (toSendText.isEmpty() && blocks.isEmpty()) return@launch
                                 onSend(toSendText, blocks)
+                                // Server consumed the handles on
+                                // resolve — drop the local upload
+                                // bookkeeping. Done outside the send
+                                // (no atomicity required: if the send
+                                // queue retries with a stale handle the
+                                // generic error path surfaces it).
+                                attachments.forEach { onForgetUpload(it.localKey) }
                                 draft = ""
                                 pickedAttachments = emptyList()
                             }
@@ -1568,13 +1656,32 @@ private fun ComposeBar(
 
 /**
  * Live (non-persisted) representation of one file the user has picked
- * for attaching. URI is the canonical handle — the actual bytes get read
- * on Send via [ContentResolver.openInputStream]. [sizeBytes] is the
- * resolver-reported size at pick time; can be `-1` when the SAF provider
- * refuses to enumerate it, in which case we treat the file as
- * over-cap (safer than letting an unbounded read into memory).
+ * for attaching AND for which an upload has been started. URI is the
+ * canonical handle — the actual bytes stream through [UploadManager]
+ * over the WebSocket binary-frame path, not the old
+ * "readBytes into base64" route.
+ *
+ * [localKey] is the [UploadManager]-assigned identifier used for
+ * cancel / forget. [uploadState] is the per-upload StateFlow the
+ * preview card collects to drive progress / Done / Failed UI.
  */
 data class PickedAttachment(
+    val uri: Uri,
+    val displayName: String,
+    val mimeType: String,
+    val sizeBytes: Long,
+    val localKey: String,
+    val uploadState: StateFlow<UploadManager.State>,
+)
+
+/**
+ * Lightweight intermediate the picker callbacks emit from the
+ * ContentResolver query before they call `onStartUpload`. The
+ * picker partitions over size cap on this shape, then converts the
+ * accepted entries into [PickedAttachment] by stamping in the
+ * UploadManager-assigned localKey + stateFlow.
+ */
+private data class ResolvedAttachment(
     val uri: Uri,
     val displayName: String,
     val mimeType: String,
@@ -1591,7 +1698,7 @@ private const val MAX_ATTACHMENT_BYTES: Long = 5L * 1024 * 1024
  * [MAX_ATTACHMENT_BYTES] + 1 so the caller rejects it the same as a
  * genuine over-cap file — better than reading into memory blindly.
  */
-private fun resolvePickedAttachment(context: Context, uri: Uri): PickedAttachment? {
+private fun resolvePickedAttachment(context: Context, uri: Uri): ResolvedAttachment? {
     val resolver = context.contentResolver
     val mime = resolver.getType(uri) ?: "application/octet-stream"
     var displayName: String = uri.lastPathSegment?.substringAfterLast('/') ?: "attachment"
@@ -1610,31 +1717,7 @@ private fun resolvePickedAttachment(context: Context, uri: Uri): PickedAttachmen
             }
         }
     }
-    return PickedAttachment(uri = uri, displayName = displayName, mimeType = mime, sizeBytes = size)
-}
-
-/**
- * Read each [PickedAttachment]'s bytes off the IO dispatcher and run
- * them through [encodeAttachment]. A per-item failure (mime not
- * supported / invalid UTF-8 / read error) yields an
- * [AttachmentEncoding.Failure] in the corresponding slot — the caller
- * surfaces every failure via the snackbar and drops the failing item
- * from the send. A successful slot carries the encoded block.
- */
-private fun encodeAll(
-    context: Context,
-    attachments: List<PickedAttachment>,
-): List<AttachmentEncoding> = attachments.map { item ->
-    val bytes = runCatching {
-        context.contentResolver.openInputStream(item.uri)?.use { stream ->
-            stream.readBytes()
-        }
-    }.getOrNull()
-    if (bytes == null) {
-        AttachmentEncoding.Failure("Couldn't read `${item.displayName}`")
-    } else {
-        encodeAttachment(bytes = bytes, mimeType = item.mimeType, displayName = item.displayName)
-    }
+    return ResolvedAttachment(uri = uri, displayName = displayName, mimeType = mime, sizeBytes = size)
 }
 
 /**
@@ -1642,7 +1725,18 @@ private fun encodeAll(
  * preview strip. Images get a thumbnail decoded at low resolution
  * (`inSampleSize = 4`) so a 5 MB photo doesn't blow the heap; files get
  * an icon + name + size readout. The corner × button removes the item
- * from the live list.
+ * from the live list (and aborts the upload server-side).
+ *
+ * Upload-state overlay (chunked-upload integration):
+ *   - Queued / Uploading / Paused: a small `CircularProgressIndicator`
+ *     in the top-left, plus a percent label rendered below the
+ *     filename so the user sees "37%" tick up as chunks ack.
+ *   - Done: a small green check icon in the top-left so the user
+ *     knows the attachment is ready to send.
+ *   - Failed: a small red error icon in the top-left + the failure
+ *     reason as the percent label; tap-to-retry isn't wired (cancel
+ *     and re-pick is the V1 recovery path; cheaper to ship than a
+ *     dedicated retry button on a tiny card).
  */
 @Composable
 private fun AttachmentPreviewCard(
@@ -1651,6 +1745,7 @@ private fun AttachmentPreviewCard(
 ) {
     val context = LocalContext.current
     val isImage = attachment.mimeType.startsWith("image/", ignoreCase = true)
+    val uploadState by attachment.uploadState.collectAsState()
     Box(
         modifier = Modifier
             .size(width = 96.dp, height = 72.dp),
@@ -1704,13 +1799,18 @@ private fun AttachmentPreviewCard(
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        text = humanReadableSize(attachment.sizeBytes),
+                        text = uploadStatusLabel(uploadState, attachment.sizeBytes),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
         }
+        // Upload-state overlay in the top-left corner: progress
+        // indicator while in-flight, check on Done, error icon on
+        // Failed. Positioned opposite the × dismiss button (top-right)
+        // so the two never collide.
+        UploadStateOverlay(state = uploadState)
         // Dismiss × in the top-right corner. Tiny tap target by design
         // (compose row real estate is tight) — paired with the larger
         // card body so an accidental dismiss is rare.
@@ -1737,6 +1837,60 @@ private fun AttachmentPreviewCard(
             }
         }
     }
+}
+
+/**
+ * Render the upload-state overlay icon at the top-left of an
+ * [AttachmentPreviewCard]. Receiver is the surrounding [androidx.compose.foundation.layout.BoxScope]
+ * so we can call `.align(Alignment.TopStart)` directly without
+ * threading the Modifier through the call site.
+ */
+@Composable
+private fun androidx.compose.foundation.layout.BoxScope.UploadStateOverlay(
+    state: UploadManager.State,
+) {
+    val align = Modifier
+        .align(Alignment.TopStart)
+        .padding(2.dp)
+        .size(18.dp)
+    when (state) {
+        is UploadManager.State.Queued,
+        is UploadManager.State.Uploading,
+        is UploadManager.State.Paused -> CircularProgressIndicator(
+            modifier = align.padding(2.dp),
+            strokeWidth = 2.dp,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        is UploadManager.State.Done -> Icon(
+            imageVector = Icons.Filled.CheckCircle,
+            contentDescription = "Upload complete",
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = align,
+        )
+        is UploadManager.State.Failed -> Icon(
+            imageVector = Icons.Filled.Warning,
+            contentDescription = "Upload failed: ${state.reason}",
+            tint = MaterialTheme.colorScheme.error,
+            modifier = align,
+        )
+    }
+}
+
+/**
+ * Per-state label rendered below the filename of an
+ * [AttachmentPreviewCard]'s non-image variant. Falls back to the file
+ * size (the pre-upload-state UI) only on [UploadManager.State.Done] /
+ * absence of any state.
+ */
+private fun uploadStatusLabel(state: UploadManager.State, sizeBytes: Long): String = when (state) {
+    is UploadManager.State.Queued -> "0%"
+    is UploadManager.State.Uploading -> {
+        if (state.total <= 0L) "..." else "${(state.sent * 100L / state.total).coerceIn(0L, 100L)}%"
+    }
+    is UploadManager.State.Paused ->
+        if (state.total <= 0L) "paused" else "${(state.sent * 100L / state.total).coerceIn(0L, 100L)}% (paused)"
+    is UploadManager.State.Done -> humanReadableSize(sizeBytes)
+    is UploadManager.State.Failed -> "failed"
 }
 
 private fun humanReadableSize(bytes: Long): String = when {
