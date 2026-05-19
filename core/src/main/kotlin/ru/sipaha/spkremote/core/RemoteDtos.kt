@@ -198,6 +198,16 @@ data class EntrySummary(
     @SerialName("tool_call") val toolCall: ToolCallSummary? = null,
     /** Plan detail — present only on entries with `role=plan`. */
     val plan: PlanSummary? = null,
+    /**
+     * Client-stamped correlation id for the originating user message — the
+     * server lifts `_meta.spk_client_send_id` from the first ContentBlock of
+     * the user message's chunks and re-emits it on this entry. Present only
+     * for `role == "user"` entries that carry the meta (mobile sends stamp
+     * one; desktop-originated sends omit it). Used by mobile to dedupe an
+     * optimistic bubble against the server echo without depending on a
+     * fragile content-match against the truncated preview.
+     */
+    @SerialName("client_send_id") val clientSendId: Long? = null,
 )
 
 /**
@@ -273,6 +283,15 @@ data class MessageAppendedPayload(
     @SerialName("entry_index") val entryIndex: Int,
     val role: String,
     val preview: String,
+    /**
+     * Echoes the originating client's `_meta.spk_client_send_id` stamp on
+     * `role == "user"` appends. Absent (null) when the entry didn't carry
+     * the meta (desktop-originated send, or a mobile pre-stamp client),
+     * which makes this a back-compat addition for older servers and a
+     * fast-pop trigger for stamped sends — see SessionDetailStore's
+     * notification handler.
+     */
+    @SerialName("client_send_id") val clientSendId: Long? = null,
 )
 
 /**

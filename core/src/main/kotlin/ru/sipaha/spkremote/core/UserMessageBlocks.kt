@@ -46,18 +46,45 @@ import kotlinx.serialization.json.JsonObject
  * (which already happens to be the kotlinx default) to be explicit
  * and self-documenting at the use site.
  */
+/**
+ * Per-variant optional `_meta` field. Mirrors `#[serde(rename = "_meta")]`
+ * on each acp::ContentBlock variant — kotlinx-serialization with the
+ * `JsonClassDiscriminator("type")` tag flattens our data-class fields up
+ * next to the discriminator, so a `@SerialName("_meta")` field here lands
+ * as `{"type": "text", "text": "...", "_meta": {...}}` on the wire,
+ * matching the Rust side one-to-one.
+ *
+ * With `JsonRpc.json` configured as `explicitNulls = false`, a null value
+ * is dropped from the wire — older servers that never set the field never
+ * see it, and the wire shape for unstamped blocks is unchanged.
+ *
+ * The server-side ACP decoder treats `_meta` as opaque; it lifts only
+ * `spk_client_send_id` from the first block of a user message's chunks.
+ */
 @Serializable
 @JsonClassDiscriminator("type")
 sealed class ContentBlockDto {
+    /**
+     * Per-variant `_meta` accessor — implemented by each leaf. Kept as a
+     * sealed-class member rather than a generic helper so the call site
+     * doesn't need a `when` over every variant; the visitor in
+     * [stampClientSendId] uses it.
+     */
+    abstract val meta: JsonObject?
+
     @Serializable
     @SerialName("text")
-    data class Text(val text: String) : ContentBlockDto()
+    data class Text(
+        val text: String,
+        @SerialName("_meta") override val meta: JsonObject? = null,
+    ) : ContentBlockDto()
 
     @Serializable
     @SerialName("image")
     data class Image(
         val data: String,
         val mimeType: String,
+        @SerialName("_meta") override val meta: JsonObject? = null,
     ) : ContentBlockDto()
 
     @Serializable
@@ -66,6 +93,7 @@ sealed class ContentBlockDto {
         val name: String,
         val uri: String,
         val description: String? = null,
+        @SerialName("_meta") override val meta: JsonObject? = null,
     ) : ContentBlockDto()
 
     @Serializable
@@ -73,11 +101,48 @@ sealed class ContentBlockDto {
     data class Audio(
         val data: String,
         val mimeType: String,
+        @SerialName("_meta") override val meta: JsonObject? = null,
     ) : ContentBlockDto()
 
     @Serializable
     @SerialName("resource")
-    data class Resource(val resource: JsonObject) : ContentBlockDto()
+    data class Resource(
+        val resource: JsonObject,
+        @SerialName("_meta") override val meta: JsonObject? = null,
+    ) : ContentBlockDto()
+}
+
+/**
+ * Stamp [clientSendId] onto the FIRST block of [blocks] under the
+ * `spk_client_send_id` key of its `_meta` object. Returns a new list —
+ * other blocks are untouched.
+ *
+ * Server-side the ACP decoder reads the meta from the first non-null
+ * block of the user message's chunks, so stamping only the head is
+ * sufficient. If the first block already carries a `_meta` map, the
+ * existing keys are preserved and the spk key is merged in (additive,
+ * non-destructive).
+ *
+ * Pure / total — never throws, returns immutable lists.
+ */
+fun stampClientSendId(blocks: List<ContentBlockDto>, clientSendId: Long): List<ContentBlockDto> {
+    if (blocks.isEmpty()) return blocks
+    val first = blocks.first()
+    val mergedMeta = kotlinx.serialization.json.buildJsonObject {
+        first.meta?.forEach { (k, v) -> put(k, v) }
+        put("spk_client_send_id", kotlinx.serialization.json.JsonPrimitive(clientSendId))
+    }
+    val stamped: ContentBlockDto = when (first) {
+        is ContentBlockDto.Text -> first.copy(meta = mergedMeta)
+        is ContentBlockDto.Image -> first.copy(meta = mergedMeta)
+        is ContentBlockDto.ResourceLink -> first.copy(meta = mergedMeta)
+        is ContentBlockDto.Audio -> first.copy(meta = mergedMeta)
+        is ContentBlockDto.Resource -> first.copy(meta = mergedMeta)
+    }
+    return buildList(blocks.size) {
+        add(stamped)
+        for (i in 1 until blocks.size) add(blocks[i])
+    }
 }
 
 /**

@@ -175,4 +175,132 @@ class UserMessageBlocksTest {
         val back = decode(acpEmitted) as ContentBlockDto.Text
         assertEquals("hi", back.text)
     }
+
+    // ---- _meta + stampClientSendId ----
+
+    @Test
+    fun `Text variant carries _meta on the wire alongside the discriminator`() {
+        // The kotlinx-serialization JsonClassDiscriminator("type") tag must
+        // emit a flat `{ type, text, _meta }` shape — matching the Rust
+        // side's `#[serde(rename = "_meta")]` on each variant. Asserting
+        // this here protects against a future kotlinx upgrade reshuffling
+        // the discriminator placement or someone renaming the field.
+        val meta = buildJsonObject {
+            put("spk_client_send_id", JsonPrimitive(1234567890L))
+        }
+        val block = ContentBlockDto.Text(text = "hi", meta = meta)
+        val json = encode(block)
+        val parsed = JsonRpc.json.parseToJsonElement(json).jsonObject
+        assertEquals("text", parsed["type"]?.jsonPrimitive?.content)
+        assertEquals("hi", parsed["text"]?.jsonPrimitive?.content)
+        val parsedMeta = parsed["_meta"] as? JsonObject
+        assertNotNull(parsedMeta)
+        assertEquals(
+            1234567890L,
+            parsedMeta["spk_client_send_id"]?.jsonPrimitive?.content?.toLong(),
+        )
+        val back = decode(json) as ContentBlockDto.Text
+        assertEquals(meta, back.meta)
+    }
+
+    @Test
+    fun `Image variant round-trips _meta`() {
+        val meta = buildJsonObject { put("spk_client_send_id", JsonPrimitive(7L)) }
+        val block = ContentBlockDto.Image(data = "Zm9v", mimeType = "image/png", meta = meta)
+        val json = encode(block)
+        val back = decode(json) as ContentBlockDto.Image
+        assertEquals(7L, back.meta?.get("spk_client_send_id")?.jsonPrimitive?.content?.toLong())
+    }
+
+    @Test
+    fun `_meta is elided from the wire when null - back-compat with older servers`() {
+        // explicitNulls = false on the JsonRpc.json formatter — a block
+        // without a stamp must serialise to the legacy shape so a desktop
+        // build (or any consumer that doesn't read _meta) sees an
+        // unchanged payload.
+        val json = encode(ContentBlockDto.Text("plain"))
+        val parsed = JsonRpc.json.parseToJsonElement(json).jsonObject
+        assertEquals(setOf("type", "text"), parsed.keys)
+    }
+
+    @Test
+    fun `stampClientSendId on a single-block list stamps the only block`() {
+        val stamped = stampClientSendId(
+            blocks = listOf(ContentBlockDto.Text("hi")),
+            clientSendId = 42L,
+        )
+        assertEquals(1, stamped.size)
+        val meta = (stamped[0] as ContentBlockDto.Text).meta
+        assertNotNull(meta)
+        assertEquals(
+            42L,
+            meta["spk_client_send_id"]?.jsonPrimitive?.content?.toLong(),
+        )
+    }
+
+    @Test
+    fun `stampClientSendId on a multi-block list stamps only the first - rest untouched`() {
+        val original = listOf<ContentBlockDto>(
+            ContentBlockDto.Text("look"),
+            ContentBlockDto.Image(data = "Zm9v", mimeType = "image/png"),
+            ContentBlockDto.Text("more"),
+        )
+        val stamped = stampClientSendId(original, 99L)
+        assertEquals(3, stamped.size)
+        val firstMeta = (stamped[0] as ContentBlockDto.Text).meta
+        assertNotNull(firstMeta)
+        assertEquals(
+            99L,
+            firstMeta["spk_client_send_id"]?.jsonPrimitive?.content?.toLong(),
+        )
+        // Subsequent blocks unchanged (same reference / equal).
+        assertEquals(original[1], stamped[1])
+        assertEquals(original[2], stamped[2])
+    }
+
+    @Test
+    fun `stampClientSendId merges into pre-existing _meta without clobbering other keys`() {
+        val existing = buildJsonObject {
+            put("custom_key", JsonPrimitive("value"))
+            put("nested", buildJsonObject { put("inner", JsonPrimitive(1)) })
+        }
+        val original = listOf<ContentBlockDto>(
+            ContentBlockDto.Text(text = "hi", meta = existing),
+        )
+        val stamped = stampClientSendId(original, 5L)
+        val meta = (stamped[0] as ContentBlockDto.Text).meta
+        assertNotNull(meta)
+        // Existing keys preserved.
+        assertEquals("value", meta["custom_key"]?.jsonPrimitive?.content)
+        // Nested object preserved verbatim.
+        val nested = meta["nested"] as? JsonObject
+        assertNotNull(nested)
+        assertEquals(1, nested["inner"]?.jsonPrimitive?.content?.toInt())
+        // spk key added alongside.
+        assertEquals(
+            5L,
+            meta["spk_client_send_id"]?.jsonPrimitive?.content?.toLong(),
+        )
+    }
+
+    @Test
+    fun `stampClientSendId on an empty list is a no-op`() {
+        val stamped = stampClientSendId(emptyList(), 1L)
+        assertTrue(stamped.isEmpty())
+    }
+
+    @Test
+    fun `stampClientSendId on Resource variant stamps the meta without touching the inner resource object`() {
+        val inner = buildJsonObject { put("uri", JsonPrimitive("file:///x")) }
+        val stamped = stampClientSendId(
+            blocks = listOf(ContentBlockDto.Resource(resource = inner)),
+            clientSendId = 11L,
+        )
+        val block = stamped[0] as ContentBlockDto.Resource
+        assertEquals(inner, block.resource)
+        assertEquals(
+            11L,
+            block.meta?.get("spk_client_send_id")?.jsonPrimitive?.content?.toLong(),
+        )
+    }
 }

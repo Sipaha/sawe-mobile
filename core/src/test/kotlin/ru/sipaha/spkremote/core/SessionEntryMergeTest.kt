@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION")
+
 package ru.sipaha.spkremote.core
 
 import kotlinx.serialization.json.JsonObject
@@ -17,8 +19,18 @@ import org.junit.jupiter.api.Test
  */
 class SessionEntryMergeTest {
 
-    private fun entry(role: String, preview: String, index: Int = -1): EntrySummary =
-        EntrySummary(role = role, preview = preview, index = index)
+    private fun entry(
+        role: String,
+        preview: String,
+        index: Int = -1,
+        clientSendId: Long? = null,
+    ): EntrySummary =
+        EntrySummary(
+            role = role,
+            preview = preview,
+            index = index,
+            clientSendId = clientSendId,
+        )
 
     private fun payload(
         sessionId: String = "s1",
@@ -209,6 +221,169 @@ class SessionEntryMergeTest {
         )
         assertTrue(entries.isEmpty())
         assertTrue(ids.isEmpty())
+    }
+
+    // -------------------------------------------------------------------------
+    // reconcileOptimistic (id-aware)
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `id-aware reconcile drops a bubble when server echo carries the matching client_send_id`() {
+        // The user's text doesn't match the truncated server preview at
+        // all — id-only path must still dedupe. This is the regression
+        // case that motivated the rewrite (long messages truncated to
+        // ~200 chars server-side).
+        val (entries, ids, csids) = reconcileOptimistic(
+            optimistic = listOf(entry("user", "the local full body of a very long message")),
+            optimisticIds = listOf(1L),
+            optimisticClientSendIds = listOf(42L),
+            serverEntries = listOf(
+                entry(
+                    "user",
+                    "the local full body of a ver…",
+                    index = 0,
+                    clientSendId = 42L,
+                ),
+            ),
+        )
+        assertTrue(entries.isEmpty())
+        assertTrue(ids.isEmpty())
+        assertTrue(csids.isEmpty())
+    }
+
+    @Test
+    fun `id-aware reconcile falls back to content-match when csid does not match`() {
+        // Mixed-version corner: client stamps an id, but the server in
+        // this test echoes a different one (e.g. lost meta on retry).
+        // Content-match should still pop the bubble.
+        val (entries, ids, csids) = reconcileOptimistic(
+            optimistic = listOf(entry("user", "hello")),
+            optimisticIds = listOf(1L),
+            optimisticClientSendIds = listOf(42L),
+            serverEntries = listOf(
+                entry("user", "hello", index = 0, clientSendId = 999L),
+            ),
+        )
+        // Server csid 999 doesn't match optimistic csid 42, but the
+        // content-match fallback succeeds. The server entry's csid (999)
+        // doesn't end up in the content-match pool because that pool
+        // only holds entries WITHOUT a csid — so neither path consumes
+        // the server entry. The optimistic bubble is therefore preserved.
+        // This is the intentional behaviour: an explicit csid on the
+        // server entry means "I'm intended for the SPECIFIC client that
+        // stamped this id"; a mismatch is not a content-match overlap.
+        assertEquals(1, entries.size)
+        assertEquals(listOf(1L), ids)
+        assertEquals(listOf(42L), csids)
+    }
+
+    @Test
+    fun `id-aware reconcile keeps the bubble when neither id nor content matches`() {
+        val (entries, ids, csids) = reconcileOptimistic(
+            optimistic = listOf(entry("user", "hello")),
+            optimisticIds = listOf(1L),
+            optimisticClientSendIds = listOf(42L),
+            serverEntries = listOf(entry("assistant", "ack")),
+        )
+        assertEquals(1, entries.size)
+        assertEquals(listOf(1L), ids)
+        assertEquals(listOf(42L), csids)
+    }
+
+    @Test
+    fun `id-aware reconcile mixed mode - one id-match + one content-match in the same call`() {
+        // Two optimistic bubbles, two server echoes — one id-stamped
+        // (long message), one legacy preview-match (e.g. a desktop
+        // send that pre-empted the queue, or a short message). Both
+        // must dedupe in a single call.
+        val (entries, ids, csids) = reconcileOptimistic(
+            optimistic = listOf(
+                entry("user", "long enough to truncate on server"),
+                entry("user", "short msg"),
+            ),
+            optimisticIds = listOf(10L, 20L),
+            optimisticClientSendIds = listOf(42L, null),
+            serverEntries = listOf(
+                entry(
+                    "user",
+                    "long enough to truncate on…",
+                    index = 0,
+                    clientSendId = 42L,
+                ),
+                entry("user", "short msg", index = 1),
+            ),
+        )
+        assertTrue(entries.isEmpty())
+        assertTrue(ids.isEmpty())
+        assertTrue(csids.isEmpty())
+    }
+
+    @Test
+    fun `id-aware reconcile preserves arrival order on partial match - csid hit only`() {
+        // Three bubbles; only the middle one is id-matched by the
+        // server echo. The first and third must survive in their
+        // original order.
+        val (entries, ids, csids) = reconcileOptimistic(
+            optimistic = listOf(
+                entry("user", "first"),
+                entry("user", "second"),
+                entry("user", "third"),
+            ),
+            optimisticIds = listOf(1L, 2L, 3L),
+            optimisticClientSendIds = listOf(11L, 22L, 33L),
+            serverEntries = listOf(
+                entry("user", "second", index = 0, clientSendId = 22L),
+            ),
+        )
+        assertEquals(2, entries.size)
+        assertEquals("first", entries[0].preview)
+        assertEquals("third", entries[1].preview)
+        assertEquals(listOf(1L, 3L), ids)
+        assertEquals(listOf(11L, 33L), csids)
+    }
+
+    @Test
+    fun `id-aware reconcile with null csid only - content-match path - matches the legacy behaviour`() {
+        // Verify the fallback path equals the old reconcileOptimisticContent
+        // semantics when no optimistic bubble was stamped.
+        val (entries, ids, csids) = reconcileOptimistic(
+            optimistic = listOf(
+                entry("user", "first"),
+                entry("user", "second"),
+            ),
+            optimisticIds = listOf(1L, 2L),
+            optimisticClientSendIds = listOf(null, null),
+            serverEntries = listOf(entry("user", "second", index = 0)),
+        )
+        assertEquals(1, entries.size)
+        assertEquals("first", entries[0].preview)
+        assertEquals(listOf(1L), ids)
+        assertEquals(listOf<Long?>(null), csids)
+    }
+
+    @Test
+    fun `id-aware reconcile empty optimistic returns three empty lists`() {
+        val (entries, ids, csids) = reconcileOptimistic(
+            optimistic = emptyList(),
+            optimisticIds = emptyList(),
+            optimisticClientSendIds = emptyList(),
+            serverEntries = listOf(entry("user", "anything")),
+        )
+        assertTrue(entries.isEmpty())
+        assertTrue(ids.isEmpty())
+        assertTrue(csids.isEmpty())
+    }
+
+    @Test
+    fun `id-aware reconcile ignores non-user roles in serverEntries`() {
+        val (entries, _, _) = reconcileOptimistic(
+            optimistic = listOf(entry("user", "hi")),
+            optimisticIds = listOf(1L),
+            optimisticClientSendIds = listOf(7L),
+            serverEntries = listOf(entry("assistant", "hi", clientSendId = 7L)),
+        )
+        // Assistant entries with matching csid mustn't trigger dedupe.
+        assertEquals(1, entries.size)
     }
 
     // -------------------------------------------------------------------------

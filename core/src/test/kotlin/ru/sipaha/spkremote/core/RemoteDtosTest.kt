@@ -1064,6 +1064,79 @@ class RemoteDtosTest {
     }
 
     @Test
+    fun `EntrySummary round-trips with client_send_id populated`() {
+        // Server stamps `client_send_id` only on role==user entries that
+        // were originated by a client that set _meta.spk_client_send_id on
+        // the first ContentBlock. The DTO must surface the value verbatim
+        // for the id-based optimistic dedupe.
+        val text = """
+            {
+              "role": "user",
+              "preview": "hi",
+              "client_send_id": 1715900201500
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(EntrySummary.serializer(), text)
+        assertEquals(1715900201500L, parsed.clientSendId)
+        assertEquals("user", parsed.role)
+
+        val reencoded = JsonRpc.json.encodeToString(EntrySummary.serializer(), parsed)
+        val again = JsonRpc.json.decodeFromString(EntrySummary.serializer(), reencoded)
+        assertEquals(parsed, again)
+        assertEquals(1715900201500L, again.clientSendId)
+    }
+
+    @Test
+    fun `EntrySummary defaults client_send_id to null when omitted`() {
+        // Back-compat: pre-rollout server / non-user roles / desktop-
+        // originated sends never carry the field. The DTO must decode
+        // cleanly with `clientSendId = null`.
+        val text = """{"role":"user","preview":"hello"}"""
+        val parsed = JsonRpc.json.decodeFromString(EntrySummary.serializer(), text)
+        assertNull(parsed.clientSendId)
+    }
+
+    @Test
+    fun `MessageAppendedPayload round-trips with client_send_id`() {
+        // Server emits the meta-stamp on the notification too so the
+        // mobile client can fast-pop the optimistic bubble without
+        // waiting for the next list_sessions refresh.
+        val text = """
+            {
+              "session_id": "ses-1",
+              "entry_index": 7,
+              "role": "user",
+              "preview": "long message body…",
+              "client_send_id": 9876543210
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(MessageAppendedPayload.serializer(), text)
+        assertEquals(9876543210L, parsed.clientSendId)
+
+        val reencoded = JsonRpc.json.encodeToString(MessageAppendedPayload.serializer(), parsed)
+        val again = JsonRpc.json.decodeFromString(MessageAppendedPayload.serializer(), reencoded)
+        assertEquals(parsed, again)
+        assertEquals(9876543210L, again.clientSendId)
+    }
+
+    @Test
+    fun `MessageAppendedPayload defaults client_send_id to null when omitted`() {
+        // Pre-rollout / desktop-originated append — server omits the
+        // field entirely. The DTO must surface null so the fast-pop
+        // path falls through to the next refresh-driven reconcile.
+        val text = """
+            {
+              "session_id": "ses-1",
+              "entry_index": 0,
+              "role": "assistant",
+              "preview": "Hello."
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(MessageAppendedPayload.serializer(), text)
+        assertNull(parsed.clientSendId)
+    }
+
+    @Test
     fun `EntrySummary with plan payload round-trips`() {
         val text = """
             {

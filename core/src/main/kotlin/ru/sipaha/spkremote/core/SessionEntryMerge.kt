@@ -62,46 +62,94 @@ fun applyAppendedPlaceholder(
 
 /**
  * Pop optimistic bubbles whose corresponding server-side "user" entry
- * has now landed. Matching is by `stripRoleHeading(preview)` content,
- * walking optimistic entries in FIFO order and removing one server
- * preview from the candidate set per match. Original arrival order of
- * unmatched optimistic entries is preserved. The companion id list is
- * rewritten in lock-step so the cancel-by-id path in the producer keeps
- * working.
+ * has now landed. Matching is **id-first** (via `client_send_id`
+ * stamped on the optimistic bubble + echoed by the server) with a
+ * content-match fallback for legacy / cross-client entries that don't
+ * carry an id. Walks optimistic entries in arrival order; per-server-
+ * entry consumption is FIFO so duplicate-content sends still dedupe in
+ * order. Original arrival order of unmatched optimistic entries is
+ * preserved. The companion id and client-send-id lists are rewritten
+ * in lock-step so the cancel-by-id path in the producer keeps working.
  *
- * @param optimistic    Current optimistic bubble list (mutated copy returned).
- * @param optimisticIds Stable per-bubble id list paired with [optimistic] by index.
- * @param serverUserEntries The newly-received transcript slice (any role —
- *   the function filters for `role == "user"` internally).
+ * @param optimistic              Current optimistic bubble list.
+ * @param optimisticIds           Stable per-bubble local id list paired
+ *                                with [optimistic] by index.
+ * @param optimisticClientSendIds Per-bubble `_meta.spk_client_send_id`
+ *                                stamp paired with [optimistic] by
+ *                                index. `null` slot when the bubble
+ *                                wasn't stamped (legacy `sendMessage`
+ *                                path, or a future producer that opts
+ *                                out).
+ * @param serverEntries           The newly-received transcript slice
+ *                                (any role — the function filters for
+ *                                `role == "user"` internally).
  *
- * @return `(remainingOptimistic, remainingIds)` — both lists are
- *   freshly-allocated, ready to overwrite the state holders. Both have
- *   the same length and are paired by index, just like the inputs.
+ * @return `(remainingOptimistic, remainingIds, remainingClientSendIds)`
+ *   — all three lists are freshly-allocated, ready to overwrite the
+ *   state holders, paired by index, same length.
  */
+fun reconcileOptimistic(
+    optimistic: List<EntrySummary>,
+    optimisticIds: List<Long>,
+    optimisticClientSendIds: List<Long?>,
+    serverEntries: List<EntrySummary>,
+): Triple<List<EntrySummary>, List<Long>, List<Long?>> {
+    if (optimistic.isEmpty()) {
+        return Triple(emptyList(), emptyList(), emptyList())
+    }
+    val serverUser = serverEntries.filter { it.role == "user" }
+    val serverIds: MutableSet<Long> = serverUser.mapNotNull { it.clientSendId }.toHashSet()
+    val serverPreviews: MutableList<String> = serverUser
+        .filter { it.clientSendId == null }
+        .map { stripRoleHeading(it.preview) }
+        .toMutableList()
+    val keptEntries = mutableListOf<EntrySummary>()
+    val keptIds = mutableListOf<Long>()
+    val keptCsids = mutableListOf<Long?>()
+    for ((idx, opt) in optimistic.withIndex()) {
+        val id = optimisticIds.getOrNull(idx) ?: -1L
+        val csid = optimisticClientSendIds.getOrNull(idx)
+        if (csid != null && serverIds.remove(csid)) {
+            // Id-match — server already echoed this bubble. Drop.
+            continue
+        }
+        val key = stripRoleHeading(opt.preview)
+        val hit = serverPreviews.indexOf(key)
+        if (hit >= 0) {
+            // Content-match fallback (legacy server / cross-client).
+            serverPreviews.removeAt(hit)
+            continue
+        }
+        keptEntries.add(opt)
+        keptIds.add(id)
+        keptCsids.add(csid)
+    }
+    return Triple(keptEntries, keptIds, keptCsids)
+}
+
+/**
+ * Back-compat shim — forwards to [reconcileOptimistic] with an empty
+ * client-send-id list (every slot treated as `null`), so this function
+ * exercises only the content-match fallback path. Kept until every
+ * caller migrates to the id-aware variant; no production code path
+ * should rely on this shim.
+ */
+@Deprecated(
+    message = "Use reconcileOptimistic with client_send_id list for id-based dedupe.",
+    replaceWith = ReplaceWith("reconcileOptimistic(optimistic, optimisticIds, List(optimistic.size) { null }, serverUserEntries)"),
+)
 fun reconcileOptimisticContent(
     optimistic: List<EntrySummary>,
     optimisticIds: List<Long>,
     serverUserEntries: List<EntrySummary>,
 ): Pair<List<EntrySummary>, List<Long>> {
-    if (optimistic.isEmpty()) return emptyList<EntrySummary>() to emptyList()
-    val serverPreviews = serverUserEntries
-        .filter { it.role == "user" }
-        .map { stripRoleHeading(it.preview) }
-        .toMutableList()
-    val keptEntries = mutableListOf<EntrySummary>()
-    val keptIds = mutableListOf<Long>()
-    for ((idx, opt) in optimistic.withIndex()) {
-        val id = optimisticIds.getOrNull(idx) ?: -1L
-        val key = stripRoleHeading(opt.preview)
-        val hit = serverPreviews.indexOf(key)
-        if (hit >= 0) {
-            serverPreviews.removeAt(hit)
-        } else {
-            keptEntries.add(opt)
-            keptIds.add(id)
-        }
-    }
-    return keptEntries to keptIds
+    val (entries, ids, _) = reconcileOptimistic(
+        optimistic = optimistic,
+        optimisticIds = optimisticIds,
+        optimisticClientSendIds = List(optimistic.size) { null },
+        serverEntries = serverUserEntries,
+    )
+    return entries to ids
 }
 
 /**
