@@ -10,18 +10,14 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -58,7 +54,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import ru.sipaha.spkremote.app.vm.MainViewModel
 import ru.sipaha.spkremote.app.vm.UiData
-import ru.sipaha.spkremote.core.CatalogProjectInfo
 import ru.sipaha.spkremote.core.SolutionSummary
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -70,17 +65,10 @@ fun SolutionsListScreen(
     onOpenSettings: () -> Unit,
 ) {
     val solutionsState by viewModel.solutions.collectAsState()
-    val catalog by viewModel.catalog.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     var showCreateDialog by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { viewModel.refreshSolutions() }
-
-    // Pull the registry catalog whenever the create dialog opens so the
-    // picker shows current projects without a stale-cache flash.
-    LaunchedEffect(showCreateDialog) {
-        if (showCreateDialog) viewModel.refreshCatalog()
-    }
 
     LaunchedEffect(solutionsState) {
         val current = solutionsState
@@ -168,10 +156,11 @@ fun SolutionsListScreen(
 
         if (showCreateDialog) {
             CreateSolutionDialog(
-                catalog = catalog,
-                onCreate = { name, catalogIds, emptyNames ->
+                onCreate = { name ->
                     showCreateDialog = false
-                    viewModel.createSolutionWith(name, catalogIds, emptyNames) { newId ->
+                    // Create empty, then land on the solution screen where
+                    // projects are added via the Projects panel.
+                    viewModel.createSolutionWith(name, emptyList(), emptyList()) { newId ->
                         onOpenSolutionById(newId)
                     }
                 },
@@ -252,18 +241,11 @@ private fun SolutionRow(
 
 @Composable
 private fun CreateSolutionDialog(
-    catalog: List<CatalogProjectInfo>,
-    onCreate: (name: String, catalogIds: List<String>, emptyNames: List<String>) -> Unit,
+    onCreate: (name: String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var name by rememberSaveable { mutableStateOf("") }
     var validationError by rememberSaveable { mutableStateOf<String?>(null) }
-    // Selected registry projects (by catalog id) + queued new empty
-    // projects. Both are optional — an empty solution is valid. Plain
-    // `remember` (not rememberSaveable): a Set/List has no default Bundle
-    // saver, and this short-lived dialog needn't survive config changes.
-    var selected by remember { mutableStateOf(emptySet<String>()) }
-    var emptyNames by remember { mutableStateOf(emptyList<String>()) }
     val focusRequester = remember { FocusRequester() }
 
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
@@ -273,75 +255,35 @@ private fun CreateSolutionDialog(
         if (trimmed.isEmpty()) {
             validationError = "Name can't be empty"
         } else {
-            onCreate(trimmed, selected.toList(), emptyNames)
+            onCreate(trimmed)
         }
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("New solution") },
+        // Name only — projects are added afterwards on the solution's
+        // Projects panel. Keeps creation a one-field decision.
         text = {
-            Column(
+            OutlinedTextField(
+                value = name,
+                onValueChange = {
+                    name = it
+                    if (validationError != null) validationError = null
+                },
+                label = { Text("Solution name") },
+                singleLine = true,
+                isError = validationError != null,
+                supportingText = {
+                    val message = validationError
+                    if (message != null) Text(message)
+                },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { submit() }),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 420.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = {
-                        name = it
-                        if (validationError != null) validationError = null
-                    },
-                    label = { Text("Solution name") },
-                    singleLine = true,
-                    isError = validationError != null,
-                    supportingText = {
-                        val message = validationError
-                        if (message != null) Text(message)
-                    },
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = { submit() }),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .focusRequester(focusRequester),
-                )
-
-                Text(
-                    text = "Projects (optional)",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-
-                // Queued new empty projects, each removable before create.
-                for (pending in emptyNames) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = "New: $pending",
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f),
-                        )
-                        IconButton(onClick = { emptyNames = emptyNames - pending }) {
-                            Icon(Icons.Filled.Close, contentDescription = "Remove $pending")
-                        }
-                    }
-                }
-
-                ProjectPicker(
-                    catalog = catalog,
-                    selected = selected,
-                    onToggle = { id ->
-                        selected = if (id in selected) selected - id else selected + id
-                    },
-                    onCreateEmpty = { newName ->
-                        if (newName !in emptyNames) emptyNames = emptyNames + newName
-                    },
-                )
-            }
+                    .focusRequester(focusRequester),
+            )
         },
         confirmButton = { TextButton(onClick = submit) { Text("Create") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
