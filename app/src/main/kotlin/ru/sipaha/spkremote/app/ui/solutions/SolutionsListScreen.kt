@@ -220,7 +220,7 @@ private fun SolutionRow(
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
             title = { Text("Delete solution?") },
-            text = { Text("Delete the solution \"${solution.name}\" from SPK Editor. The member projects' files on the computer are kept.") },
+            text = { Text("Delete the solution \"${solution.name}\" and its projects' files from the computer. This can't be undone.") },
             confirmButton = {
                 TextButton(
                     onClick = {
