@@ -74,6 +74,14 @@ data class CatalogProjectInfo(
 data class CatalogListResult(val projects: List<CatalogProjectInfo> = emptyList())
 
 /**
+ * Result envelope for `solutions.create`. The wire field is `solution_id`
+ * (not `id`); the "create solution with projects" flow needs the new id to
+ * fire follow-up `add_member` / `add_empty_member` calls and to navigate.
+ */
+@Serializable
+data class CreateSolutionResult(@SerialName("solution_id") val solutionId: String)
+
+/**
  * Result envelope for `solutions.add_member`. The clone runs in the
  * background; [operationId] can be polled via `editor.get_operation` but
  * mobile instead watches the `solution_member_add_*` notifications.

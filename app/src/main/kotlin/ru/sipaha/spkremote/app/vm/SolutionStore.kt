@@ -9,8 +9,12 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import ru.sipaha.spkremote.app.data.ListCacheRepository
+import ru.sipaha.spkremote.core.CatalogProjectInfo
+import ru.sipaha.spkremote.core.CreateSolutionResult
 import ru.sipaha.spkremote.core.GetSolutionResult
 import ru.sipaha.spkremote.core.ListSolutionsResult
+import ru.sipaha.spkremote.core.MemberAddCompletedPayload
+import ru.sipaha.spkremote.core.MemberAddProgressPayload
 import ru.sipaha.spkremote.core.SolutionSummary
 
 /**
@@ -23,12 +27,35 @@ internal class SolutionStore(
     private val scope: CoroutineScope,
     private val context: ConnectionContext,
     private val listCacheRepository: ListCacheRepository,
-) {
+) : SolutionNotificationRouter {
     private val _solutions = MutableStateFlow<UiData<List<SolutionSummary>>>(UiData.Loading)
     val solutions: StateFlow<UiData<List<SolutionSummary>>> = _solutions.asStateFlow()
 
     private val _solutionDetails = MutableStateFlow<UiData<GetSolutionResult>>(UiData.Loading)
     val solutionDetails: StateFlow<UiData<GetSolutionResult>> = _solutionDetails.asStateFlow()
+
+    /**
+     * Registry (catalog) projects available to add to a Solution. Backs
+     * the project picker; refreshed lazily on picker open via
+     * [refreshCatalog]. Empty until the first refresh resolves.
+     */
+    private val _catalog = MutableStateFlow<List<CatalogProjectInfo>>(emptyList())
+    val catalog: StateFlow<List<CatalogProjectInfo>> = _catalog.asStateFlow()
+
+    /**
+     * In-flight (and recently-failed) catalog member-adds, keyed by
+     * `(solutionId, catalogId)`. Rendered as ghost member rows with a
+     * spinner + percent, or an error message. Cleared on successful
+     * completion; an entry with a non-null [MemberAddProgress.error]
+     * sticks around so the user can see the failure.
+     *
+     * Empty-project adds are synchronous server-side and never pass
+     * through here — they just refresh the open solution detail.
+     */
+    private val _memberAdds =
+        MutableStateFlow<Map<Pair<String, String>, MemberAddProgress>>(emptyMap())
+    val memberAdds: StateFlow<Map<Pair<String, String>, MemberAddProgress>> =
+        _memberAdds.asStateFlow()
 
     // Single-flight guard for refresh.
     private var refreshSolutionsJob: Job? = null
@@ -52,6 +79,10 @@ internal class SolutionStore(
         // Drop the previous server's solution detail too — otherwise it
         // stays visible until the next `loadSolutionDetails` lands.
         _solutionDetails.value = UiData.Loading
+        // Catalog + in-flight adds are server-scoped; a switch invalidates
+        // both (different registry, different member-add operations).
+        _catalog.value = emptyList()
+        _memberAdds.value = emptyMap()
     }
 
     fun refreshSolutions() {
@@ -150,4 +181,174 @@ internal class SolutionStore(
                 .onFailure { _solutionDetails.value = UiData.Error(it.message ?: "unknown error") }
         }
     }
+
+    /**
+     * Refresh the registry-projects catalog. Errors surface through the
+     * shared error channel but leave the previously-loaded catalog in
+     * place so the picker degrades gracefully on a transient failure.
+     */
+    fun refreshCatalog() {
+        val active = context.activeClient()
+        if (active == null) {
+            context.emitError(context.notConnectedMessage())
+            return
+        }
+        scope.launch {
+            runCatching { active.catalogList() }
+                .onSuccess { _catalog.value = it.projects }
+                .onFailure { context.emitError("Couldn't load projects: ${it.message ?: "?"}") }
+        }
+    }
+
+    /**
+     * Add an existing catalog project to [solutionId]. Seeds an optimistic
+     * ghost-row entry in [memberAdds] so the UI shows progress immediately;
+     * real progress + completion arrive via the `solution_member_add_*`
+     * notification handlers below. On RPC failure the ghost row is marked
+     * with the error rather than silently dropped.
+     */
+    fun addMemberFromCatalog(solutionId: String, catalogId: String) {
+        val active = context.activeClient()
+        if (active == null) {
+            context.emitError(context.notConnectedMessage())
+            return
+        }
+        val key = solutionId to catalogId
+        _memberAdds.value = _memberAdds.value + (key to MemberAddProgress(solutionId, catalogId))
+        scope.launch {
+            runCatching { active.addMember(solutionId, catalogId) }
+                .onFailure { err ->
+                    _memberAdds.value = _memberAdds.value +
+                        (key to MemberAddProgress(solutionId, catalogId, error = err.message ?: "?"))
+                    context.emitError("Couldn't add project: ${err.message ?: "?"}")
+                }
+        }
+    }
+
+    /**
+     * Create a new empty (non-git) project named [name] inside
+     * [solutionId]. Synchronous server-side — on success we re-fetch the
+     * open solution so the new member appears immediately.
+     */
+    fun createEmptyMember(solutionId: String, name: String) {
+        val active = context.activeClient()
+        if (active == null) {
+            context.emitError(context.notConnectedMessage())
+            return
+        }
+        scope.launch {
+            runCatching { active.addEmptyMember(solutionId, name) }
+                .onSuccess { loadSolutionDetails(solutionId) }
+                .onFailure { context.emitError("Couldn't create project: ${it.message ?: "?"}") }
+        }
+    }
+
+    /**
+     * Create a Solution named [name], then populate it: clone each catalog
+     * project in [catalogIds] (async, surfaced as ghost rows) and create an
+     * empty project for each name in [emptyNames] (synchronous). All
+     * selections are optional — an empty Solution is valid. [onCreated] is
+     * invoked with the new solution id once creation succeeds (before the
+     * member-adds finish) so the caller can navigate straight into it.
+     */
+    fun createSolutionWith(
+        name: String,
+        catalogIds: List<String> = emptyList(),
+        emptyNames: List<String> = emptyList(),
+        onCreated: (solutionId: String) -> Unit = {},
+    ) {
+        val active = context.activeClient()
+        if (active == null) {
+            context.emitError(context.notConnectedMessage())
+            return
+        }
+        val params = buildJsonObject { put("name", name) }
+        scope.launch {
+            runCatching {
+                val resp = active.call("remote.solutions.create", params)
+                resp.decodeResultOrThrow(CreateSolutionResult.serializer()).solutionId
+            }
+                .onSuccess { solutionId ->
+                    refreshSolutions()
+                    onCreated(solutionId)
+                    // Fan out the member-adds against the freshly-created
+                    // solution. Catalog clones seed ghost rows; empty
+                    // projects resolve synchronously and refresh detail.
+                    for (catalogId in catalogIds) {
+                        addMemberFromCatalog(solutionId, catalogId)
+                    }
+                    for (emptyName in emptyNames) {
+                        createEmptyMember(solutionId, emptyName)
+                    }
+                }
+                .onFailure { context.emitError("Couldn't create solution: ${it.message ?: "?"}") }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // SolutionNotificationRouter — invoked from SessionListStore's single
+    // notifications collector (wired by MainViewModel). Keep these cheap;
+    // they run on the collector coroutine.
+    // ---------------------------------------------------------------------
+
+    override fun onMemberAddProgress(payload: MemberAddProgressPayload) {
+        val key = payload.solutionId to payload.catalogId
+        _memberAdds.value = _memberAdds.value + (key to MemberAddProgress(
+            solutionId = payload.solutionId,
+            catalogId = payload.catalogId,
+            percent = payload.percent,
+            stage = payload.stage,
+        ))
+    }
+
+    override fun onMemberAddCompleted(payload: MemberAddCompletedPayload) {
+        val key = payload.solutionId to payload.catalogId
+        if (payload.error == null) {
+            // Success — drop the ghost row; the member now exists. The
+            // accompanying `solution_changed` event refreshes the detail.
+            _memberAdds.value = _memberAdds.value - key
+        } else {
+            // Keep the row but mark it failed so the user sees why.
+            _memberAdds.value = _memberAdds.value + (key to MemberAddProgress(
+                solutionId = payload.solutionId,
+                catalogId = payload.catalogId,
+                error = payload.error,
+            ))
+        }
+    }
+
+    override fun onSolutionChanged() {
+        // A solution mutated server-side (member added/removed/created).
+        // Refresh the list and, if a detail is currently shown, re-fetch
+        // it so the member list reflects the change.
+        refreshSolutions()
+        (_solutionDetails.value as? UiData.Loaded)?.value?.solution?.id?.let {
+            loadSolutionDetails(it)
+        }
+    }
+}
+
+/**
+ * Snapshot of one in-flight (or failed) member-add for the ghost-row UI.
+ * [percent] is null for the indeterminate phase or before the first
+ * progress tick; [error] is non-null only on a failed add.
+ */
+internal data class MemberAddProgress(
+    val solutionId: String,
+    val catalogId: String,
+    val percent: Int? = null,
+    val stage: String? = null,
+    val error: String? = null,
+)
+
+/**
+ * Callback surface [SessionListStore]'s consolidated collector uses to
+ * forward solution member-add + change notifications to [SolutionStore].
+ * Mirrors [DetailNotificationRouter]; wired by the coordinator after both
+ * stores are constructed.
+ */
+internal interface SolutionNotificationRouter {
+    fun onMemberAddProgress(payload: MemberAddProgressPayload)
+    fun onMemberAddCompleted(payload: MemberAddCompletedPayload)
+    fun onSolutionChanged()
 }

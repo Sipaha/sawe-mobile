@@ -1202,6 +1202,15 @@ class RemoteDtosTest {
     }
 
     @Test
+    fun `CreateSolutionResult maps snake_case solution_id`() {
+        val parsed = JsonRpc.json.decodeFromString(
+            CreateSolutionResult.serializer(),
+            """{"solution_id": "sol-new-9"}""",
+        )
+        assertEquals("sol-new-9", parsed.solutionId)
+    }
+
+    @Test
     fun `AddMemberResult maps snake_case operation_id`() {
         val parsed = JsonRpc.json.decodeFromString(
             AddMemberResult.serializer(),
