@@ -402,6 +402,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
         solutionStore.createEmptyMember(solutionId, name)
     fun removeMember(solutionId: String, catalogId: String) =
         solutionStore.removeMember(solutionId, catalogId)
+    fun removeCatalogProject(catalogId: String) =
+        solutionStore.removeCatalogProject(catalogId)
 
     // ---- Sessions surface ----
 

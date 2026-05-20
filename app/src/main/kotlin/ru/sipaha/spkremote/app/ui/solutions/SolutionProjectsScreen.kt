@@ -175,6 +175,7 @@ fun SolutionProjectsScreen(
                     emptyNames.forEach { viewModel.createEmptyMember(solutionId, it) }
                 },
                 onDismiss = { showAddProjectDialog = false },
+                onRemoveCatalog = { catalogId -> viewModel.removeCatalogProject(catalogId) },
             )
         }
     }

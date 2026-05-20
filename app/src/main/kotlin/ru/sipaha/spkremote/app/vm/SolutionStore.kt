@@ -201,6 +201,25 @@ internal class SolutionStore(
     }
 
     /**
+     * Remove a project from the registry (catalog). On success the catalog
+     * is refreshed so it disappears from pickers. The server refuses while
+     * any solution still uses it — that rejection is surfaced via the
+     * shared error channel (listing the referencing solutions).
+     */
+    fun removeCatalogProject(catalogId: String) {
+        val active = context.activeClient()
+        if (active == null) {
+            context.emitError(context.notConnectedMessage())
+            return
+        }
+        scope.launch {
+            runCatching { active.catalogRemove(catalogId) }
+                .onSuccess { refreshCatalog() }
+                .onFailure { context.emitError("Couldn't remove from catalog: ${it.message ?: "?"}") }
+        }
+    }
+
+    /**
      * Add an existing catalog project to [solutionId]. Seeds an optimistic
      * ghost-row entry in [memberAdds] so the UI shows progress immediately;
      * real progress + completion arrive via the `solution_member_add_*`

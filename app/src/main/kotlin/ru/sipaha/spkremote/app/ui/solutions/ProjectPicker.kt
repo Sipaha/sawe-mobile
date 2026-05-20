@@ -15,7 +15,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -61,7 +63,12 @@ fun ProjectPicker(
     onToggle: (catalogId: String) -> Unit,
     onCreateEmpty: (String) -> Unit,
     modifier: Modifier = Modifier,
+    // When non-null, each registry row gets a trash affordance that
+    // removes the project from the catalog (after confirmation). The
+    // server refuses while a solution still uses it.
+    onRemoveCatalog: ((catalogId: String) -> Unit)? = null,
 ) {
+    var pendingRemove by remember { mutableStateOf<CatalogProjectInfo?>(null) }
     Column(modifier = modifier.fillMaxWidth()) {
         CreateEmptyProjectRow(onCreateEmpty = onCreateEmpty)
 
@@ -89,11 +96,47 @@ fun ProjectPicker(
                     Text(
                         text = project.name,
                         style = MaterialTheme.typography.bodyLarge,
-                        modifier = Modifier.padding(start = 4.dp),
+                        modifier = Modifier
+                            .padding(start = 4.dp)
+                            .weight(1f),
                     )
+                    if (onRemoveCatalog != null) {
+                        IconButton(onClick = { pendingRemove = project }) {
+                            Icon(
+                                Icons.Filled.Delete,
+                                contentDescription = "Remove ${project.name} from catalog",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                 }
             }
         }
+    }
+
+    val toRemove = pendingRemove
+    if (toRemove != null && onRemoveCatalog != null) {
+        AlertDialog(
+            onDismissRequest = { pendingRemove = null },
+            title = { Text("Remove from catalog?") },
+            text = {
+                Text("Remove \"${toRemove.name}\" from the project registry. Solutions already using it keep their files; the server won't remove it while a solution still references it.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onRemoveCatalog(toRemove.catalogId)
+                        pendingRemove = null
+                    },
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                ) { Text("Remove") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRemove = null }) { Text("Cancel") }
+            },
+        )
     }
 }
 
@@ -204,6 +247,7 @@ fun AddProjectDialog(
     catalog: List<CatalogProjectInfo>,
     onAdd: (catalogIds: List<String>, emptyNames: List<String>) -> Unit,
     onDismiss: () -> Unit,
+    onRemoveCatalog: ((catalogId: String) -> Unit)? = null,
 ) {
     var selected by remember { mutableStateOf(emptySet<String>()) }
     var emptyNames by remember { mutableStateOf(emptyList<String>()) }
@@ -244,6 +288,7 @@ fun AddProjectDialog(
                     onCreateEmpty = { newName ->
                         if (newName !in emptyNames) emptyNames = emptyNames + newName
                     },
+                    onRemoveCatalog = onRemoveCatalog,
                 )
             }
         },

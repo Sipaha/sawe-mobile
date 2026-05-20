@@ -535,6 +535,21 @@ class RemoteClient internal constructor(
         if (err != null) error("remove_member failed: ${err.message}")
     }
 
+    /**
+     * Remove a project from the registry (catalog). The server refuses
+     * (returns an error listing the solutions) if any solution still has
+     * it as a member, so cached clones of in-use projects are never
+     * orphaned. The tool-level rejection surfaces via [JsonRpcResponse.toolError].
+     */
+    suspend fun catalogRemove(catalogId: String) {
+        val params = buildJsonObject { put("catalog_id", catalogId) }
+        val response = call("remote.catalog.remove_project", params)
+        val err = response.error
+        if (err != null) error(err.message)
+        val toolErr = response.toolError()
+        if (toolErr != null) error(toolErr)
+    }
+
     // ---------------------------------------------------------------------
     // Lifecycle coroutine
     // ---------------------------------------------------------------------
