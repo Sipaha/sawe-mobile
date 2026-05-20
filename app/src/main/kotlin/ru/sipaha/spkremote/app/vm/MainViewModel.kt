@@ -145,7 +145,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
         listCacheRepository = listCacheRepository,
         lastSeen = lastSeenIndex,
         sessionHistoryRepository = sessionHistoryRepository,
-    )
+    ).also {
+        // Fan out solution member-add + change notifications from the
+        // single shared collector into SolutionStore (ghost rows + member
+        // list refresh). Mirrors the upload-ack wiring below.
+        it.solutionNotificationRouter = solutionStore
+    }
 
     private val sessionDetail: SessionDetailStore = SessionDetailStore(
         scope = viewModelScope,

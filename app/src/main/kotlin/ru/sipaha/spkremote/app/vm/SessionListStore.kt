@@ -18,6 +18,8 @@ import ru.sipaha.spkremote.core.GetSessionChildrenResult
 import ru.sipaha.spkremote.core.JsonRpc
 import ru.sipaha.spkremote.core.ListAgentsResult
 import ru.sipaha.spkremote.core.ListSessionsResult
+import ru.sipaha.spkremote.core.MemberAddCompletedPayload
+import ru.sipaha.spkremote.core.MemberAddProgressPayload
 import ru.sipaha.spkremote.core.MessageAppendedPayload
 import ru.sipaha.spkremote.core.RemoteClient
 import ru.sipaha.spkremote.core.SessionCreatedPayload
@@ -89,6 +91,14 @@ internal class SessionListStore(
      * router above to avoid double subscriptions.
      */
     internal var uploadNotificationRouter: ((UploadChunkAckedPayload) -> Unit)? = null
+
+    /**
+     * Solution member-add / change notification routing — wired by the
+     * coordinator to [SolutionStore]. Same single-collector discipline as
+     * the detail + upload routers above: the list store owns the one
+     * subscription, [SolutionStore] just consumes the typed payloads.
+     */
+    internal var solutionNotificationRouter: SolutionNotificationRouter? = null
 
     private var listSubscribed = false
     private var detailSubscribed = false
@@ -223,6 +233,14 @@ internal class SessionListStore(
                             // need its own subscribe + collector duplicating
                             // the lifecycle handling.
                             "upload_chunk_acked",
+                            // Solution member-add progress + completion +
+                            // generic solution change — drive the project-
+                            // registry ghost rows and the member-list
+                            // refresh. Routed to SolutionStore via
+                            // [solutionNotificationRouter].
+                            "solution_member_add_progress",
+                            "solution_member_add_completed",
+                            "solution_changed",
                         ),
                     )
                 }.onSuccess {
@@ -271,6 +289,40 @@ internal class SessionListStore(
             } ?: return
             router(payload)
             return
+        }
+
+        // Solution member-add / change events — fan out to SolutionStore
+        // for the project-registry ghost rows + member-list refresh.
+        // Independent of the session list/detail routing below.
+        when (kind) {
+            "solution_member_add_progress" -> {
+                val payload = data?.let {
+                    runCatching {
+                        JsonRpc.json.decodeFromJsonElement(
+                            MemberAddProgressPayload.serializer(),
+                            it,
+                        )
+                    }.getOrNull()
+                } ?: return
+                solutionNotificationRouter?.onMemberAddProgress(payload)
+                return
+            }
+            "solution_member_add_completed" -> {
+                val payload = data?.let {
+                    runCatching {
+                        JsonRpc.json.decodeFromJsonElement(
+                            MemberAddCompletedPayload.serializer(),
+                            it,
+                        )
+                    }.getOrNull()
+                } ?: return
+                solutionNotificationRouter?.onMemberAddCompleted(payload)
+                return
+            }
+            "solution_changed" -> {
+                solutionNotificationRouter?.onSolutionChanged()
+                return
+            }
         }
 
         // List handler — refresh sessions list when a session-shaped
