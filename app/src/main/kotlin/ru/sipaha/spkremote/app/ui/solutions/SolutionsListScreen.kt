@@ -231,7 +231,7 @@ private fun SolutionRow(
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
             title = { Text("Delete solution?") },
-            text = { Text("Remove \"${solution.name}\" from this device. The catalog projects and their files are not deleted.") },
+            text = { Text("Delete the solution \"${solution.name}\" from SPK Editor. The member projects' files on the computer are kept.") },
             confirmButton = {
                 TextButton(
                     onClick = {

@@ -601,9 +601,22 @@ private fun ChatList(
     // the preview) UPDATES the existing bubble instead of remounting it.
     val syntheticQueueEntries: List<EntrySummary> = remember(serverQueuedBundles) {
         serverQueuedBundles.map { bundle ->
+            // The bundle ships `image_count` but no image bytes, and the
+            // `[image #N]` placeholders in `preview` get stripped by the
+            // user-bubble renderer (it re-adds clickable links from
+            // `entry.images`, which a queued bundle doesn't carry). Append
+            // a plain attachment note so the Queued bubble still shows that
+            // images are attached — they're not downloaded to the phone
+            // until the bundle flushes, so a non-clickable count is honest.
+            val attachmentNote = if (bundle.imageCount > 0) {
+                val noun = if (bundle.imageCount == 1) "image" else "images"
+                "\n\n📎 ${bundle.imageCount} $noun"
+            } else {
+                ""
+            }
             EntrySummary(
                 role = "user",
-                preview = bundle.preview,
+                preview = bundle.preview + attachmentNote,
                 clientSendId = bundle.csids.firstOrNull(),
             )
         }
