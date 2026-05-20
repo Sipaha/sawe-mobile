@@ -357,20 +357,15 @@ private fun CwdPicker(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    // Show only the catalog id (project name). The full
+                    // server-side filesystem path is meaningless to the
+                    // phone user and just clutters the picker — the path is
+                    // still the value passed to `onSelected` as the cwd.
                     Text(
                         text = selectedMember?.catalogId
                             ?: "(no members)",
                         style = MaterialTheme.typography.bodyLarge,
                     )
-                    val path = selectedMember?.localPath
-                    if (path != null) {
-                        Text(
-                            text = path,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                        )
-                    }
                 }
                 Icon(
                     imageVector = Icons.Filled.KeyboardArrowDown,
@@ -386,14 +381,7 @@ private fun CwdPicker(
             for (m in members) {
                 DropdownMenuItem(
                     text = {
-                        Column {
-                            Text(m.catalogId, style = MaterialTheme.typography.bodyLarge)
-                            Text(
-                                m.localPath,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
+                        Text(m.catalogId, style = MaterialTheme.typography.bodyLarge)
                     },
                     onClick = {
                         expanded = false
