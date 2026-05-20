@@ -146,6 +146,16 @@ fun SolutionDetailScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
+                actions = {
+                    TextButton(onClick = { showAddProjectDialog = true }) {
+                        Icon(
+                            Icons.Filled.Add,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Text(text = "Add project", modifier = Modifier.padding(start = 4.dp))
+                    }
+                },
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -166,36 +176,20 @@ fun SolutionDetailScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        val memberLabel = "${solution.memberCount} " +
-                            if (solution.memberCount == 1) "member" else "members"
-                        // Drop the `at <solution.root>` server path —
-                        // meaningless on the phone; the member count is the
-                        // useful summary.
-                        Text(
-                            text = memberLabel,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(onClick = { showAddProjectDialog = true }) {
-                            Icon(
-                                Icons.Filled.Add,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                            )
-                            Text(
-                                text = "Add project",
-                                modifier = Modifier.padding(start = 4.dp),
-                            )
-                        }
-                    }
+                    val memberLabel = "${solution.memberCount} " +
+                        if (solution.memberCount == 1) "member" else "members"
+                    // Drop the `at <solution.root>` server path — meaningless
+                    // on the phone; the member count is the useful summary.
+                    // "Add project" lives in the top-bar actions, so this
+                    // header strip stays compact.
+                    Text(
+                        text = memberLabel,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     for (add in pendingAdds) {
                         MemberAddGhostRow(
                             add = add,
