@@ -192,11 +192,9 @@ private fun SolutionRow(
                 text = solution.name,
                 style = MaterialTheme.typography.titleMedium,
             )
-            Text(
-                text = solution.root,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            // No `solution.root`: the server-side filesystem path is
+            // meaningless on the phone (and leaks server layout). Name +
+            // member/window summary is enough to identify the solution.
             val memberLabel = "${solution.memberCount} ${if (solution.memberCount == 1) "member" else "members"}"
             val windowLabel = if (solution.windowOpen) "open" else "closed"
             Text(

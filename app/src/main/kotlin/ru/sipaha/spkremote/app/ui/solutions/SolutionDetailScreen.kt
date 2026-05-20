@@ -154,8 +154,10 @@ fun SolutionDetailScreen(
                 ) {
                     val memberLabel = "${solution.memberCount} " +
                         if (solution.memberCount == 1) "member" else "members"
+                    // Drop the `at <solution.root>` server path — meaningless
+                    // on the phone; the member count is the useful summary.
                     Text(
-                        text = "$memberLabel at ${solution.root}",
+                        text = memberLabel,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
