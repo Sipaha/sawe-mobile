@@ -470,6 +470,71 @@ class RemoteClient internal constructor(
         return JsonRpc.json.decodeFromJsonElement(GetSessionEntryResult.serializer(), result)
     }
 
+    /**
+     * List the registry (catalog) projects available for adding to a
+     * Solution. Backs the mobile project picker. Returns an empty list
+     * when the catalog is empty (a normal state, not an error).
+     */
+    suspend fun catalogList(): CatalogListResult {
+        val response = call("remote.catalog.list")
+        val err = response.error
+        if (err != null) error("catalog.list failed: ${err.message}")
+        val result = response.structuredContent()
+            ?: error("catalog.list returned no structuredContent")
+        return JsonRpc.json.decodeFromJsonElement(CatalogListResult.serializer(), result)
+    }
+
+    /**
+     * Add an existing catalog project as a member of [solutionId]. The
+     * server clones it in the background and returns an `operation_id`
+     * immediately; clone progress arrives via `solution_member_add_*`
+     * notifications.
+     */
+    suspend fun addMember(solutionId: String, catalogId: String): AddMemberResult {
+        val params = buildJsonObject {
+            put("solution_id", solutionId)
+            put("catalog_id", catalogId)
+        }
+        val response = call("remote.solutions.add_member", params)
+        val err = response.error
+        if (err != null) error("add_member failed: ${err.message}")
+        val result = response.structuredContent()
+            ?: error("add_member returned no structuredContent")
+        return JsonRpc.json.decodeFromJsonElement(AddMemberResult.serializer(), result)
+    }
+
+    /**
+     * Create a new empty (non-git) project named [name] as a member of
+     * [solutionId]. Synchronous server-side — the returned `catalog_id`
+     * is the slug the server assigned the new member.
+     */
+    suspend fun addEmptyMember(solutionId: String, name: String): AddEmptyMemberResult {
+        val params = buildJsonObject {
+            put("solution_id", solutionId)
+            put("name", name)
+        }
+        val response = call("remote.solutions.add_empty_member", params)
+        val err = response.error
+        if (err != null) error("add_empty_member failed: ${err.message}")
+        val result = response.structuredContent()
+            ?: error("add_empty_member returned no structuredContent")
+        return JsonRpc.json.decodeFromJsonElement(AddEmptyMemberResult.serializer(), result)
+    }
+
+    /**
+     * Remove a member from [solutionId]. Config-only on the server — the
+     * on-disk worktree directory is left untouched.
+     */
+    suspend fun removeMember(solutionId: String, catalogId: String) {
+        val params = buildJsonObject {
+            put("solution_id", solutionId)
+            put("catalog_id", catalogId)
+        }
+        val response = call("remote.solutions.remove_member", params)
+        val err = response.error
+        if (err != null) error("remove_member failed: ${err.message}")
+    }
+
     // ---------------------------------------------------------------------
     // Lifecycle coroutine
     // ---------------------------------------------------------------------

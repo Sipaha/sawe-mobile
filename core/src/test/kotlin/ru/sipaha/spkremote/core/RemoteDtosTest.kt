@@ -1152,5 +1152,113 @@ class RemoteDtosTest {
         assertEquals("Bar", parsed.plan?.items?.get(1))
     }
 
+    @Test
+    fun `CatalogListResult decodes the catalog_list envelope, ignoring extra fields`() {
+        // The server's CatalogProjectInfo carries more than the picker
+        // needs (`remote_url`, `cache_status`, `default_branch`,
+        // `cache_last_fetched`). `ignoreUnknownKeys` must drop them, and
+        // the id arrives as the wire field `id` mapped to [catalogId].
+        val text = """
+            {
+              "projects": [
+                {
+                  "id": "frontend",
+                  "name": "Frontend",
+                  "remote_url": "git@example.com:org/frontend.git",
+                  "default_branch": "main",
+                  "cache_status": "present",
+                  "cache_last_fetched": "2026-05-19T00:00:00Z"
+                },
+                {
+                  "id": "backend",
+                  "name": "Backend",
+                  "remote_url": "git@example.com:org/backend.git",
+                  "cache_status": "absent"
+                }
+              ]
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(CatalogListResult.serializer(), text)
+        assertEquals(2, parsed.projects.size)
+        assertEquals("frontend", parsed.projects[0].catalogId)
+        assertEquals("Frontend", parsed.projects[0].name)
+        assertEquals("backend", parsed.projects[1].catalogId)
+        assertEquals("Backend", parsed.projects[1].name)
+    }
+
+    @Test
+    fun `CatalogListResult defaults to an empty project list`() {
+        val parsed = JsonRpc.json.decodeFromString(CatalogListResult.serializer(), "{}")
+        assertTrue(parsed.projects.isEmpty())
+    }
+
+    @Test
+    fun `AddEmptyMemberResult maps snake_case catalog_id`() {
+        val parsed = JsonRpc.json.decodeFromString(
+            AddEmptyMemberResult.serializer(),
+            """{"catalog_id": "frontend-2"}""",
+        )
+        assertEquals("frontend-2", parsed.catalogId)
+    }
+
+    @Test
+    fun `AddMemberResult maps snake_case operation_id`() {
+        val parsed = JsonRpc.json.decodeFromString(
+            AddMemberResult.serializer(),
+            """{"operation_id": "op-42"}""",
+        )
+        assertEquals("op-42", parsed.operationId)
+    }
+
+    @Test
+    fun `MemberAddProgressPayload round-trips with percent and stage present`() {
+        val text = """
+            {
+              "solution_id": "sol-1",
+              "catalog_id": "frontend",
+              "percent": 60,
+              "stage": "Receiving objects"
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(MemberAddProgressPayload.serializer(), text)
+        assertEquals("sol-1", parsed.solutionId)
+        assertEquals("frontend", parsed.catalogId)
+        assertEquals(60, parsed.percent)
+        assertEquals("Receiving objects", parsed.stage)
+    }
+
+    @Test
+    fun `MemberAddProgressPayload tolerates null percent and missing stage`() {
+        // The server's progress callback carries Option<u8>; an
+        // indeterminate git phase emits an explicit JSON null percent and
+        // may omit the stage entirely.
+        val text = """
+            {
+              "solution_id": "sol-1",
+              "catalog_id": "frontend",
+              "percent": null
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(MemberAddProgressPayload.serializer(), text)
+        assertNull(parsed.percent)
+        assertNull(parsed.stage)
+    }
+
+    @Test
+    fun `MemberAddCompletedPayload round-trips success and error`() {
+        val ok = JsonRpc.json.decodeFromString(
+            MemberAddCompletedPayload.serializer(),
+            """{"solution_id": "sol-1", "catalog_id": "frontend", "error": null}""",
+        )
+        assertEquals("frontend", ok.catalogId)
+        assertNull(ok.error)
+
+        val failed = JsonRpc.json.decodeFromString(
+            MemberAddCompletedPayload.serializer(),
+            """{"solution_id": "sol-1", "catalog_id": "frontend", "error": "clone failed: timeout"}""",
+        )
+        assertEquals("clone failed: timeout", failed.error)
+    }
+
     private fun parsedDisplayStateOf(s: SessionSummary): DisplayState = parseDisplayState(s.state)
 }

@@ -53,6 +53,65 @@ data class GetSolutionResult(
     val solution: SolutionDetails,
 )
 
+/**
+ * One catalog (registry) project as returned by `catalog.list`.
+ *
+ * The server envelope carries more fields (`remote_url`, `cache_status`,
+ * `default_branch`, …) but the mobile project picker only needs the id +
+ * display name; `ignoreUnknownKeys` drops the rest. **The wire field for
+ * the id is `id`, NOT `catalog_id`** (see `crates/solutions/src/mcp.rs`
+ * `build_catalog_info`) — `solutions.add_member` then takes that same
+ * value back as its `catalog_id` param, so we expose it as [catalogId]
+ * on the mobile side for naming consistency with [SolutionMember].
+ */
+@Serializable
+data class CatalogProjectInfo(
+    @SerialName("id") val catalogId: String,
+    val name: String,
+)
+
+@Serializable
+data class CatalogListResult(val projects: List<CatalogProjectInfo> = emptyList())
+
+/**
+ * Result envelope for `solutions.add_member`. The clone runs in the
+ * background; [operationId] can be polled via `editor.get_operation` but
+ * mobile instead watches the `solution_member_add_*` notifications.
+ */
+@Serializable
+data class AddMemberResult(@SerialName("operation_id") val operationId: String)
+
+/** Result envelope for `solutions.add_empty_member` — synchronous create. */
+@Serializable
+data class AddEmptyMemberResult(@SerialName("catalog_id") val catalogId: String)
+
+/**
+ * Decoded payload of a `solution_member_add_progress` notification.
+ *
+ * [percent] is nullable: the server's progress callback carries an
+ * `Option<u8>`, so a tick with no known percentage arrives as JSON `null`
+ * (e.g. the indeterminate "resolving objects" git phase).
+ */
+@Serializable
+data class MemberAddProgressPayload(
+    @SerialName("solution_id") val solutionId: String,
+    @SerialName("catalog_id") val catalogId: String,
+    val percent: Int? = null,
+    val stage: String? = null,
+)
+
+/**
+ * Decoded payload of a `solution_member_add_completed` notification.
+ * [error] is null on success; non-null carries the failure (or
+ * `"cancelled"`) for surfacing on the ghost member row.
+ */
+@Serializable
+data class MemberAddCompletedPayload(
+    @SerialName("solution_id") val solutionId: String,
+    @SerialName("catalog_id") val catalogId: String,
+    val error: String? = null,
+)
+
 @Serializable
 data class SessionSummary(
     val id: String,
