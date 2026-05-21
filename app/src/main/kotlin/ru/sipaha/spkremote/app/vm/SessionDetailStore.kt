@@ -3,6 +3,7 @@ package ru.sipaha.spkremote.app.vm
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -29,6 +30,7 @@ import ru.sipaha.spkremote.core.EntrySummary
 import ru.sipaha.spkremote.core.QueuedBundleSummary
 import ru.sipaha.spkremote.core.SessionQueueChangedPayload
 import ru.sipaha.spkremote.core.JsonRpc
+import ru.sipaha.spkremote.core.GetSessionEntryResult
 import ru.sipaha.spkremote.core.GetSessionResult
 import ru.sipaha.spkremote.core.MergeOutcome
 import ru.sipaha.spkremote.core.MessageAppendedPayload
@@ -59,6 +61,17 @@ private const val SESSION_PAGE_SIZE = 50
  * an infinite spinner.
  */
 private const val DEFERRED_UPLOAD_TIMEOUT_MS: Long = 5L * 60_000L
+
+/**
+ * Backoff schedule for [SessionDetailStore.fetchAndReplaceEntry] when
+ * `get_session_entry` fails (typically a dropped / flaky connection).
+ * The first call is immediate; on failure we sleep these delays before
+ * the next attempt, so total attempts = size + 1 (≈ 4). Kept short and
+ * bounded so the ~5 calls/s that fire during streaming can't pile up
+ * into a retry storm — a stuck placeholder either heals within a few
+ * seconds or waits for the reconnect resume safety net.
+ */
+private val ENTRY_FETCH_RETRY_DELAYS_MS: LongArray = longArrayOf(300L, 1_000L, 3_000L)
 
 private fun totalBytesFromState(state: UploadManager.State): Long = when (state) {
     is UploadManager.State.Queued -> state.total
@@ -603,11 +616,39 @@ internal class SessionDetailStore(
     // -------------------------------------------------------------------------
 
     private fun fetchAndReplaceEntry(sessionId: String, index: Int) {
-        val active = context.activeClient() ?: return
+        if (context.activeClient() == null) return
         scope.launch {
-            val result = runCatching {
-                active.getSessionEntry(sessionId, index, includeImages = true)
-            }.getOrNull() ?: return@launch
+            // Bounded retry with backoff. The placeholder produced by
+            // `applyAppendedPlaceholder` has only the truncated preview and
+            // no structured toolCall; the full entry only ever arrives via
+            // this fetch. On a flaky/dropped connection a single-shot fetch
+            // failed silently and left the bubble stuck on the skimpy
+            // preview (rendered narrow + truncated). Retry a few times so
+            // the entry self-heals once the connection blips back, while
+            // bailing the moment the session is no longer open or the
+            // client went away — never retry forever.
+            var fetched: GetSessionEntryResult? = null
+            var attempt = 0
+            while (fetched == null) {
+                // Re-check liveness each attempt: the client can be torn
+                // down (server switch) mid-retry, and the session can be
+                // closed/switched. Either makes the result useless.
+                if (openSessionId != sessionId) return@launch
+                val active = context.activeClient() ?: return@launch
+                fetched = runCatching {
+                    active.getSessionEntry(sessionId, index, includeImages = true)
+                }.getOrNull()
+                if (fetched != null) break
+                if (attempt >= ENTRY_FETCH_RETRY_DELAYS_MS.size) {
+                    // Exhausted the schedule — give up quietly. The
+                    // reconnect resume path (resumeSession) re-fetches any
+                    // still-incomplete entries as the longer-term safety net.
+                    return@launch
+                }
+                delay(ENTRY_FETCH_RETRY_DELAYS_MS[attempt])
+                attempt++
+            }
+            val result = fetched ?: return@launch
             var snapshotForCache: GetSessionResult? = null
             sessionMutex.withLock {
                 // stale-write barrier (see class kdoc invariant 1)
@@ -631,8 +672,11 @@ internal class SessionDetailStore(
                         entries.toMutableList().also { it[index] = result.entry }
                     index == entries.size -> entries + result.entry
                     else -> {
-                        scope.launch {
-                            runCatching { fetchFullSession(active, sessionId) }
+                        val client = context.activeClient()
+                        if (client != null) {
+                            scope.launch {
+                                runCatching { fetchFullSession(client, sessionId) }
+                            }
                         }
                         return@withLock
                     }
@@ -931,8 +975,40 @@ internal class SessionDetailStore(
                 snapshotForCache?.let {
                     persistCache(sessionId, it, it.entries, it.totalCount)
                 }
+                // Heal stuck placeholders. `resumeSession` only MERGES
+                // entries the local view is missing (by index); it never
+                // re-fetches an already-present slot. A placeholder that
+                // got stuck on its truncated preview during an outage
+                // (its `fetchAndReplaceEntry` retries all failed) keeps
+                // its index, so the resume merge above skips it. Re-fetch
+                // any still-incomplete tool_call slots now that we're back
+                // online. `fetchAndReplaceEntry` is dedup-guarded, so a
+                // slot that was already complete is a cheap no-op.
+                healIncompletePlaceholders(sessionId)
             }
             // Failed resume is recoverable — silent.
+        }
+    }
+
+    /**
+     * Re-fetch any open-session entries still stuck on the lightweight
+     * placeholder produced by `applyAppendedPlaceholder` — i.e.
+     * `role == "tool_call"` slots with no structured [ToolCallSummary].
+     * Called from the reconnect resume path so prolonged-outage entries
+     * self-heal once the socket is back. Bounded by the (small) number of
+     * stuck slots; each fetch is itself retry- and dedup-guarded.
+     */
+    private fun healIncompletePlaceholders(sessionId: String) {
+        if (openSessionId != sessionId) return
+        val loaded = _session.value as? UiData.Loaded ?: return
+        // Use the list position as the entry index: placeholders from
+        // `applyAppendedPlaceholder` carry the default `index = -1` (the
+        // notification doesn't echo a server index), and `fetchAnd
+        // ReplaceEntry` itself addresses entries by list position.
+        loaded.value.entries.forEachIndexed { position, entry ->
+            if (entry.role == "tool_call" && entry.toolCall == null) {
+                fetchAndReplaceEntry(sessionId, position)
+            }
         }
     }
 
