@@ -2055,7 +2055,12 @@ private fun ToolCallBubble(
                     contentDescription = contentDesc
                 },
         ) {
-            // SelectionContainer wraps the whole tool-call body so the
+            // Outer column: SelectionContainer (selectable text content)
+            // followed by the auth-buttons FlowRow as a sibling so that
+            // button taps are never intercepted by SelectionContainer's
+            // long-press gesture handling on OEM Compose skins.
+            Column {
+            // SelectionContainer wraps only the tool-call content so the
             // tool name + collapsed args preview + expanded args/result
             // text are all long-press selectable. The Surface's
             // `.clickable { expanded = !expanded }` continues to fire on
@@ -2138,33 +2143,36 @@ private fun ToolCallBubble(
                         }
                     }
                 }
-                // Authorization options: present only while the call is
-                // awaiting confirmation (server sends a non-empty list
-                // exactly then, clearing it on the next broadcast once the
-                // user answers — so these buttons vanish without any local
-                // optimistic state). Allow-style options render as filled
-                // primary buttons, reject-style as outlined.
-                if (call.options.isNotEmpty()) {
-                    androidx.compose.foundation.layout.FlowRow(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        for (option in call.options) {
-                            if (option.isAllow) {
-                                androidx.compose.material3.Button(
-                                    onClick = { onAuthorize(call.toolCallId, option.optionId) },
-                                ) {
-                                    Text(option.label)
-                                }
-                            } else {
-                                androidx.compose.material3.OutlinedButton(
-                                    onClick = { onAuthorize(call.toolCallId, option.optionId) },
-                                ) {
-                                    Text(option.label)
-                                }
+            }
+            }
+            // Authorization options: rendered OUTSIDE SelectionContainer so
+            // button taps are never intercepted by its gesture handler.
+            // Present only while the call is awaiting confirmation (server
+            // sends a non-empty list exactly then, clearing it on the next
+            // broadcast once the user answers — so these buttons vanish
+            // without any local optimistic state). Allow-style options render
+            // as filled primary buttons, reject-style as outlined.
+            if (call.options.isNotEmpty()) {
+                androidx.compose.foundation.layout.FlowRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp)
+                        .padding(bottom = 8.dp, top = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    for (option in call.options) {
+                        if (option.isAllow) {
+                            androidx.compose.material3.Button(
+                                onClick = { onAuthorize(call.toolCallId, option.optionId) },
+                            ) {
+                                Text(option.label)
+                            }
+                        } else {
+                            androidx.compose.material3.OutlinedButton(
+                                onClick = { onAuthorize(call.toolCallId, option.optionId) },
+                            ) {
+                                Text(option.label)
                             }
                         }
                     }
