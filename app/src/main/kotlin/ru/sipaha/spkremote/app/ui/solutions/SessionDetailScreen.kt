@@ -60,6 +60,7 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Image
@@ -142,15 +143,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import ru.sipaha.spkremote.app.vm.DeferredUpload
 import ru.sipaha.spkremote.app.vm.MainViewModel
 import ru.sipaha.spkremote.app.vm.PendingUploadProgress
 import ru.sipaha.spkremote.app.vm.UiData
 import ru.sipaha.spkremote.app.vm.UploadManager
+import ru.sipaha.spkremote.core.ConnectionState
 import ru.sipaha.spkremote.core.ContentBlockDto
 import ru.sipaha.spkremote.core.DisplayState
+import ru.sipaha.spkremote.core.connectionBannerLabel
 import ru.sipaha.spkremote.core.EntryImage
 import ru.sipaha.spkremote.core.EntryRole
 import ru.sipaha.spkremote.core.EntrySummary
@@ -198,6 +203,8 @@ fun SessionDetailScreen(
     val isLoadingOlder by viewModel.isLoadingOlder.collectAsState()
     val childrenMap by viewModel.sessionChildren.collectAsState()
     val sessionsList by viewModel.sessions.collectAsState()
+    val connectionState by viewModel.rawConnectionState.collectAsState()
+    val lastConnectedMs by viewModel.lastConnectedMs.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
@@ -206,8 +213,32 @@ fun SessionDetailScreen(
         onDispose { viewModel.closeSession() }
     }
 
+    // Connection-aware error gate (Feature A). A send error that fires while
+    // we're already disconnected is most likely a transient blip the
+    // queue-replay / reconnect will heal within a second or two — surfacing it
+    // immediately would flash a scary snackbar that contradicts the connection
+    // banner. So: if Connected at the time of the error → genuine failure,
+    // show it now. Otherwise wait up to a ~4s grace window for the connection
+    // to come back; if it recovers, drop the error (the banner already informs
+    // the user); if it doesn't, the outage is real and we surface it.
     LaunchedEffect(Unit) {
-        viewModel.sendError.collect { msg -> snackbarHostState.showSnackbar(msg) }
+        viewModel.sendError.collect { msg ->
+            if (viewModel.rawConnectionState.value is ConnectionState.Connected) {
+                snackbarHostState.showSnackbar(msg)
+            } else {
+                // Handle each error concurrently so the collector isn't blocked
+                // for the grace window (and overlapping errors each get one).
+                scope.launch {
+                    val recovered = withTimeoutOrNull(4_000L) {
+                        viewModel.rawConnectionState.first { it is ConnectionState.Connected }
+                        true
+                    }
+                    if (recovered != true) {
+                        snackbarHostState.showSnackbar(msg)
+                    }
+                }
+            }
+        }
     }
 
     // Reset context produces a new session id server-side; hop the open
@@ -465,26 +496,36 @@ fun SessionDetailScreen(
                     WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal),
                 ),
         ) {
-            when (val s = sessionState) {
-                is UiData.Loading -> Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center,
-                ) { CircularProgressIndicator() }
-
-                is UiData.Error -> EmptyChatMessage(
-                    title = "Couldn't load session",
-                    body = s.message,
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Connection-status strip (Feature B): shown only when NOT
+                // Connected, so a healthy chat looks exactly as before.
+                ConnectionBanner(
+                    state = connectionState,
+                    lastConnectedMs = lastConnectedMs,
                 )
+                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    when (val s = sessionState) {
+                        is UiData.Loading -> Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center,
+                        ) { CircularProgressIndicator() }
 
-                is UiData.Loaded -> ChatList(
-                    server = s.value,
-                    optimistic = optimistic,
-                    pendingUploads = pendingUploads,
-                    serverQueuedBundles = serverQueuedBundles,
-                    sessionDisplayState = displayState,
-                    isLoadingOlder = isLoadingOlder,
-                    onRequestOlder = { viewModel.loadOlder(sessionId) },
-                )
+                        is UiData.Error -> EmptyChatMessage(
+                            title = "Couldn't load session",
+                            body = s.message,
+                        )
+
+                        is UiData.Loaded -> ChatList(
+                            server = s.value,
+                            optimistic = optimistic,
+                            pendingUploads = pendingUploads,
+                            serverQueuedBundles = serverQueuedBundles,
+                            sessionDisplayState = displayState,
+                            isLoadingOlder = isLoadingOlder,
+                            onRequestOlder = { viewModel.loadOlder(sessionId) },
+                        )
+                    }
+                }
             }
 
             // Top-aligned error host. Sits just under the top bar (the
@@ -3378,6 +3419,88 @@ internal fun RunningElapsed(displayState: DisplayState, stateStartedAtMs: Long?)
         text = formatElapsed(elapsedSeconds),
         style = MaterialTheme.typography.labelSmall,
     )
+}
+
+/**
+ * Slim full-width connection-status strip between the top bar and the chat
+ * list (Feature B). Hidden entirely when [state] is [ConnectionState.Connected]
+ * — a healthy chat shows nothing.
+ *
+ * The label text is decided by the pure [connectionBannerLabel] helper (unit
+ * tested in `core`). When we have a recorded last-connected timestamp the strip
+ * appends a localized "· последний обмен N мин назад" via Android's
+ * [DateUtils.getRelativeTimeSpanString], with a `now` that ticks every ~15s
+ * (same pattern as [LastActivityLabel]) so the relative time stays current
+ * while disconnected.
+ *
+ * Colour: the milder [ConnectionState.Connecting] / [ConnectionState.Reconnecting]
+ * states use `tertiaryContainer`; hard outages ([ConnectionState.Disconnected] /
+ * [ConnectionState.FailedTerminal]) use `errorContainer`.
+ */
+@Composable
+private fun ConnectionBanner(state: ConnectionState, lastConnectedMs: Long?) {
+    val label = connectionBannerLabel(state)
+    AnimatedVisibility(visible = label != null) {
+        // `label` is captured non-null while visible; on the way out the last
+        // value lingers for the exit animation.
+        val text = label ?: return@AnimatedVisibility
+        val isHardOutage = state is ConnectionState.Disconnected ||
+            state is ConnectionState.FailedTerminal
+        val container = if (isHardOutage) {
+            MaterialTheme.colorScheme.errorContainer
+        } else {
+            MaterialTheme.colorScheme.tertiaryContainer
+        }
+        val onContainer = if (isHardOutage) {
+            MaterialTheme.colorScheme.onErrorContainer
+        } else {
+            MaterialTheme.colorScheme.onTertiaryContainer
+        }
+
+        var now by remember { mutableStateOf(System.currentTimeMillis()) }
+        LaunchedEffect(lastConnectedMs) {
+            if (lastConnectedMs == null) return@LaunchedEffect
+            while (true) {
+                delay(15_000L)
+                now = System.currentTimeMillis()
+            }
+        }
+        val suffix = if (lastConnectedMs != null) {
+            val relative = android.text.format.DateUtils.getRelativeTimeSpanString(
+                lastConnectedMs,
+                now,
+                android.text.format.DateUtils.MINUTE_IN_MILLIS,
+                android.text.format.DateUtils.FORMAT_ABBREV_RELATIVE,
+            ).toString()
+            " · последний обмен $relative"
+        } else {
+            ""
+        }
+
+        Surface(color = container, modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = if (isHardOutage) Icons.Filled.CloudOff else Icons.Filled.Warning,
+                    contentDescription = null,
+                    tint = onContainer,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = text + suffix,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = onContainer,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
 }
 
 /**

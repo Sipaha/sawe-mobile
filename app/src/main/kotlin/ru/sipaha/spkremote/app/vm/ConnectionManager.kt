@@ -89,6 +89,15 @@ internal class ConnectionManager(
     private val _rawConnectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val rawConnectionState: StateFlow<ConnectionState> = _rawConnectionState.asStateFlow()
 
+    /**
+     * Wall-clock of the moment the connection last dropped from [Connected]
+     * (falling edge). Read by the chat connection banner to render "last
+     * exchange N min ago" while we're NOT connected. Null until the first
+     * drop this run.
+     */
+    private val _lastConnectedMs = MutableStateFlow<Long?>(null)
+    val lastConnectedMs: StateFlow<Long?> = _lastConnectedMs.asStateFlow()
+
     /** Disk-backed outbound-queue store (R-6d). Scoped per-server via [activeServerId]. */
     private val queueStore: EncryptedQueueStore =
         EncryptedQueueStore.get(application) { _activeServerId.value }
@@ -447,6 +456,12 @@ internal class ConnectionManager(
                     ConnectionState.Disconnected -> ConnectionBanner.Hidden
                 }
                 val isConnected = state is ConnectionState.Connected
+                if (previousConnected && !isConnected) {
+                    // Falling edge: the connection just dropped. Stamp the
+                    // moment it last worked so the chat banner can show
+                    // "last exchange N min ago" while we're offline.
+                    _lastConnectedMs.value = System.currentTimeMillis()
+                }
                 if (isConnected && !previousConnected) {
                     lifecycle.onReconnected()
                     _activeServerId.value?.let { sid ->

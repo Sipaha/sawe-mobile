@@ -307,6 +307,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
     val pairing: StateFlow<PairingUrl?> get() = connectionMgr.pairing
     val connectionBanner: StateFlow<ConnectionBanner> get() = connectionMgr.connectionBanner
     val rawConnectionState: StateFlow<ConnectionState> get() = connectionMgr.rawConnectionState
+    val lastConnectedMs: StateFlow<Long?> get() = connectionMgr.lastConnectedMs
 
     /**
      * Pair a new server (or re-pair an existing one) from a raw
