@@ -523,6 +523,7 @@ fun SessionDetailScreen(
                             sessionDisplayState = displayState,
                             isLoadingOlder = isLoadingOlder,
                             onRequestOlder = { viewModel.loadOlder(sessionId) },
+                            onAuthorizeToolCall = viewModel::authorizeToolCall,
                         )
                     }
                 }
@@ -640,6 +641,7 @@ private fun ChatList(
     sessionDisplayState: DisplayState,
     isLoadingOlder: Boolean,
     onRequestOlder: () -> Unit,
+    onAuthorizeToolCall: (toolCallId: String, optionId: String) -> Unit = { _, _ -> },
 ) {
     // Server-side `pending_messages` flattened into synthetic
     // EntrySummary rows so they slot into the same LazyColumn pass as
@@ -904,6 +906,7 @@ private fun ChatList(
                             ChatBubble(
                                 entry = entry,
                                 userStatus = status,
+                                onAuthorizeToolCall = onAuthorizeToolCall,
                             )
                         }
                     }
@@ -1042,6 +1045,7 @@ private fun formatBytes(b: Long): String = when {
 private fun ChatBubble(
     entry: EntrySummary,
     userStatus: UserBubbleStatus = UserBubbleStatus.None,
+    onAuthorizeToolCall: (toolCallId: String, optionId: String) -> Unit = { _, _ -> },
 ) {
     val role = parseEntryRole(entry.role)
     // C3: per-message HH:MM, revealed ONLY on a SHORT tap. The always-on
@@ -1084,7 +1088,11 @@ private fun ChatBubble(
                 EntryRole.ToolCall -> {
                     val tc = entry.toolCall
                     if (tc != null) {
-                        ToolCallBubble(call = tc, positionKey = entry.index)
+                        ToolCallBubble(
+                            call = tc,
+                            positionKey = entry.index,
+                            onAuthorize = onAuthorizeToolCall,
+                        )
                     } else {
                         CenteredAnnotatedBubble(
                             text = entry.preview,
@@ -2012,8 +2020,13 @@ private fun emptyBitmapPainter(): Painter {
     return BitmapPainter(bm.asImageBitmap())
 }
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-private fun ToolCallBubble(call: ToolCallSummary, positionKey: Int) {
+private fun ToolCallBubble(
+    call: ToolCallSummary,
+    positionKey: Int,
+    onAuthorize: (toolCallId: String, optionId: String) -> Unit = { _, _ -> },
+) {
     // Include the transcript-position component so two identical-content
     // tool calls (same name + same argsPreview) don't share expanded state.
     var expanded by rememberSaveable(positionKey, call.name, call.argsPreview) {
@@ -2122,6 +2135,37 @@ private fun ToolCallBubble(call: ToolCallSummary, positionKey: Int) {
                                 text = call.resultPreview,
                                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                             )
+                        }
+                    }
+                }
+                // Authorization options: present only while the call is
+                // awaiting confirmation (server sends a non-empty list
+                // exactly then, clearing it on the next broadcast once the
+                // user answers — so these buttons vanish without any local
+                // optimistic state). Allow-style options render as filled
+                // primary buttons, reject-style as outlined.
+                if (call.options.isNotEmpty()) {
+                    androidx.compose.foundation.layout.FlowRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        for (option in call.options) {
+                            if (option.isAllow) {
+                                androidx.compose.material3.Button(
+                                    onClick = { onAuthorize(call.toolCallId, option.optionId) },
+                                ) {
+                                    Text(option.label)
+                                }
+                            } else {
+                                androidx.compose.material3.OutlinedButton(
+                                    onClick = { onAuthorize(call.toolCallId, option.optionId) },
+                                ) {
+                                    Text(option.label)
+                                }
+                            }
                         }
                     }
                 }

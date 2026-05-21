@@ -453,6 +453,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
     fun cancelTurn() = sessionDetail.cancelTurn()
 
     /**
+     * Answer a tool-call authorization prompt on the currently-open
+     * session — the user tapped one of the option buttons rendered on a
+     * tool call awaiting confirmation. The store echoes [optionId] back
+     * to the server, which resolves the choice and re-broadcasts the
+     * entry with empty options so the buttons vanish on the next update.
+     */
+    fun authorizeToolCall(toolCallId: String, optionId: String) =
+        sessionDetail.authorizeToolCall(toolCallId, optionId)
+
+    /**
      * Reset the agent for the currently-open session. The server mints a
      * fresh session id and emits it via [resetSwitch]; UI surfaces should
      * observe that flow to hop navigation onto the new session.

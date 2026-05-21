@@ -1696,6 +1696,37 @@ internal class SessionDetailStore(
     }
 
     /**
+     * Answer a tool-call authorization prompt for the currently-open
+     * session. The user tapped one of the option buttons surfaced on a
+     * `WaitingForConfirmation` tool call; we echo the opaque
+     * [optionId] back to the server, which resolves the outcome,
+     * unblocks the turn, and re-broadcasts the tool-call entry with an
+     * empty `options` list — so the buttons disappear on the next
+     * update with no local optimistic state needed.
+     */
+    fun authorizeToolCall(toolCallId: String, optionId: String) {
+        val active = context.activeClient() ?: return
+        val sessionId = openSessionId ?: return
+        val params = buildJsonObject {
+            put("session_id", sessionId)
+            put("tool_call_id", toolCallId)
+            put("option_id", optionId)
+        }
+        scope.launch {
+            runCatching {
+                active.call("remote.solution_agent.authorize_tool_call", params)
+            }
+                .mapCatching { resp ->
+                    val err = resp.error
+                    if (err != null) error(err.message)
+                    val toolErr = resp.toolError()
+                    if (toolErr != null) error(toolErr)
+                }
+                .onFailure { context.emitError("authorize failed: ${it.message ?: "?"}") }
+        }
+    }
+
+    /**
      * User-pressed "send queued now" button. Cancels the in-flight
      * agent turn with the server-side `flush_pending` flag set so the
      * accumulated `pending_messages` bundle gets flushed as a fresh

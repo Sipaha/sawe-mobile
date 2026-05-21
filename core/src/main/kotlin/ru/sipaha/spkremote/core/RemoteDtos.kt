@@ -319,6 +319,7 @@ data class EntryImage(
  */
 @Serializable
 data class ToolCallSummary(
+    @SerialName("tool_call_id") val toolCallId: String = "",
     val name: String,
     val status: String,
     @SerialName("args_preview") val argsPreview: String,
@@ -335,6 +336,29 @@ data class ToolCallSummary(
      * calls that haven't started yet) — the badge stays hidden.
      */
     @SerialName("tool_status_started_at_ms") val toolStatusStartedAtMs: Long? = null,
+    /**
+     * Authorization options surfaced while the call is awaiting
+     * confirmation (`status == "waiting for confirmation"`). Empty
+     * otherwise. The UI renders one button per option and answers via
+     * `remote.solution_agent.authorize_tool_call`, echoing the chosen
+     * [ToolCallAuthOption.optionId] verbatim.
+     */
+    val options: List<ToolCallAuthOption> = emptyList(),
+)
+
+/**
+ * One authorization choice the agent offered for a tool call awaiting
+ * confirmation. [optionId] is opaque — pass it back verbatim to
+ * `authorize_tool_call`. [kind] is one of `allow_once`, `allow_always`,
+ * `reject_once`, `reject_always`; [isAllow] marks allow-style options so
+ * the UI can render them as primary buttons.
+ */
+@Serializable
+data class ToolCallAuthOption(
+    @SerialName("option_id") val optionId: String,
+    val label: String,
+    val kind: String,
+    @SerialName("is_allow") val isAllow: Boolean = false,
 )
 
 /**

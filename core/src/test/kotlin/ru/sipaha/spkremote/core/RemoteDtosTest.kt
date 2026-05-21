@@ -427,6 +427,69 @@ class RemoteDtosTest {
     }
 
     @Test
+    fun `ToolCallSummary decodes tool_call_id and authorization options while awaiting confirmation`() {
+        // When a tool call is blocked on the user, the server surfaces its
+        // opaque id plus one option per choice. The DTO must decode both so
+        // the chat surface can render the buttons and echo the chosen
+        // option_id back to authorize_tool_call.
+        val text = """
+            {
+              "tool_call_id": "call-abc",
+              "name": "Bash",
+              "status": "waiting for confirmation",
+              "args_preview": "{\"command\":\"rm -rf build\"}",
+              "options": [
+                {"option_id": "opt-allow", "label": "Allow", "kind": "allow_once", "is_allow": true},
+                {"option_id": "opt-allow-always", "label": "Always Allow", "kind": "allow_always", "is_allow": true},
+                {"option_id": "opt-reject", "label": "Reject", "kind": "reject_once", "is_allow": false}
+              ]
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(ToolCallSummary.serializer(), text)
+        assertEquals("call-abc", parsed.toolCallId)
+        assertEquals("waiting for confirmation", parsed.status)
+        assertEquals(3, parsed.options.size)
+        assertEquals("opt-allow", parsed.options[0].optionId)
+        assertEquals("Allow", parsed.options[0].label)
+        assertEquals("allow_once", parsed.options[0].kind)
+        assertTrue(parsed.options[0].isAllow)
+        assertEquals("reject_once", parsed.options[2].kind)
+        assertEquals(false, parsed.options[2].isAllow)
+
+        val reencoded = JsonRpc.json.encodeToString(ToolCallSummary.serializer(), parsed)
+        val again = JsonRpc.json.decodeFromString(ToolCallSummary.serializer(), reencoded)
+        assertEquals(parsed, again)
+    }
+
+    @Test
+    fun `ToolCallSummary defaults tool_call_id empty and options empty when omitted`() {
+        // Server skips `options` entirely (skip_serializing_if = Vec::is_empty)
+        // for any non-confirmation status, and a pre-rollout server never
+        // emits `tool_call_id`. The DTO must decode cleanly with both
+        // defaulted so a mixed-version pair keeps working and the buttons
+        // simply don't render.
+        val text = """
+            {
+              "name": "Read",
+              "status": "done",
+              "args_preview": "{\"path\":\"foo.kt\"}",
+              "result_preview": "ok"
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(ToolCallSummary.serializer(), text)
+        assertEquals("", parsed.toolCallId)
+        assertTrue(parsed.options.isEmpty())
+    }
+
+    @Test
+    fun `ToolCallAuthOption defaults is_allow to false when omitted`() {
+        val text = """{"option_id": "opt-x", "label": "Reject", "kind": "reject_once"}"""
+        val parsed = JsonRpc.json.decodeFromString(ToolCallAuthOption.serializer(), text)
+        assertEquals("opt-x", parsed.optionId)
+        assertEquals(false, parsed.isAllow)
+    }
+
+    @Test
     fun `PlanSummary round-trips empty and non-empty item lists`() {
         val empty = JsonRpc.json.decodeFromString(
             PlanSummary.serializer(),
