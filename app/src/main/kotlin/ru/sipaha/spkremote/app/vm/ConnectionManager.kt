@@ -401,6 +401,7 @@ internal class ConnectionManager(
         _pairing.value = null
         _connectionBanner.value = ConnectionBanner.Hidden
         _rawConnectionState.value = ConnectionState.Disconnected
+        _lastConnectedMs.value = null
     }
 
     /**

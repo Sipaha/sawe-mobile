@@ -3440,10 +3440,13 @@ internal fun RunningElapsed(displayState: DisplayState, stateStartedAtMs: Long?)
 @Composable
 private fun ConnectionBanner(state: ConnectionState, lastConnectedMs: Long?) {
     val label = connectionBannerLabel(state)
+    var lastLabel by remember { mutableStateOf(label) }
+    if (label != null) lastLabel = label
     AnimatedVisibility(visible = label != null) {
-        // `label` is captured non-null while visible; on the way out the last
-        // value lingers for the exit animation.
-        val text = label ?: return@AnimatedVisibility
+        // `label` becomes null the same frame `visible` flips to false, so we
+        // read the cached `lastLabel` here — it stays non-null throughout the
+        // exit animation so the content has something to render while fading.
+        val text = lastLabel ?: return@AnimatedVisibility
         val isHardOutage = state is ConnectionState.Disconnected ||
             state is ConnectionState.FailedTerminal
         val container = if (isHardOutage) {
