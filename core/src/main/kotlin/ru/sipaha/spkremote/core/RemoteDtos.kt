@@ -29,6 +29,54 @@ import kotlinx.serialization.json.put
  * [SessionStateDto.displayState].
  */
 
+/**
+ * Latest chat-wire schema version this client understands. Bump this
+ * whenever the structured wire shapes ([SessionStateDto] / [EntryRoleDto] /
+ * [ToolCallStatusDto] tagging, role-typed payloads on [EntrySummary],
+ * etc.) acquire a breaking change. Used to gate against a server that
+ * advertises a newer schema in its `editor.capabilities` response — see
+ * [isServerTooNew] and the gate site in `ConnectionManager`.
+ *
+ * Reverse direction (server older / pre-versioned / field absent) is
+ * NOT gated: the server's contract is to keep emitting decodable shapes
+ * within a major version, and every DTO already defaults forward-compat
+ * fields. Only `server > supported` blocks the UI.
+ */
+const val SUPPORTED_WIRE_SCHEMA_VERSION: Int = 1
+
+/**
+ * True iff the server advertises a chat-wire schema this client doesn't
+ * support yet. The UI surfaces an "update the app" gate on `true` instead
+ * of trying to drive sessions off a wire it can't decode.
+ *
+ * Defaults to the build-time [SUPPORTED_WIRE_SCHEMA_VERSION] constant —
+ * the [supported] override is for unit tests so the gate's threshold can
+ * be exercised without rebuilding the constant.
+ */
+fun isServerTooNew(serverWire: Int, supported: Int = SUPPORTED_WIRE_SCHEMA_VERSION): Boolean =
+    serverWire > supported
+
+/**
+ * Result envelope for `remote.editor.capabilities`.
+ *
+ * The server emits more fields than the client currently consumes
+ * (build metadata, transport hints, …) — `ignoreUnknownKeys` drops the
+ * rest. Today we only need:
+ *   - [protocolVersion] for the optional version banner on the splash.
+ *   - [wireSchemaVersion] for the breaking-incompatibility gate; see
+ *     [isServerTooNew].
+ *
+ * **Both fields default to a pre-versioned sentinel** so an older server
+ * that doesn't emit them decodes cleanly: missing `protocol_version`
+ * becomes "unknown" (preserving prior behaviour), missing
+ * `wire_schema_version` becomes `0` (older-than-supported → not gated).
+ */
+@Serializable
+data class CapabilitiesDto(
+    @SerialName("protocol_version") val protocolVersion: String = "unknown",
+    @SerialName("wire_schema_version") val wireSchemaVersion: Int = 0,
+)
+
 @Serializable
 data class SolutionSummary(
     val id: String,

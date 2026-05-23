@@ -139,7 +139,21 @@ fun AppNav(viewModel: MainViewModel, initialRoute: String? = null) {
                 val target = if (viewModel.pairedServers.value.size >= 2) "servers" else "pairing"
                 navController.popBackStack(route = target, inclusive = false)
             }
+            is UiState.IncompatibleServer -> {
+                // Intentionally no nav side-effect — the full-screen gate
+                // below overrides the NavHost while this state holds.
+                // We don't want to push or pop the back-stack because
+                // there's no in-app remediation: the user must update
+                // the app outside it, and reopening should land them
+                // back here cleanly.
+            }
         }
+    }
+
+    val gate = uiState
+    if (gate is UiState.IncompatibleServer) {
+        IncompatibleServerScreen(state = gate)
+        return
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -359,6 +373,51 @@ private fun ConnectionStateBanner(banner: ConnectionBanner, onRePair: () -> Unit
                 background = MaterialTheme.colorScheme.errorContainer,
                 text = "${banner.reason} · Tap to re-pair.",
                 onClick = onRePair,
+            )
+        }
+    }
+}
+
+/**
+ * Terminal "update the app" screen shown when the paired desktop
+ * advertises a chat-wire schema this client doesn't understand
+ * ([UiState.IncompatibleServer]). Rendered above the NavHost — every
+ * session-detail / solutions surface is hidden while this holds so
+ * the user can't drive an undecodable wire.
+ *
+ * Wired from [AppNav]'s top-level `if (uiState is IncompatibleServer)`
+ * short-circuit; no nav callbacks because there's no in-app
+ * remediation (the user updates the app via the store / sideload).
+ */
+@Composable
+private fun IncompatibleServerScreen(state: UiState.IncompatibleServer) {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(horizontal = 24.dp, vertical = 32.dp),
+            verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                text = "Update required",
+                style = MaterialTheme.typography.headlineSmall,
+            )
+            Text(
+                text = state.message,
+                modifier = Modifier.padding(top = 16.dp),
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Text(
+                text = "Server wire schema: ${state.serverWireSchemaVersion} • " +
+                    "app supports: ${state.supportedWireSchemaVersion}",
+                modifier = Modifier.padding(top = 24.dp),
+                style = MaterialTheme.typography.bodySmall,
             )
         }
     }

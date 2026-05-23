@@ -3,10 +3,50 @@ package ru.sipaha.spkremote.core
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class RemoteDtosTest {
+
+    @Test fun gatesOnNewerServerWireSchema() {
+        assertTrue(isServerTooNew(serverWire = 2, supported = 1))
+        assertFalse(isServerTooNew(serverWire = 1, supported = 1))
+        assertFalse(isServerTooNew(serverWire = 0, supported = 1)) // older server: not gated
+    }
+
+    @Test
+    fun `CapabilitiesDto decodes both fields and tolerates either missing`() {
+        // Full payload — current server with both fields.
+        val full = JsonRpc.json.decodeFromString(
+            CapabilitiesDto.serializer(),
+            """{"protocol_version":"2025-10-01","wire_schema_version":1}""",
+        )
+        assertEquals("2025-10-01", full.protocolVersion)
+        assertEquals(1, full.wireSchemaVersion)
+
+        // Pre-wire-schema server: only protocol_version present.
+        val noWire = JsonRpc.json.decodeFromString(
+            CapabilitiesDto.serializer(),
+            """{"protocol_version":"2025-09-01"}""",
+        )
+        assertEquals("2025-09-01", noWire.protocolVersion)
+        assertEquals(0, noWire.wireSchemaVersion) // sentinel → not gated
+
+        // Empty payload — both fields default; not gated.
+        val empty = JsonRpc.json.decodeFromString(CapabilitiesDto.serializer(), "{}")
+        assertEquals("unknown", empty.protocolVersion)
+        assertEquals(0, empty.wireSchemaVersion)
+        assertFalse(isServerTooNew(empty.wireSchemaVersion))
+
+        // Unknown extra keys are tolerated (per JsonRpc.json config).
+        val extra = JsonRpc.json.decodeFromString(
+            CapabilitiesDto.serializer(),
+            """{"protocol_version":"x","wire_schema_version":2,"build":"abc"}""",
+        )
+        assertEquals(2, extra.wireSchemaVersion)
+        assertTrue(isServerTooNew(extra.wireSchemaVersion))
+    }
 
     @Test
     fun parsesStructuredSessionState() {

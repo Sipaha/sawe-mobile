@@ -34,6 +34,22 @@ sealed interface UiState {
     data class Disconnected(val lastUrl: String? = null, val error: String? = null) : UiState
     data object Connecting : UiState
     data class Connected(val protocolVersion: String) : UiState
+
+    /**
+     * The paired desktop is advertising a chat-wire schema this client
+     * doesn't support yet (see [ru.sipaha.spkremote.core.isServerTooNew]).
+     * We surface a terminal "update the app" screen instead of trying to
+     * drive the UI off a wire it can't decode — silently rendering
+     * mis-parsed sessions would be worse than refusing to operate. The
+     * gate site (`ConnectionManager.switchToServerLocked`) also skips
+     * `startObservingConnectionState` for this state so transient
+     * reconnects don't briefly flash a stale Connected.
+     */
+    data class IncompatibleServer(
+        val serverWireSchemaVersion: Int,
+        val supportedWireSchemaVersion: Int,
+        val message: String,
+    ) : UiState
 }
 
 /**

@@ -11,14 +11,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import ru.sipaha.spkremote.app.data.EncryptedQueueStore
 import ru.sipaha.spkremote.app.data.PairedServer
 import ru.sipaha.spkremote.app.data.PairingRepository
+import ru.sipaha.spkremote.core.CapabilitiesDto
 import ru.sipaha.spkremote.core.ConnectionState
+import ru.sipaha.spkremote.core.JsonRpc
 import ru.sipaha.spkremote.core.PairingUrl
 import ru.sipaha.spkremote.core.RemoteClient
+import ru.sipaha.spkremote.core.SUPPORTED_WIRE_SCHEMA_VERSION
+import ru.sipaha.spkremote.core.isServerTooNew
 import java.util.UUID
 
 /**
@@ -307,18 +309,42 @@ internal class ConnectionManager(
             }
         runCatching { newClient.call("remote.editor.capabilities") }
             .onSuccess { resp ->
-                val version = (resp.structuredContent() as? JsonObject)
-                    ?.get("protocol_version")
-                    ?.jsonPrimitive
-                    ?.content
-                    ?: "unknown"
-                _state.value = UiState.Connected(version)
+                // Decode the typed CapabilitiesDto so both the version
+                // banner and the wire-schema gate read from one source of
+                // truth (and so missing fields fall back to documented
+                // sentinels — "unknown" / 0 — without inline jsonPrimitive
+                // scraping). `ignoreUnknownKeys` on JsonRpc.json drops the
+                // build-metadata / transport hints the server emits.
+                val capabilities = resp.structuredContent()
+                    ?.let { runCatching {
+                        JsonRpc.json.decodeFromJsonElement(
+                            CapabilitiesDto.serializer(),
+                            it,
+                        )
+                    }.getOrNull() }
+                    ?: CapabilitiesDto()
+                if (isServerTooNew(capabilities.wireSchemaVersion)) {
+                    // Hard gate: the server speaks a chat-wire shape we
+                    // don't understand yet. Tear down the live client —
+                    // any subsequent notification it pushes would land
+                    // on observers that can't decode it, and the user's
+                    // only recourse is to update the app anyway.
+                    tearDownConnection()
+                    _state.value = UiState.IncompatibleServer(
+                        serverWireSchemaVersion = capabilities.wireSchemaVersion,
+                        supportedWireSchemaVersion = SUPPORTED_WIRE_SCHEMA_VERSION,
+                        message = "This server needs a newer version of the app. Please update.",
+                    )
+                    return@onSuccess
+                }
+                _state.value = UiState.Connected(capabilities.protocolVersion)
+                startObservingConnectionState(newClient)
             }
             .onFailure {
                 // SECURITY: see the parse-failure branch above.
                 _state.value = UiState.Disconnected(lastUrl = null, error = it.message)
+                startObservingConnectionState(newClient)
             }
-        startObservingConnectionState(newClient)
     }
 
     /**
