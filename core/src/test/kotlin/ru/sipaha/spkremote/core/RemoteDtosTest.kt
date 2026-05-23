@@ -21,6 +21,54 @@ class RemoteDtosTest {
     }
 
     @Test
+    fun sessionStateUnknownKindFallsBack() {
+        val json = Json { ignoreUnknownKeys = true }
+        fun decode(s: String) = json.decodeFromString(SessionStateDto.serializer(), s)
+        assertEquals(SessionStateDto.Unknown, decode("""{"kind":"future_state","extra":42}"""))
+        // Missing `kind` and non-object input also fall back to Unknown rather than throwing.
+        assertEquals(SessionStateDto.Unknown, decode("""{"other_field":1}"""))
+        assertEquals(DisplayState.Unknown, SessionStateDto.Unknown.displayState())
+    }
+
+    @Test
+    fun entryRoleAndStatusUnknownFallsBack() {
+        val json = Json { ignoreUnknownKeys = true }
+        assertEquals(EntryRoleDto.Unknown, json.decodeFromString(EntryRoleDto.serializer(), "\"future_role\""))
+        assertEquals(ToolCallStatusDto.Unknown, json.decodeFromString(ToolCallStatusDto.serializer(), "\"new_status\""))
+    }
+
+    @Test
+    fun entrySummaryWithUnknownRoleStillDecodes() {
+        // The critical property: one unknown role inside an entries list must
+        // NOT fail the surrounding decode. Use a GetSessionResult to exercise
+        // the actual "list with one bad entry" path that motivates tolerance.
+        val text = """
+            {
+              "id": "ses-tolerant",
+              "solution_id": "sol-1",
+              "agent_id": "claude",
+              "title": "Mixed",
+              "state": {"kind":"future_state"},
+              "created_at": 0,
+              "last_activity_at": 0,
+              "entries": [
+                {"role": "user", "preview": "hi", "index": 0},
+                {"role": "future_role", "preview": "?", "index": 1},
+                {"role": "tool_call", "preview": "Read(x)", "index": 2,
+                 "tool_call": {"name":"Read","status":"future_status","args_preview":""}}
+              ]
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(GetSessionResult.serializer(), text)
+        assertEquals(SessionStateDto.Unknown, parsed.state)
+        assertEquals(3, parsed.entries.size)
+        assertEquals(EntryRoleDto.User, parsed.entries[0].role)
+        assertEquals(EntryRoleDto.Unknown, parsed.entries[1].role)
+        assertEquals(EntryRoleDto.ToolCall, parsed.entries[2].role)
+        assertEquals(ToolCallStatusDto.Unknown, parsed.entries[2].toolCall?.status)
+    }
+
+    @Test
     fun parsesStructuredRoleAndStatus() {
         val json = Json { ignoreUnknownKeys = true }
         assertEquals(EntryRoleDto.ToolCall, json.decodeFromString(EntryRoleDto.serializer(), "\"tool_call\""))
@@ -539,7 +587,7 @@ class RemoteDtosTest {
         val parsed = JsonRpc.json.decodeFromString(MessageAppendedPayload.serializer(), text)
         assertEquals("ses-1", parsed.sessionId)
         assertEquals(7, parsed.entryIndex)
-        assertEquals("assistant", parsed.role)
+        assertEquals(EntryRoleDto.Assistant, parsed.role)
         assertEquals("Hello, world.", parsed.preview)
 
         val reencoded = JsonRpc.json.encodeToString(MessageAppendedPayload.serializer(), parsed)

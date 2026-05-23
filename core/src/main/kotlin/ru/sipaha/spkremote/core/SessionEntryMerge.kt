@@ -58,7 +58,7 @@ fun applyAppendedPlaceholder(
     // so we can pre-stamp the placeholder and keep the status as
     // `Delivered` from the moment the slot exists.
     val placeholder = EntrySummary(
-        role = entryRoleDtoFromWire(payload.role),
+        role = payload.role,
         preview = payload.preview,
         clientSendId = payload.clientSendId,
         clientSendIds = payload.clientSendIds,

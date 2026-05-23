@@ -19,6 +19,14 @@ import org.junit.jupiter.api.Test
  */
 class SessionEntryMergeTest {
 
+    private fun roleFromWire(raw: String): EntryRoleDto = when (raw) {
+        "user" -> EntryRoleDto.User
+        "assistant" -> EntryRoleDto.Assistant
+        "tool_call" -> EntryRoleDto.ToolCall
+        "plan" -> EntryRoleDto.Plan
+        else -> EntryRoleDto.Unknown
+    }
+
     private fun entry(
         role: String,
         preview: String,
@@ -26,7 +34,7 @@ class SessionEntryMergeTest {
         clientSendId: Long? = null,
     ): EntrySummary =
         EntrySummary(
-            role = entryRoleDtoFromWire(role),
+            role = roleFromWire(role),
             preview = preview,
             index = index,
             clientSendId = clientSendId,
@@ -41,7 +49,7 @@ class SessionEntryMergeTest {
         MessageAppendedPayload(
             sessionId = sessionId,
             entryIndex = entryIndex,
-            role = role,
+            role = roleFromWire(role),
             preview = preview,
         )
 

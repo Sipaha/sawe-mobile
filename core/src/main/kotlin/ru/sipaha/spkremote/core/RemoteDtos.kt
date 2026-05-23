@@ -1,9 +1,23 @@
 package ru.sipaha.spkremote.core
 
 import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.JsonClassDiscriminator
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonEncoder
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.put
 
 /**
  * Server-shaped DTOs for the `remote.solutions.*` and
@@ -426,7 +440,7 @@ data class SessionQueueChangedPayload(
 data class MessageAppendedPayload(
     @SerialName("session_id") val sessionId: String,
     @SerialName("entry_index") val entryIndex: Int,
-    val role: String,
+    val role: EntryRoleDto,
     val preview: String,
     /**
      * Echoes the originating client's `_meta.spk_client_send_id` stamp on
@@ -590,8 +604,15 @@ enum class EntryRole { User, Assistant, ToolCall, Plan, Unknown }
  *   `{"kind":"stopping"}`
  *   `{"kind":"awaiting_input"}`
  *   `{"kind":"errored","message":"…"}`
+ *
+ * A custom serializer ([SessionStateDtoSerializer]) dispatches on `kind`
+ * and falls back to [SessionStateDto.Unknown] for anything unrecognised —
+ * including a missing `kind` field, a non-string `kind`, or an entirely
+ * non-object payload. This forward-compat tolerance keeps a single
+ * unknown wire-state from failing the surrounding decode of a list of
+ * sessions or entries (see `entrySummaryWithUnknownRoleStillDecodes`).
  */
-@Serializable
+@Serializable(with = SessionStateDtoSerializer::class)
 @OptIn(ExperimentalSerializationApi::class)
 @JsonClassDiscriminator("kind")
 sealed interface SessionStateDto {
@@ -606,6 +627,57 @@ sealed interface SessionStateDto {
     @Serializable @SerialName("awaiting_input") data object AwaitingInput : SessionStateDto
 
     @Serializable @SerialName("errored") data class Errored(val message: String) : SessionStateDto
+
+    /**
+     * Forward-compat fallback for any `kind` the client doesn't recognise
+     * (a future server adds e.g. `compacting`). Surfaces as
+     * [DisplayState.Unknown] on the UI classifier so the chat header
+     * renders a neutral state instead of crashing the surrounding decode.
+     */
+    data object Unknown : SessionStateDto
+}
+
+internal object SessionStateDtoSerializer : KSerializer<SessionStateDto> {
+    override val descriptor: SerialDescriptor = JsonObject.serializer().descriptor
+
+    override fun deserialize(decoder: Decoder): SessionStateDto {
+        val jsonDecoder = decoder as? JsonDecoder
+            ?: return SessionStateDto.Unknown
+        val element = jsonDecoder.decodeJsonElement() as? JsonObject
+            ?: return SessionStateDto.Unknown
+        val kind = (element["kind"] as? JsonPrimitive)?.contentOrNull
+        val json = jsonDecoder.json
+        return when (kind) {
+            "idle" -> SessionStateDto.Idle
+            "running" -> json.decodeFromJsonElement(SessionStateDto.Running.serializer(), element)
+            "stopping" -> SessionStateDto.Stopping
+            "awaiting_input" -> SessionStateDto.AwaitingInput
+            "errored" -> json.decodeFromJsonElement(SessionStateDto.Errored.serializer(), element)
+            else -> SessionStateDto.Unknown
+        }
+    }
+
+    override fun serialize(encoder: Encoder, value: SessionStateDto) {
+        // Round-trip serialization isn't needed by the client (server-
+        // emitted), but provide it for tests and any future use.
+        val jsonEncoder = encoder as? JsonEncoder
+            ?: error("SessionStateDto requires a Json encoder")
+        val element: JsonElement = when (value) {
+            SessionStateDto.Idle -> buildJsonObject { put("kind", "idle") }
+            is SessionStateDto.Running -> buildJsonObject {
+                put("kind", "running")
+                put("started_at_ms", value.startedAtMs)
+            }
+            SessionStateDto.Stopping -> buildJsonObject { put("kind", "stopping") }
+            SessionStateDto.AwaitingInput -> buildJsonObject { put("kind", "awaiting_input") }
+            is SessionStateDto.Errored -> buildJsonObject {
+                put("kind", "errored")
+                put("message", value.message)
+            }
+            SessionStateDto.Unknown -> buildJsonObject { put("kind", "unknown") }
+        }
+        jsonEncoder.encodeJsonElement(element)
+    }
 }
 
 /** Map structured state onto the small UI classifier enum. */
@@ -615,6 +687,7 @@ fun SessionStateDto.displayState(): DisplayState = when (this) {
     SessionStateDto.Stopping -> DisplayState.Stopping
     SessionStateDto.AwaitingInput -> DisplayState.AwaitingInput
     is SessionStateDto.Errored -> DisplayState.Errored
+    SessionStateDto.Unknown -> DisplayState.Unknown
 }
 
 /** Wall-clock ms when state flipped to `Running`, else null. */
@@ -623,13 +696,45 @@ fun SessionStateDto.startedAtMs(): Long? = (this as? SessionStateDto.Running)?.s
 /** The error message when state is `Errored`, else null. */
 fun SessionStateDto.erroredMessage(): String? = (this as? SessionStateDto.Errored)?.message
 
-/** Structured entry role — snake_case enum on the wire. */
-@Serializable
+/**
+ * Structured entry role — snake_case enum on the wire. Decoded via a
+ * tolerant custom serializer that maps any unrecognised string to
+ * [Unknown], so a future server adding a new role doesn't fail the
+ * surrounding `entries` list decode.
+ */
+@Serializable(with = EntryRoleDtoSerializer::class)
 enum class EntryRoleDto {
-    @SerialName("user") User,
-    @SerialName("assistant") Assistant,
-    @SerialName("tool_call") ToolCall,
-    @SerialName("plan") Plan,
+    User,
+    Assistant,
+    ToolCall,
+    Plan,
+    /** Forward-compat fallback for any role string the client doesn't know. */
+    Unknown,
+}
+
+internal object EntryRoleDtoSerializer : KSerializer<EntryRoleDto> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("EntryRoleDto", PrimitiveKind.STRING)
+
+    override fun deserialize(decoder: Decoder): EntryRoleDto = when (decoder.decodeString()) {
+        "user" -> EntryRoleDto.User
+        "assistant" -> EntryRoleDto.Assistant
+        "tool_call" -> EntryRoleDto.ToolCall
+        "plan" -> EntryRoleDto.Plan
+        else -> EntryRoleDto.Unknown
+    }
+
+    override fun serialize(encoder: Encoder, value: EntryRoleDto) {
+        encoder.encodeString(
+            when (value) {
+                EntryRoleDto.User -> "user"
+                EntryRoleDto.Assistant -> "assistant"
+                EntryRoleDto.ToolCall -> "tool_call"
+                EntryRoleDto.Plan -> "plan"
+                EntryRoleDto.Unknown -> "unknown"
+            },
+        )
+    }
 }
 
 /**
@@ -642,33 +747,56 @@ fun EntryRoleDto.toEntryRole(): EntryRole = when (this) {
     EntryRoleDto.Assistant -> EntryRole.Assistant
     EntryRoleDto.ToolCall -> EntryRole.ToolCall
     EntryRoleDto.Plan -> EntryRole.Plan
+    EntryRoleDto.Unknown -> EntryRole.Unknown
 }
 
 /**
- * Tolerant wire-string → [EntryRoleDto] mapper for notification payloads
- * (e.g. [MessageAppendedPayload.role]) that still carry the role as a raw
- * snake_case string. Unknown roles fall back to [EntryRoleDto.Assistant]
- * (the neutral, non-optimistic-dedupe role) so a future role expansion
- * doesn't crash the placeholder path.
+ * Structured tool-call status — snake_case enum on the wire. Decoded via
+ * a tolerant custom serializer; any unrecognised string surfaces as
+ * [Unknown] so a future server adding a new status doesn't fail decoding.
  */
-fun entryRoleDtoFromWire(raw: String): EntryRoleDto = when (raw) {
-    "user" -> EntryRoleDto.User
-    "assistant" -> EntryRoleDto.Assistant
-    "tool_call" -> EntryRoleDto.ToolCall
-    "plan" -> EntryRoleDto.Plan
-    else -> EntryRoleDto.Assistant
+@Serializable(with = ToolCallStatusDtoSerializer::class)
+enum class ToolCallStatusDto {
+    Pending,
+    WaitingForConfirmation,
+    Running,
+    Done,
+    Failed,
+    Rejected,
+    Canceled,
+    /** Forward-compat fallback for any status string the client doesn't know. */
+    Unknown,
 }
 
-/** Structured tool-call status — snake_case enum on the wire. */
-@Serializable
-enum class ToolCallStatusDto {
-    @SerialName("pending") Pending,
-    @SerialName("waiting_for_confirmation") WaitingForConfirmation,
-    @SerialName("running") Running,
-    @SerialName("done") Done,
-    @SerialName("failed") Failed,
-    @SerialName("rejected") Rejected,
-    @SerialName("canceled") Canceled,
+internal object ToolCallStatusDtoSerializer : KSerializer<ToolCallStatusDto> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("ToolCallStatusDto", PrimitiveKind.STRING)
+
+    override fun deserialize(decoder: Decoder): ToolCallStatusDto = when (decoder.decodeString()) {
+        "pending" -> ToolCallStatusDto.Pending
+        "waiting_for_confirmation" -> ToolCallStatusDto.WaitingForConfirmation
+        "running" -> ToolCallStatusDto.Running
+        "done" -> ToolCallStatusDto.Done
+        "failed" -> ToolCallStatusDto.Failed
+        "rejected" -> ToolCallStatusDto.Rejected
+        "canceled" -> ToolCallStatusDto.Canceled
+        else -> ToolCallStatusDto.Unknown
+    }
+
+    override fun serialize(encoder: Encoder, value: ToolCallStatusDto) {
+        encoder.encodeString(
+            when (value) {
+                ToolCallStatusDto.Pending -> "pending"
+                ToolCallStatusDto.WaitingForConfirmation -> "waiting_for_confirmation"
+                ToolCallStatusDto.Running -> "running"
+                ToolCallStatusDto.Done -> "done"
+                ToolCallStatusDto.Failed -> "failed"
+                ToolCallStatusDto.Rejected -> "rejected"
+                ToolCallStatusDto.Canceled -> "canceled"
+                ToolCallStatusDto.Unknown -> "unknown"
+            },
+        )
+    }
 }
 
 /**
