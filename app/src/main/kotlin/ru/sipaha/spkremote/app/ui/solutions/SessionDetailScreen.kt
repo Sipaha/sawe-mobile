@@ -856,6 +856,22 @@ private fun ChatList(
                 ),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
+                // "Thinking…" sentinel at the logical bottom of the chat
+                // (= first item in reverseLayout source order). Visible
+                // only when the agent is Running AND no assistant entry
+                // has appeared yet for the current turn — i.e. the most
+                // recent message in the timeline is still a user bubble.
+                // The moment the first assistant chunk arrives, the most-
+                // recent message becomes Assistant and this row hides,
+                // leaving the streaming reply in its place.
+                val lastMessage = timeline
+                    .firstOrNull { it is ru.sipaha.spkremote.core.ChatItem.Message }
+                    as? ru.sipaha.spkremote.core.ChatItem.Message
+                val showThinking = sessionDisplayState == DisplayState.Running &&
+                    lastMessage?.entry?.role == ru.sipaha.spkremote.core.EntryRoleDto.User
+                if (showThinking) {
+                    item("thinking-row") { ThinkingRow() }
+                }
                 // reverseLayout flips list order — pass the reversed list
                 // so newest-at-the-bottom maps to item 0. itemsIndexed
                 // keeps the stable original index for any future need
@@ -3296,6 +3312,42 @@ private fun humanReadableSize(bytes: Long): String = when {
  * the "Load older messages" tap target already conveys "you're at the
  * start" — no separate sentinel is rendered for the start of history.
  */
+/**
+ * "Thinking…" row painted at the bottom of the chat list (logical bottom =
+ * the FIRST item in the reverse-layout LazyColumn) while the agent is
+ * Running and hasn't started replying yet. Gives the user immediate
+ * feedback that their message landed and the agent is working — without
+ * this, there is a silent gap between the user bubble and the first
+ * assistant chunk. Disappears the moment any assistant entry shows up
+ * (the surface goes from `lastMessage = User` to `lastMessage = Assistant`),
+ * so it never overlaps with the streaming reply.
+ *
+ * Small spinner + label, left-aligned so it visually sits where the
+ * incoming assistant bubble will materialize, not centered like the
+ * history-edge sentinel.
+ */
+@Composable
+private fun ThinkingRow() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(14.dp),
+            strokeWidth = 2.dp,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        Spacer(Modifier.padding(horizontal = 6.dp))
+        Text(
+            text = "Thinking…",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
 @Composable
 private fun HistoryEdgeRow(
     isLoadingOlder: Boolean,
