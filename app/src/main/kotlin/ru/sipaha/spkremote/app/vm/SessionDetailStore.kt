@@ -29,7 +29,9 @@ import ru.sipaha.spkremote.core.ContentBlockDto
 import ru.sipaha.spkremote.core.EntryRoleDto
 import ru.sipaha.spkremote.core.EntrySummary
 import ru.sipaha.spkremote.core.QueuedBundleSummary
+import ru.sipaha.spkremote.core.SessionActiveSubagentsChangedPayload
 import ru.sipaha.spkremote.core.SessionQueueChangedPayload
+import ru.sipaha.spkremote.core.SubagentDto
 import ru.sipaha.spkremote.core.SessionStateDto
 import ru.sipaha.spkremote.core.JsonRpc
 import ru.sipaha.spkremote.core.GetSessionEntryResult
@@ -308,6 +310,26 @@ internal class SessionDetailStore(
     val serverQueuedBundles: StateFlow<List<QueuedBundleSummary>> =
         _serverQueuedBundles.asStateFlow()
 
+    /**
+     * In-flight Claude Code sub-agents (Task/Agent tool uses) for the
+     * open session, in server-side insertion order. Mirrors
+     * [GetSessionResult.activeSubagents] at cold-start, then live-updates
+     * via the `agent_session_active_subagents_changed` notification.
+     * Drives the `SubagentTabStrip` on the detail screen.
+     */
+    private val _activeSubagents = MutableStateFlow<List<SubagentDto>>(emptyList())
+    val activeSubagents: StateFlow<List<SubagentDto>> = _activeSubagents.asStateFlow()
+
+    /**
+     * Currently-selected subagent tab id, or `null` for the implicit
+     * "Main" tab. The chat list filters entries by
+     * `entry.subagentId == selectedSubagent` (both null = Main view).
+     * Auto-resets to null on session switch and snaps to the first
+     * remaining subagent (or null) when the selected one disappears.
+     */
+    private val _selectedSubagent = MutableStateFlow<String?>(null)
+    val selectedSubagent: StateFlow<String?> = _selectedSubagent.asStateFlow()
+
 
     /**
      * One-shot signal emitted after a successful Reset context. Carries the
@@ -361,6 +383,8 @@ internal class SessionDetailStore(
                 _optimisticEntries.value = emptyList()
                 optimisticIds.clear()
                 optimisticClientSendIds.clear()
+                _activeSubagents.value = emptyList()
+                _selectedSubagent.value = null
             }
         }
     }
@@ -408,6 +432,11 @@ internal class SessionDetailStore(
                 // next fetchInitialOrDiff seeds from the new
                 // session's `pendingBundles`.
                 _serverQueuedBundles.value = emptyList()
+                // Drop the previous session's subagent strip — the next
+                // fetchInitialOrDiff seeds from `activeSubagents`. Reset
+                // selection to Main so the new session opens unfiltered.
+                _activeSubagents.value = emptyList()
+                _selectedSubagent.value = null
                 lastSeen.primeFromDisk(sessionId)
                 // Re-materialise optimistic state for every deferred
                 // send whose waiter coroutine is still alive for THIS
@@ -504,6 +533,8 @@ internal class SessionDetailStore(
                 optimisticIds.clear()
                 optimisticClientSendIds.clear()
                 _serverQueuedBundles.value = emptyList()
+                _activeSubagents.value = emptyList()
+                _selectedSubagent.value = null
             }
         }
     }
@@ -603,6 +634,39 @@ internal class SessionDetailStore(
         val openSid = openSessionId ?: return
         if (notifSessionId != null && notifSessionId != openSid) return
         refreshSession(openSid)
+    }
+
+    override fun onActiveSubagentsChanged(payload: SessionActiveSubagentsChangedPayload) {
+        val openSid = openSessionId ?: return
+        if (payload.sessionId != openSid) return
+        _activeSubagents.value = payload.activeSubagents
+        // Auto-snap if the currently-selected tab disappeared from the
+        // new active set. First remaining (preserving server insertion
+        // order) is the natural fallback; null = "Main" when the set
+        // drained entirely.
+        val current = _selectedSubagent.value
+        if (current != null && payload.activeSubagents.none { it.id == current }) {
+            _selectedSubagent.value = payload.activeSubagents.firstOrNull()?.id
+        }
+    }
+
+    /**
+     * UI hook for the subagent tab strip. Validates that [id] either
+     * is null (Main) or matches one of the currently-active subagents;
+     * an unknown id is logged and silently rejected to null. Mutating
+     * [_selectedSubagent] directly from outside the store is forbidden
+     * — this entry point is the single seam.
+     */
+    fun selectSubagent(id: String?) {
+        if (id != null && _activeSubagents.value.none { it.id == id }) {
+            android.util.Log.w(
+                "SessionDetailStore",
+                "selectSubagent($id) is not in active set — resetting to Main",
+            )
+            _selectedSubagent.value = null
+            return
+        }
+        _selectedSubagent.value = id
     }
 
     override fun onSessionQueueChanged(payload: SessionQueueChangedPayload) {
@@ -745,6 +809,7 @@ internal class SessionDetailStore(
             if (openSessionId != sessionId) return@withLock
             _session.value = UiData.Loaded(result)
             _serverQueuedBundles.value = result.pendingBundles
+            applyActiveSubagentsLocked(result.activeSubagents)
             reconcileOptimisticLocked(result.entries)
         }
         persistCache(sessionId, result, result.entries, result.totalCount)
@@ -831,6 +896,7 @@ internal class SessionDetailStore(
             val result = fetched.copy(entries = entries, totalCount = newTotalCount)
             _session.value = UiData.Loaded(result)
             _serverQueuedBundles.value = fetched.pendingBundles
+            applyActiveSubagentsLocked(fetched.activeSubagents)
             _isLoadingOlder.value = false
             reconcileOptimisticLocked(entries)
             entries.lastOrNull()?.takeIf { it.index >= 0 }?.let { newest ->
@@ -852,6 +918,7 @@ internal class SessionDetailStore(
             val result = fetched.copy(entries = mergedEntries, totalCount = newTotalCount)
             _session.value = UiData.Loaded(result)
             _serverQueuedBundles.value = fetched.pendingBundles
+            applyActiveSubagentsLocked(fetched.activeSubagents)
             _isLoadingOlder.value = false
             reconcileOptimisticLocked(mergedEntries)
             mergedEntries.lastOrNull()?.takeIf { it.index >= 0 }?.let { newest ->
@@ -1083,6 +1150,7 @@ internal class SessionDetailStore(
                     .onSuccess { result ->
                         _session.value = UiData.Loaded(result)
                         _serverQueuedBundles.value = result.pendingBundles
+                        applyActiveSubagentsLocked(result.activeSubagents)
                         reconcileOptimisticLocked(result.entries)
                         snapshotForCache = result
                     }
@@ -1112,6 +1180,21 @@ internal class SessionDetailStore(
      * makes long messages (> 200 chars, server-truncated preview)
      * dedupe correctly — the regression user-reported on 2026-05-18.
      */
+    /**
+     * Seed [_activeSubagents] from a fresh `GetSessionResult` and snap
+     * [_selectedSubagent] back to a valid value if the previously-selected
+     * subagent disappeared. MUST be called while holding [sessionMutex] —
+     * mirrors the notification path's auto-snap so cold-start /
+     * full-refresh and live updates converge on the same invariant.
+     */
+    private fun applyActiveSubagentsLocked(activeSubagents: List<SubagentDto>) {
+        _activeSubagents.value = activeSubagents
+        val current = _selectedSubagent.value
+        if (current != null && activeSubagents.none { it.id == current }) {
+            _selectedSubagent.value = activeSubagents.firstOrNull()?.id
+        }
+    }
+
     private fun reconcileOptimisticLocked(serverEntries: List<EntrySummary>) {
         if (_optimisticEntries.value.isEmpty()) return
         val priorEntries = _optimisticEntries.value

@@ -19,6 +19,8 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
@@ -168,6 +170,8 @@ import kotlinx.coroutines.flow.StateFlow
 import ru.sipaha.spkremote.core.PlanSummary
 import ru.sipaha.spkremote.core.SessionStateDto
 import ru.sipaha.spkremote.core.SessionSummary
+import ru.sipaha.spkremote.core.SubagentDto
+import ru.sipaha.spkremote.core.filterEntriesBySubagent
 import ru.sipaha.spkremote.core.ToolCallStatusDto
 import ru.sipaha.spkremote.core.ToolCallSummary
 import ru.sipaha.spkremote.core.displayState
@@ -206,6 +210,8 @@ fun SessionDetailScreen(
     val optimistic by viewModel.optimisticEntries.collectAsState()
     val pendingUploads by viewModel.pendingUploadProgress.collectAsState()
     val serverQueuedBundles by viewModel.serverQueuedBundles.collectAsState()
+    val activeSubagents by viewModel.activeSubagents.collectAsState()
+    val selectedSubagent by viewModel.selectedSubagent.collectAsState()
     val cancelInFlight by viewModel.cancelInFlight.collectAsState()
     val isLoadingOlder by viewModel.isLoadingOlder.collectAsState()
     val childrenMap by viewModel.sessionChildren.collectAsState()
@@ -516,6 +522,15 @@ fun SessionDetailScreen(
                     state = connectionState,
                     lastConnectedMs = lastConnectedMs,
                 )
+                // Sub-agent tabs (Etap 6) — hidden when no Claude Task is
+                // in flight, so a plain conversation looks exactly as
+                // before. "Main" pill is always present when the strip is
+                // visible so the user can pop back to the main thread.
+                SubagentTabStrip(
+                    active = activeSubagents,
+                    selected = selectedSubagent,
+                    onSelect = viewModel::selectSubagent,
+                )
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     when (val s = sessionState) {
                         is UiData.Loading -> Box(
@@ -533,6 +548,7 @@ fun SessionDetailScreen(
                             optimistic = optimistic,
                             pendingUploads = pendingUploads,
                             serverQueuedBundles = serverQueuedBundles,
+                            selectedSubagent = selectedSubagent,
                             sessionDisplayState = displayState,
                             isLoadingOlder = isLoadingOlder,
                             onRequestOlder = { viewModel.loadOlder(sessionId) },
@@ -651,11 +667,37 @@ private fun ChatList(
     optimistic: List<EntrySummary>,
     pendingUploads: Map<Long, PendingUploadProgress>,
     serverQueuedBundles: List<ru.sipaha.spkremote.core.QueuedBundleSummary>,
+    selectedSubagent: String?,
     sessionDisplayState: DisplayState,
     isLoadingOlder: Boolean,
     onRequestOlder: () -> Unit,
     onAuthorizeToolCall: (toolCallId: String, optionId: String) -> Unit = { _, _ -> },
 ) {
+    // Filter the server transcript by the currently-selected sub-agent
+    // tab (null = Main → only entries without a subagent id). The
+    // filter is pure + extracted into `:core` so it can be unit-tested
+    // independently of Compose. Optimistic / synthetic-queue rows
+    // always carry `subagentId = null` (the user types into Main), so
+    // they keep showing only on the Main tab.
+    val filteredServer = remember(server.entries, selectedSubagent) {
+        if (server.entries.isEmpty()) {
+            server
+        } else {
+            server.copy(entries = filterEntriesBySubagent(server.entries, selectedSubagent))
+        }
+    }
+    val filteredOptimistic = remember(optimistic, selectedSubagent) {
+        filterEntriesBySubagent(optimistic, selectedSubagent)
+    }
+    val filteredQueuedBundles = remember(serverQueuedBundles, selectedSubagent) {
+        // Queued bundles always belong to the Main thread — hide them
+        // entirely when a sub-agent tab is active.
+        if (selectedSubagent == null) serverQueuedBundles else emptyList()
+    }
+    // Re-bind so the rest of the function reads the filtered names.
+    @Suppress("NAME_SHADOWING") val server = filteredServer
+    @Suppress("NAME_SHADOWING") val optimistic = filteredOptimistic
+    @Suppress("NAME_SHADOWING") val serverQueuedBundles = filteredQueuedBundles
     // Server-side `pending_messages` flattened into synthetic
     // EntrySummary rows so they slot into the same LazyColumn pass as
     // server entries. The server is the source of truth for queued
@@ -3959,3 +4001,61 @@ private fun EmptyChatMessage(title: String, body: String) {
         )
     }
 }
+
+/**
+ * Horizontally-scrollable strip of pills under the top app bar — one
+ * per active Claude Code sub-agent dispatch, with an implicit "Main"
+ * pill that maps to the main agent thread. Hidden entirely when no
+ * sub-agents are in flight so a plain conversation looks unchanged.
+ *
+ * Order is the server's `active_subagent_order` Vec — we iterate as-is
+ * and never re-sort, so a freshly-spawned Task always appears at the
+ * tail of the strip regardless of label/started_at_ms.
+ */
+@Composable
+private fun SubagentTabStrip(
+    active: List<SubagentDto>,
+    selected: String?,
+    onSelect: (String?) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (active.isEmpty()) return
+    val scrollState = rememberScrollState()
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .horizontalScroll(scrollState)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        SubagentPill(label = "Main", isActive = selected == null, onClick = { onSelect(null) })
+        for (tab in active) {
+            SubagentPill(
+                label = tab.label,
+                isActive = tab.id == selected,
+                onClick = { onSelect(tab.id) },
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SubagentPill(label: String, isActive: Boolean, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = MaterialTheme.shapes.small,
+        color = if (isActive) MaterialTheme.colorScheme.primaryContainer
+                else MaterialTheme.colorScheme.surfaceVariant,
+        contentColor = if (isActive) MaterialTheme.colorScheme.onPrimaryContainer
+                       else MaterialTheme.colorScheme.onSurfaceVariant,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+        )
+    }
+}
+
+

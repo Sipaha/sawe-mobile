@@ -22,6 +22,7 @@ import ru.sipaha.spkremote.core.MemberAddCompletedPayload
 import ru.sipaha.spkremote.core.MemberAddProgressPayload
 import ru.sipaha.spkremote.core.MessageAppendedPayload
 import ru.sipaha.spkremote.core.RemoteClient
+import ru.sipaha.spkremote.core.SessionActiveSubagentsChangedPayload
 import ru.sipaha.spkremote.core.SessionCreatedPayload
 import ru.sipaha.spkremote.core.SessionQueueChangedPayload
 import ru.sipaha.spkremote.core.SessionSummary
@@ -401,6 +402,17 @@ internal class SessionListStore(
                 } ?: return
                 router.onSessionQueueChanged(payload)
             }
+            "agent_session_active_subagents_changed" -> {
+                val payload = data?.let {
+                    runCatching {
+                        JsonRpc.json.decodeFromJsonElement(
+                            SessionActiveSubagentsChangedPayload.serializer(),
+                            it,
+                        )
+                    }.getOrNull()
+                } ?: return
+                router.onActiveSubagentsChanged(payload)
+            }
         }
     }
 
@@ -632,4 +644,12 @@ internal interface DetailNotificationRouter {
      * `bundles: []` is the canonical "queue drained" payload.
      */
     fun onSessionQueueChanged(payload: SessionQueueChangedPayload)
+
+    /**
+     * Active subagents (Task/Agent in-flight tabs) changed for
+     * [payload.sessionId]. The payload always carries the FULL new set
+     * (empty = no subagents in flight); insertion order matches the
+     * server-side `active_subagent_order` Vec — render as-is.
+     */
+    fun onActiveSubagentsChanged(payload: SessionActiveSubagentsChangedPayload)
 }

@@ -220,6 +220,16 @@ data class SessionSummary(
      * Drives the sub-agent chip row on `SessionDetailScreen` (F-phone).
      */
     @SerialName("parent_session_id") val parentSessionId: String? = null,
+    /**
+     * In-flight Claude Code sub-agents (Task/Agent tool-uses) for this
+     * session, in server-side insertion order. Drives the subagent-tabs
+     * strip on the detail screen — each entry is one pill alongside the
+     * implicit "Main" tab. Live updates ride the
+     * `agent_session_active_subagents_changed` notification; this field
+     * is the cold-start seed. Defaults to empty so pre-Etap-5 server
+     * responses decode cleanly.
+     */
+    @SerialName("active_subagents") val activeSubagents: List<SubagentDto> = emptyList(),
 )
 
 /**
@@ -347,6 +357,15 @@ data class EntrySummary(
      * notification so a streamed entry shows its time without a refetch.
      */
     @SerialName("created_ms") val createdMs: Long? = null,
+    /**
+     * Parent Claude Code `Task`/`Agent` tool-use id (`toolu_xxx`) when this
+     * entry was produced inside a sub-agent dispatch. Lifted server-side
+     * from `_meta.claudeCode.parentToolUseId`. Null for the main agent's
+     * entries; non-null entries are filtered into the matching subagent
+     * tab on `SessionDetailScreen`. Pre-Etap-5 servers omit the field —
+     * defaults to null so old transcripts still decode.
+     */
+    @SerialName("subagent_id") val subagentId: String? = null,
 )
 
 /**
@@ -482,6 +501,35 @@ data class QueuedBundleSummary(
 data class SessionQueueChangedPayload(
     @SerialName("session_id") val sessionId: String,
     val bundles: List<QueuedBundleSummary> = emptyList(),
+)
+
+/**
+ * One in-flight Claude Code sub-agent (Task/Agent tool use) as the server
+ * sees it. Mirrors `SubagentDto` on the desktop side. `id` is the parent
+ * `toolu_xxx` tool-use id — the same value mobile filters entries by via
+ * [EntrySummary.subagentId]. `label` is a human-friendly tab title chosen
+ * by the server (Task description → subagent_type#short → "Agent <short>").
+ * `startedAtMs` is wall-clock unix-millis captured when the sub-agent
+ * dispatch first entered the active set.
+ */
+@Serializable
+data class SubagentDto(
+    val id: String,
+    val label: String,
+    @SerialName("started_at_ms") val startedAtMs: Long,
+)
+
+/**
+ * Decoded `params.payload` of an `agent_session_active_subagents_changed`
+ * notification. Server emits this whenever a sub-agent enters or leaves
+ * the active set for [sessionId]; `activeSubagents` is the FULL post-change
+ * list in server-side insertion order (empty when nothing is in flight).
+ * Mobile mirrors the list verbatim into the detail store's tab strip.
+ */
+@Serializable
+data class SessionActiveSubagentsChangedPayload(
+    @SerialName("session_id") val sessionId: String,
+    @SerialName("active_subagents") val activeSubagents: List<SubagentDto>,
 )
 
 @Serializable
@@ -637,6 +685,13 @@ data class GetSessionResult(
      * pending or pre-R6i server builds.
      */
     @SerialName("pending_bundles") val pendingBundles: List<QueuedBundleSummary> = emptyList(),
+    /**
+     * Cold-start seed for the subagent-tabs strip — mirrors
+     * [SessionSummary.activeSubagents]. Live updates ride
+     * `agent_session_active_subagents_changed`. Defaults to empty for
+     * pre-Etap-5 servers.
+     */
+    @SerialName("active_subagents") val activeSubagents: List<SubagentDto> = emptyList(),
 )
 
 /**

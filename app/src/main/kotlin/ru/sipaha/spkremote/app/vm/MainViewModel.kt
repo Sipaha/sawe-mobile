@@ -432,6 +432,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
         get() = sessionDetail.pendingUploadProgress
     val serverQueuedBundles: StateFlow<List<ru.sipaha.spkremote.core.QueuedBundleSummary>>
         get() = sessionDetail.serverQueuedBundles
+    val activeSubagents: StateFlow<List<ru.sipaha.spkremote.core.SubagentDto>>
+        get() = sessionDetail.activeSubagents
+    val selectedSubagent: StateFlow<String?> get() = sessionDetail.selectedSubagent
     val cancelInFlight: StateFlow<Boolean> get() = sessionDetail.cancelInFlight
     val sessionChildren: StateFlow<Map<String, List<SessionSummary>>> get() = sessionList.sessionChildren
     val agents: StateFlow<UiData<List<AgentSummary>>> get() = sessionList.agents
@@ -450,6 +453,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
     fun sendMessageBlocks(blocks: List<ContentBlockDto>) =
         sessionDetail.sendMessageBlocks(blocks)
     fun forceFlushQueue() = sessionDetail.forceFlushQueue()
+    fun selectSubagent(id: String?) = sessionDetail.selectSubagent(id)
     /**
      * Pending-send variant for the chat compose row: caller pressed
      * Send while one or more attachments were still uploading. The
