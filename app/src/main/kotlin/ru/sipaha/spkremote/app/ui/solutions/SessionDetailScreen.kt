@@ -549,6 +549,7 @@ fun SessionDetailScreen(
                             pendingUploads = pendingUploads,
                             serverQueuedBundles = serverQueuedBundles,
                             selectedSubagent = selectedSubagent,
+                            hasActiveSubagents = activeSubagents.isNotEmpty(),
                             sessionDisplayState = displayState,
                             isLoadingOlder = isLoadingOlder,
                             onRequestOlder = { viewModel.loadOlder(sessionId) },
@@ -668,6 +669,7 @@ private fun ChatList(
     pendingUploads: Map<Long, PendingUploadProgress>,
     serverQueuedBundles: List<ru.sipaha.spkremote.core.QueuedBundleSummary>,
     selectedSubagent: String?,
+    hasActiveSubagents: Boolean,
     sessionDisplayState: DisplayState,
     isLoadingOlder: Boolean,
     onRequestOlder: () -> Unit,
@@ -679,20 +681,28 @@ private fun ChatList(
     // independently of Compose. Optimistic / synthetic-queue rows
     // always carry `subagentId = null` (the user types into Main), so
     // they keep showing only on the Main tab.
-    val filteredServer = remember(server.entries, selectedSubagent) {
-        if (server.entries.isEmpty()) {
+    //
+    // Cold-restart bypass: when the strip is hidden (no active subagents),
+    // show every entry regardless of `subagentId`. Otherwise persisted
+    // entries stamped with a now-dead `toolu_xxx` would silently
+    // disappear from Main after the app restarts.
+    val filteredServer = remember(server.entries, selectedSubagent, hasActiveSubagents) {
+        if (server.entries.isEmpty() || !hasActiveSubagents) {
             server
         } else {
             server.copy(entries = filterEntriesBySubagent(server.entries, selectedSubagent))
         }
     }
-    val filteredOptimistic = remember(optimistic, selectedSubagent) {
-        filterEntriesBySubagent(optimistic, selectedSubagent)
+    val filteredOptimistic = remember(optimistic, selectedSubagent, hasActiveSubagents) {
+        if (!hasActiveSubagents) optimistic
+        else filterEntriesBySubagent(optimistic, selectedSubagent)
     }
-    val filteredQueuedBundles = remember(serverQueuedBundles, selectedSubagent) {
+    val filteredQueuedBundles = remember(serverQueuedBundles, selectedSubagent, hasActiveSubagents) {
         // Queued bundles always belong to the Main thread — hide them
-        // entirely when a sub-agent tab is active.
-        if (selectedSubagent == null) serverQueuedBundles else emptyList()
+        // entirely when a sub-agent tab is active. With no active strip,
+        // selectedSubagent is irrelevant so they're always visible.
+        if (!hasActiveSubagents || selectedSubagent == null) serverQueuedBundles
+        else emptyList()
     }
     // Re-bind so the rest of the function reads the filtered names.
     @Suppress("NAME_SHADOWING") val server = filteredServer

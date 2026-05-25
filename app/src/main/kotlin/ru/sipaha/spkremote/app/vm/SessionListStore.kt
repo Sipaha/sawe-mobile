@@ -226,6 +226,11 @@ internal class SessionListStore(
                             "agent_session_title_changed",
                             "agent_session_message_appended",
                             "agent_session_queue_changed",
+                            // Task/Agent subagent set changed mid-turn —
+                            // routes to SessionDetailStore.onActiveSubagentsChanged
+                            // which moves the tab strip; without this the
+                            // strip only refreshes via cold-start seed.
+                            "agent_session_active_subagents_changed",
                             // Chunked-upload acks share this collector — server
                             // forwards them through the same notification path
                             // (allow_list pattern `upload_*`). Subscribing
