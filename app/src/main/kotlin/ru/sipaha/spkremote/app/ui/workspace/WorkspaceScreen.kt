@@ -13,6 +13,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -30,11 +31,16 @@ fun WorkspaceScreen(
     onOpenSession: (sessionId: String) -> Unit,
     onOpenProjects: (solutionId: String) -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenPicker: () -> Unit,
     onCreateNewSolution: () -> Unit,
     onCreateNewSessionFor: (solutionId: String) -> Unit,
 ) {
     val state by viewModel.workspaceState.collectAsState()
+    // Picker visibility lives inside the screen now (E1): the FAB and
+    // EmptyState both flip it true, and the sheet itself flips it back
+    // false on dismiss / "Open" tap. Survives config-change via
+    // rememberSaveable so a rotation mid-pick doesn't snap the sheet
+    // shut.
+    var showPicker by rememberSaveable { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -50,7 +56,7 @@ fun WorkspaceScreen(
         floatingActionButton = {
             ExpandableFab(
                 onCreateNew = onCreateNewSolution,
-                onOpenPicker = onOpenPicker,
+                onOpenPicker = { showPicker = true },
             )
         },
     ) { padding ->
@@ -60,7 +66,10 @@ fun WorkspaceScreen(
                 is WorkspaceUiState.Error -> ErrorState(s.message)
                 is WorkspaceUiState.Loaded -> {
                     if (s.snapshot.solutions.isEmpty()) {
-                        EmptyState(onOpenPicker = onOpenPicker, onCreateNew = onCreateNewSolution)
+                        EmptyState(
+                            onOpenPicker = { showPicker = true },
+                            onCreateNew = onCreateNewSolution,
+                        )
                     } else {
                         if (s.stale) StaleProgressBar()
                         WorkspaceListContent(
@@ -77,6 +86,13 @@ fun WorkspaceScreen(
                 }
             }
         }
+    }
+
+    if (showPicker) {
+        ClosedSolutionsPickerSheet(
+            viewModel = viewModel,
+            onDismiss = { showPicker = false },
+        )
     }
 }
 

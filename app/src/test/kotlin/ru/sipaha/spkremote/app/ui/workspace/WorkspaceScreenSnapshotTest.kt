@@ -11,6 +11,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import ru.sipaha.spkremote.app.vm.ClosedSolutionRow
 import ru.sipaha.spkremote.app.vm.OpenSessionVM
 import ru.sipaha.spkremote.app.vm.OpenSolutionVM
 import ru.sipaha.spkremote.core.SessionStateDto
@@ -99,6 +100,39 @@ class WorkspaceScreenSnapshotTest {
             MaterialTheme {
                 Surface {
                     EmptyState()
+                }
+            }
+        }
+    }
+
+    @Test
+    fun picker_sheet_populated() {
+        val rows = listOf(
+            ClosedSolutionRow(
+                id = "c1",
+                name = "ML experiments",
+                memberCount = 4,
+                lastOpenedAt = "2 days ago",
+            ),
+            ClosedSolutionRow(
+                id = "c2",
+                name = "Old prototype",
+                memberCount = 1,
+                lastOpenedAt = "6 months ago",
+            ),
+        )
+
+        captureRoboImage(
+            filePath = "src/test/snapshots/roborazzi/WorkspaceScreenSnapshotTest_picker_sheet_populated.png",
+            roborazziOptions = RoborazziOptions(taskType = taskType),
+        ) {
+            MaterialTheme {
+                Surface {
+                    ClosedSolutionsPickerSheetContent(
+                        rows = rows,
+                        onOpen = {},
+                        onDelete = {},
+                    )
                 }
             }
         }
