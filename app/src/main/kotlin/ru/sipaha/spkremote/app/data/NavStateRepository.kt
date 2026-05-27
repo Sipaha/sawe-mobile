@@ -80,6 +80,14 @@ class NavStateRepository(
      * if none. Falls back to the legacy R-6d unscoped key when no
      * scoped value exists — gives the upgrade path one free resume
      * before being overwritten by the next [saveRoute].
+     *
+     * **F1 unified-workspace migration:** legacy `solutions/...` routes
+     * are rewritten to their `workspace/...` equivalents and persisted in
+     * place. After F1 the nav graph no longer registers any
+     * `solutions/...` destinations, so handing the controller a legacy
+     * string would deep-link into a 404 and clear the saved state. The
+     * migration is one-shot per stored value — once rewritten, the next
+     * [loadRoute] sees the already-migrated form and returns it as-is.
      */
     fun loadRoute(): String? {
         val p = prefs ?: return null
@@ -87,8 +95,39 @@ class NavStateRepository(
         val scoped = runCatching { p.getString(key, null) }
             .onFailure { Log.w(TAG, "loadRoute() failed", it) }
             .getOrNull()
-        if (scoped != null) return scoped
-        return runCatching { p.getString(LEGACY_KEY_ROUTE, null) }.getOrNull()
+        val raw = scoped
+            ?: runCatching { p.getString(LEGACY_KEY_ROUTE, null) }.getOrNull()
+            ?: return null
+        val migrated = migrate(raw)
+        if (migrated != raw) saveRoute(migrated)
+        return migrated
+    }
+
+    /**
+     * Rewrite legacy `solutions/...` route strings into the unified
+     * `workspace/...` graph introduced by the unified-open-workspace
+     * feature (F1). Pass-through for any string that already targets
+     * `workspace/...` or any non-`solutions/...` route.
+     *
+     * Mapping:
+     *   - `solutions`                              → `workspace`
+     *   - `solutions/{id}`                         → `workspace`
+     *   - `solutions/{id}/projects`                → `workspace/solutions/{id}/projects`
+     *   - `solutions/{id}/sessions/{sid}`          → `workspace/sessions/{sid}`
+     */
+    private fun migrate(raw: String): String {
+        val sessionMatch = SESSION_RE.find(raw)
+        if (sessionMatch != null) {
+            return "workspace/sessions/${sessionMatch.groupValues[1]}"
+        }
+        val projectsMatch = PROJECTS_RE.find(raw)
+        if (projectsMatch != null) {
+            return "workspace/solutions/${projectsMatch.groupValues[1]}/projects"
+        }
+        if (raw == "solutions" || SOLUTION_RE.matches(raw)) {
+            return "workspace"
+        }
+        return raw
     }
 
     /**
@@ -137,6 +176,10 @@ class NavStateRepository(
         private const val TAG = "NavStateRepository"
         private const val PREFS_NAME = "spk_nav_state"
         private const val LEGACY_KEY_ROUTE = "route"
+
+        private val SESSION_RE = Regex("""^solutions/[^/]+/sessions/(.+)$""")
+        private val PROJECTS_RE = Regex("""^solutions/([^/]+)/projects$""")
+        private val SOLUTION_RE = Regex("""^solutions/[^/]+$""")
 
         @Volatile
         private var instance: NavStateRepository? = null

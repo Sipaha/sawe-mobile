@@ -450,7 +450,7 @@ internal class ConnectionManager(
             ?.takeIf { id -> servers.any { it.id == id } }
             ?: servers.first().id
         switchToServer(preferredId)
-        return if (servers.size == 1) "solutions" else "servers"
+        return if (servers.size == 1) "workspace" else "servers"
     }
 
     private fun drainExpiredQueueEntries() {
