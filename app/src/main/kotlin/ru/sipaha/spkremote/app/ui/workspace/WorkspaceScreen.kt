@@ -311,10 +311,8 @@ private fun StaleProgressBar() = LinearProgressIndicator(modifier = Modifier.fil
 
 /**
  * Format `last_activity_at` (epoch millis) into a relative string like "5m ago".
- *
- * TODO(post-G1): extract to ui/util/ once SolutionDetailScreen is removed.
- * Copied verbatim from `SolutionDetailScreen.kt` so this file stands alone;
- * G1 deletes that screen so the duplicate naturally dies later.
+ * Private to this screen — `ServersListScreen` keeps its own copy with the
+ * same shape; YAGNI extraction left for if/when a third copy lands.
  */
 private fun relativeTime(epochMillis: Long): String {
     if (epochMillis <= 0L) return ""

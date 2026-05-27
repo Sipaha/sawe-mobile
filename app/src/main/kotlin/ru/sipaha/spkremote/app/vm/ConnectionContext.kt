@@ -3,7 +3,7 @@ package ru.sipaha.spkremote.app.vm
 import ru.sipaha.spkremote.core.RemoteClient
 
 /**
- * Shared context handed to [SolutionStore] and [SessionStore] so they
+ * Shared context handed to [CatalogStore] and the session stores so they
  * can reach the active [RemoteClient] without holding a hard reference
  * to it (the client is recreated on every [switchToServer]).
  *

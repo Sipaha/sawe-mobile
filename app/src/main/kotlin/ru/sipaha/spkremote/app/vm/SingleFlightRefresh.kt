@@ -6,8 +6,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 /**
- * Shared single-flight refresh primitive used by [SolutionStore] and
- * [SessionStore]. Cancels any in-flight refresh tracked by [jobHolder]
+ * Shared single-flight refresh primitive used by [SessionListStore].
+ * Cancels any in-flight refresh tracked by [jobHolder]
  * before launching a new one, applies the success / failure policy
  * common to both stores, and writes results onto [target].
  *

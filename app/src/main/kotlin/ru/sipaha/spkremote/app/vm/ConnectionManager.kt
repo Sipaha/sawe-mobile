@@ -421,8 +421,8 @@ internal class ConnectionManager(
         client?.close()
         client = null
         // Reset only the connection-owned state. Per-store UI caches are
-        // wiped by the [onTearDown] callback so the SolutionStore /
-        // SessionStore can drop their own flows on the same edge.
+        // wiped by the [onTearDown] callback so the catalog / session
+        // stores can drop their own flows on the same edge.
         lifecycle.onTearDown()
         _pairing.value = null
         _connectionBanner.value = ConnectionBanner.Hidden

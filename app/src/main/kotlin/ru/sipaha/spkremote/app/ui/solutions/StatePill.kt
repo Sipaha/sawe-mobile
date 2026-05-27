@@ -12,8 +12,9 @@ import ru.sipaha.spkremote.core.DisplayState
 /**
  * Small colored pill rendering a session's [DisplayState].
  *
- * Shared by [SolutionDetailScreen] (session list rows) and
- * [SessionDetailScreen] (top bar) so both surfaces agree on the
+ * Shared by [ru.sipaha.spkremote.app.ui.workspace.WorkspaceScreen] (session
+ * rows), [SessionDetailScreen] (top bar), and [ru.sipaha.spkremote.app.ui.servers.ServersListScreen]
+ * (server-row activity badge) so every surface agrees on the
  * label/color mapping. `raw` is the unparsed server-side state string
  * — surfaced verbatim (truncated) for [DisplayState.Unknown] so the
  * user can see the raw value while we add support for new states.

@@ -43,7 +43,13 @@ import ru.sipaha.spkremote.core.AgentSummary
 import ru.sipaha.spkremote.core.SolutionMember
 
 /**
- * "New session" dialog launched from [SolutionDetailScreen]'s FAB.
+ * "New session" dialog used by the create-session flow.
+ *
+ * Currently unwired post-G1: the legacy SolutionDetailScreen that launched
+ * this dialog from its FAB is gone, and the workspace screen's
+ * `onCreateNewSessionFor` callback is a no-op placeholder pending the
+ * F-phase workspace-owned creation flow. Kept around because that future
+ * flow will reuse the agent-picker + initial-message UI verbatim.
  *
  * Flow:
  *  1. On mount, [MainViewModel.loadAgents] runs once and populates the

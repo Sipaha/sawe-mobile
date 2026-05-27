@@ -103,9 +103,9 @@ internal class SessionListStore(
 
     /**
      * Solution member-add / change notification routing — wired by the
-     * coordinator to [SolutionStore]. Same single-collector discipline as
+     * coordinator to [CatalogStore]. Same single-collector discipline as
      * the detail + upload routers above: the list store owns the one
-     * subscription, [SolutionStore] just consumes the typed payloads.
+     * subscription, [CatalogStore] just consumes the typed payloads.
      */
     internal var solutionNotificationRouter: SolutionNotificationRouter? = null
 
@@ -133,8 +133,8 @@ internal class SessionListStore(
     /**
      * Read-only accessor for the coordinator's foreground-refresh hook.
      * Returns the solution whose sessions list is currently being
-     * observed (i.e. the SolutionDetailScreen is mounted), or null when
-     * no list screen is visible.
+     * observed (i.e. a session-list surface is mounted), or null when
+     * no list surface is visible.
      */
     fun currentObservingSolutionId(): String? = observingSolutionId
 
@@ -258,7 +258,7 @@ internal class SessionListStore(
                             // Solution member-add progress + completion +
                             // generic solution change — drive the project-
                             // registry ghost rows and the member-list
-                            // refresh. Routed to SolutionStore via
+                            // refresh. Routed to CatalogStore via
                             // [solutionNotificationRouter].
                             "solution_member_add_progress",
                             "solution_member_add_completed",
@@ -326,7 +326,7 @@ internal class SessionListStore(
             return
         }
 
-        // Solution member-add / change events — fan out to SolutionStore
+        // Solution member-add / change events — fan out to CatalogStore
         // for the project-registry ghost rows + member-list refresh.
         // Independent of the session list/detail routing below.
         when (kind) {
@@ -422,8 +422,8 @@ internal class SessionListStore(
         //
         // Fallback when no solution-list screen is observing: derive the
         // solution id from the currently-loaded sessions cache. This is
-        // the SessionDetailScreen-mounted case where SolutionDetailScreen
-        // already disposed and reset `observingSolutionId = null` —
+        // the SessionDetailScreen-mounted case where the previously-mounted
+        // list surface already disposed and reset `observingSolutionId = null` —
         // without the fallback, an `agent_session_state_changed`
         // notification fired by a /compact (rotate_context sets
         // `cached_total_tokens = None` then emits SessionStateChanged)

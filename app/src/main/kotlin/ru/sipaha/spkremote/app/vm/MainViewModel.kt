@@ -28,7 +28,6 @@ import ru.sipaha.spkremote.core.PairingUrl
 import ru.sipaha.spkremote.core.QueuedMessage
 import ru.sipaha.spkremote.core.RemoteClient
 import ru.sipaha.spkremote.core.SessionSummary
-import ru.sipaha.spkremote.core.SolutionSummary
 
 sealed interface UiState {
     data class Disconnected(val lastUrl: String? = null, val error: String? = null) : UiState
@@ -87,11 +86,16 @@ sealed interface UiData<out T> {
 }
 
 /**
- * Thin coordinator around four collaborators that share [viewModelScope]:
+ * Thin coordinator around five collaborators that share [viewModelScope]:
  *
  *   - [ConnectionManager] — pairing CRUD + the active [RemoteClient] +
  *     wire-level connection state observation.
- *   - [SolutionStore] — solutions list + solution detail RPCs.
+ *   - [CatalogStore] — registry catalog + per-solution member-management
+ *     RPCs that back the `SolutionProjectsScreen` (the solutions-list
+ *     surface itself lives on [WorkspaceStore] post-G1).
+ *   - [WorkspaceStore] — open-set mirror of the desktop's workspace
+ *     (solutions + sessions currently open) driven by sequenced
+ *     `workspace.*` notifications with gap-driven resync.
  *   - [SessionListStore] — per-solution sessions list, agents catalogue,
  *     create / rename / sub-agent children, and the single shared
  *     notifications collector that fans out to the detail store.
@@ -109,8 +113,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
 
     // ---- Per-server scoped repositories. They live on the coordinator
     // because more than one collaborator touches them (e.g.
-    // ListCacheRepository is read by SolutionStore for solutions AND
-    // SessionStore for sessions, and removeServer must wipe both). ----
+    // ListCacheRepository is read by SessionListStore for the per-solution
+    // sessions list, and removeServer must wipe every per-server file). ----
 
     private val draftRepository: DraftRepository =
         DraftRepository.get(application) { connectionMgr.activeServerId.value }
@@ -147,10 +151,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
         lifecycle = this,
     )
 
-    private val solutionStore: SolutionStore = SolutionStore(
+    private val catalogStore: CatalogStore = CatalogStore(
         scope = viewModelScope,
         context = this,
-        listCacheRepository = listCacheRepository,
     )
 
     private val lastSeenIndex: LastSeenIndex = LastSeenIndex(lastSeenRepository)
@@ -174,9 +177,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
         sessionHistoryRepository = sessionHistoryRepository,
     ).also {
         // Fan out solution member-add + change notifications from the
-        // single shared collector into SolutionStore (ghost rows + member
-        // list refresh). Mirrors the upload-ack wiring below.
-        it.solutionNotificationRouter = solutionStore
+        // single shared collector into CatalogStore (ghost rows + member
+        // list refresh on the projects screen). Mirrors the upload-ack
+        // wiring below.
+        it.solutionNotificationRouter = catalogStore
         // Workspace open-set notifications — same single-collector
         // fan-out; WorkspaceStore implements the router interface
         // directly so no adapter is needed.
@@ -237,7 +241,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
      * Gated on `activeClient() != null` so that a foreground
      * transition while the connection is down (the reconnect logic
      * from R-6a will recover separately, and [ConnectionLifecycle.onReconnected]
-     * already triggers a resume + solutions-refresh) doesn't queue a
+     * already triggers a resume + workspace-refresh) doesn't queue a
      * spurious "not connected" snackbar via
      * [SessionListStore.refreshSessions]'s offline branch.
      */
@@ -268,9 +272,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
     // ---- ConnectionLifecycle impl (audit Fix T light variant) ----
 
     override fun onClientBound(url: PairingUrl, client: RemoteClient) {
-        // Pull the solutions cache so the navigation surface is
-        // interactable before the live refresh lands.
-        solutionStore.hydrateFromCache()
+        // Workspace mirror is the authoritative landing surface post-G1
+        // — its [ConnectionLifecycle.onReconnected] hook below kicks off
+        // the first refresh once the wire is live. No solutions-list
+        // cache to hydrate here anymore.
         // Revive any in-flight uploads persisted by a previous process
         // for THIS server. resumeAllFromDisk is idempotent — calling
         // it twice on a rapid re-bind is fine, the second call's list
@@ -291,7 +296,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
         // Drop per-store UI state on the same edge that drops the
         // client. Keeps the UI from briefly showing server A's
         // transcript while server B's initial fetch is pending.
-        solutionStore.reset()
+        catalogStore.reset()
         sessionList.reset()
         sessionDetail.reset()
         // The client just went away — every chunk-loop coroutine
@@ -305,15 +310,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
     override fun onReconnected() {
         // Disconnected → Connected edge. If a session detail screen
         // is currently active, resume it incrementally; otherwise
-        // just refresh the solutions list.
+        // just refresh the workspace mirror.
         val openSid = sessionDetail.openSessionId
         if (openSid != null) {
             sessionDetail.resumeSession(openSid)
         }
-        solutionStore.refreshSolutions()
-        // Workspace mirror — same reconnect resync semantics as the
-        // solutions list; treats the server as authoritative for the
-        // open-set after any disconnect window.
+        // Workspace mirror — treat the server as authoritative for the
+        // open-set after any disconnect window. The session-list /
+        // catalog stores observe their own notification kinds and
+        // refresh themselves when the user lands on the surface that
+        // needs them.
         viewModelScope.launch { workspaceStore.refresh() }
         // Wake any paused upload coroutines back up. Each will hit
         // upload_status first (server is authoritative on offset).
@@ -417,35 +423,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
 
     fun coldStartLandingRoute(): String = connectionMgr.coldStartLandingRoute()
 
-    // ---- Solutions surface ----
+    // ---- Catalog / projects surface ----
+    //
+    // Per-solution member management for the `SolutionProjectsScreen`
+    // (registry catalog, member-add ghost rows, open-solution details).
+    // The solutions-list surface itself has moved to [WorkspaceStore]
+    // post-G1; the legacy `SolutionsListScreen` + `SolutionDetailScreen`
+    // are gone.
 
-    val solutions: StateFlow<UiData<List<SolutionSummary>>> get() = solutionStore.solutions
-    val solutionDetails: StateFlow<UiData<GetSolutionResult>> get() = solutionStore.solutionDetails
+    val solutionDetails: StateFlow<UiData<GetSolutionResult>> get() = catalogStore.solutionDetails
 
     val catalog: StateFlow<List<ru.sipaha.spkremote.core.CatalogProjectInfo>>
-        get() = solutionStore.catalog
+        get() = catalogStore.catalog
     val memberAdds: StateFlow<Map<Pair<String, String>, MemberAddProgress>>
-        get() = solutionStore.memberAdds
+        get() = catalogStore.memberAdds
 
-    fun refreshSolutions() = solutionStore.refreshSolutions()
-    fun loadSolutionDetails(solutionId: String) = solutionStore.loadSolutionDetails(solutionId)
-    fun createSolution(name: String) = solutionStore.createSolution(name)
-    fun deleteSolution(solutionId: String) = solutionStore.deleteSolution(solutionId)
-    fun refreshCatalog() = solutionStore.refreshCatalog()
-    fun createSolutionWith(
-        name: String,
-        catalogIds: List<String>,
-        emptyNames: List<String>,
-        onCreated: (solutionId: String) -> Unit = {},
-    ) = solutionStore.createSolutionWith(name, catalogIds, emptyNames, onCreated)
+    fun loadSolutionDetails(solutionId: String) = catalogStore.loadSolutionDetails(solutionId)
+    /**
+     * Delete the solution [solutionId] on the server. The workspace
+     * mirror picks up the removal via the `workspace.solution_deleted`
+     * notification, so no manual list-refresh is needed.
+     */
+    fun deleteSolution(solutionId: String) = catalogStore.deleteSolution(solutionId)
+    fun refreshCatalog() = catalogStore.refreshCatalog()
     fun addMemberFromCatalog(solutionId: String, catalogId: String) =
-        solutionStore.addMemberFromCatalog(solutionId, catalogId)
+        catalogStore.addMemberFromCatalog(solutionId, catalogId)
     fun createEmptyMember(solutionId: String, name: String) =
-        solutionStore.createEmptyMember(solutionId, name)
+        catalogStore.createEmptyMember(solutionId, name)
     fun removeMember(solutionId: String, catalogId: String) =
-        solutionStore.removeMember(solutionId, catalogId)
+        catalogStore.removeMember(solutionId, catalogId)
     fun removeCatalogProject(catalogId: String) =
-        solutionStore.removeCatalogProject(catalogId)
+        catalogStore.removeCatalogProject(catalogId)
 
     // ---- Workspace (open-set) surface ----
     //

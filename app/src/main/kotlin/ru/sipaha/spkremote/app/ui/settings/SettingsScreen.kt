@@ -48,7 +48,7 @@ import ru.sipaha.spkremote.core.PairingUrl
 
 /**
  * Settings / About screen. Reachable from the gear icon on
- * [ru.sipaha.spkremote.app.ui.solutions.SolutionsListScreen] and the
+ * [ru.sipaha.spkremote.app.ui.workspace.WorkspaceScreen] and the
  * Servers list (R-6c-multi).
  *
  * Surfaces:

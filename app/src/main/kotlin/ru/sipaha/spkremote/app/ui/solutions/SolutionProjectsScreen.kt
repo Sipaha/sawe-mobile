@@ -50,9 +50,10 @@ import ru.sipaha.spkremote.core.SolutionMember
 
 /**
  * Project (member) management panel for one Solution — the list reachable
- * by tapping the member count on [SolutionDetailScreen]. Shows each member
- * with its on-disk status, lets the user add catalog/empty projects and
- * remove existing ones, and renders in-flight clone progress as ghost rows.
+ * by tapping a solution row on [ru.sipaha.spkremote.app.ui.workspace.WorkspaceScreen]'s
+ * "Projects" affordance. Shows each member with its on-disk status, lets the
+ * user add catalog/empty projects and remove existing ones, and renders
+ * in-flight clone progress as ghost rows.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

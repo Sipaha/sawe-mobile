@@ -1,36 +1,43 @@
 package ru.sipaha.spkremote.app.vm
 
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import ru.sipaha.spkremote.app.data.ListCacheRepository
 import ru.sipaha.spkremote.core.CatalogProjectInfo
-import ru.sipaha.spkremote.core.CreateSolutionResult
 import ru.sipaha.spkremote.core.GetSolutionResult
-import ru.sipaha.spkremote.core.ListSolutionsResult
 import ru.sipaha.spkremote.core.MemberAddCompletedPayload
 import ru.sipaha.spkremote.core.MemberAddProgressPayload
-import ru.sipaha.spkremote.core.SolutionSummary
 
 /**
- * Owns the solutions list + per-solution detail state flows. Talks to
- * the desktop through [ConnectionContext.activeClient]; uses the
- * on-disk [ListCacheRepository] to keep the user looking at *something*
- * when the WebSocket isn't usable.
+ * Project-registry catalog + per-solution member-management state for
+ * the `SolutionProjectsScreen`. Carved out of the legacy `SolutionStore`
+ * during G1 when the unified workspace took over the solutions-list
+ * surface: only the catalog / member / solution-detail bits that
+ * `SolutionProjectsScreen` still consumes survive here.
+ *
+ * What this store owns:
+ *   - [solutionDetails] — the currently-open solution detail (members
+ *     list backing the projects screen), loaded on demand.
+ *   - [catalog] — registry projects available to add to a solution,
+ *     refreshed lazily on picker open via [refreshCatalog].
+ *   - [memberAdds] — in-flight (and recently-failed) catalog member-adds
+ *     for the ghost-row UI; driven by the `solution_member_add_*`
+ *     notification stream via [SolutionNotificationRouter].
+ *
+ * What it intentionally does NOT own (formerly on `SolutionStore`):
+ *   - solutions list / list cache hydration — replaced by [WorkspaceStore],
+ *   - `create_solution` / `create_solution_with` — replaced by F-phase
+ *     workspace flows (not yet wired; the F1 plan tracks the dialog),
+ *   - "refresh solutions" — workspace mirror is the authoritative list.
  */
-internal class SolutionStore(
+internal class CatalogStore(
     private val scope: CoroutineScope,
     private val context: ConnectionContext,
-    private val listCacheRepository: ListCacheRepository,
 ) : SolutionNotificationRouter {
-    private val _solutions = MutableStateFlow<UiData<List<SolutionSummary>>>(UiData.Loading)
-    val solutions: StateFlow<UiData<List<SolutionSummary>>> = _solutions.asStateFlow()
-
     private val _solutionDetails = MutableStateFlow<UiData<GetSolutionResult>>(UiData.Loading)
     val solutionDetails: StateFlow<UiData<GetSolutionResult>> = _solutionDetails.asStateFlow()
 
@@ -57,94 +64,18 @@ internal class SolutionStore(
     val memberAdds: StateFlow<Map<Pair<String, String>, MemberAddProgress>> =
         _memberAdds.asStateFlow()
 
-    // Single-flight guard for refresh.
-    private var refreshSolutionsJob: Job? = null
-
-    /** Hydrate from cache eagerly on `switchToServer`. */
-    fun hydrateFromCache() {
-        val cached = listCacheRepository.loadSolutions()
-        if (cached != null) {
-            _solutions.value = UiData.Loaded(cached)
-        }
-    }
-
-    /** Reset on tear-down. */
+    /** Reset on tear-down (server switch / disconnect). */
     fun reset() {
-        // Cancel any in-flight refresh first so its `onSuccess` doesn't
-        // overwrite the freshly-reset `_solutions` with the previous
-        // server's payload after we've already nulled it.
-        refreshSolutionsJob?.cancel()
-        refreshSolutionsJob = null
-        _solutions.value = UiData.Loading
-        // Drop the previous server's solution detail too — otherwise it
-        // stays visible until the next `loadSolutionDetails` lands.
         _solutionDetails.value = UiData.Loading
-        // Catalog + in-flight adds are server-scoped; a switch invalidates
-        // both (different registry, different member-add operations).
         _catalog.value = emptyList()
         _memberAdds.value = emptyMap()
     }
 
-    fun refreshSolutions() {
-        val active = context.activeClient()
-        if (active == null) {
-            val cached = listCacheRepository.loadSolutions()
-            if (cached != null) {
-                _solutions.value = UiData.Loaded(cached)
-                context.emitError(context.notConnectedMessage())
-            } else {
-                _solutions.value = UiData.Error(context.notConnectedMessage())
-            }
-            return
-        }
-        if (_solutions.value !is UiData.Loaded) {
-            _solutions.value = UiData.Loading
-        }
-        singleFlightRefresh(
-            scope = scope,
-            target = _solutions,
-            jobHolder = { refreshSolutionsJob },
-            setJob = { refreshSolutionsJob = it },
-            emitError = { context.emitError("Couldn't refresh solutions: $it") },
-            fetch = {
-                val resp = active.call("remote.solutions.list")
-                resp.decodeResultOrThrow(ListSolutionsResult.serializer()).solutions
-            },
-            onSuccess = { listCacheRepository.saveSolutions(it) },
-        )
-    }
-
     /**
-     * Create a new solution named [name] on the server. On success,
-     * refresh the solutions list so the new entry surfaces. Errors are
-     * pushed through the shared error channel — caller is expected to
-     * pre-trim and pre-validate, but we surface server-side rejections
-     * (e.g. duplicate name) here too.
-     */
-    fun createSolution(name: String) {
-        val active = context.activeClient()
-        if (active == null) {
-            context.emitError(context.notConnectedMessage())
-            return
-        }
-        val params = buildJsonObject { put("name", name) }
-        scope.launch {
-            runCatching { active.call("remote.solutions.create", params) }
-                .mapCatching { resp ->
-                    val err = resp.error
-                    if (err != null) error(err.message)
-                    val toolErr = resp.toolError()
-                    if (toolErr != null) error(toolErr)
-                }
-                .onSuccess { refreshSolutions() }
-                .onFailure { context.emitError("Couldn't create solution: ${it.message ?: "?"}") }
-        }
-    }
-
-    /**
-     * Delete the solution [solutionId] on the server. On success, refresh
-     * the solutions list — the deleted entry will simply not reappear in
-     * the next payload. Failures surface through the shared error channel.
+     * Delete the solution [solutionId] on the server. Failures surface
+     * through the shared error channel. The workspace mirror picks up the
+     * removal via the `workspace.solution_deleted` notification — no
+     * explicit list refresh needed.
      */
     fun deleteSolution(solutionId: String) {
         val active = context.activeClient()
@@ -161,7 +92,6 @@ internal class SolutionStore(
                     val toolErr = resp.toolError()
                     if (toolErr != null) error(toolErr)
                 }
-                .onSuccess { refreshSolutions() }
                 .onFailure { context.emitError("Couldn't delete solution: ${it.message ?: "?"}") }
         }
     }
@@ -292,7 +222,8 @@ internal class SolutionStore(
     /**
      * Remove a member from [solutionId] (config-only on the server — the
      * worktree directory is left on disk). Refreshes the open solution
-     * detail + the list so the member count and rows update.
+     * detail so the member count and rows update; the workspace mirror
+     * picks up the change via the `solution_changed` notification.
      */
     fun removeMember(solutionId: String, catalogId: String) {
         val active = context.activeClient()
@@ -302,58 +233,8 @@ internal class SolutionStore(
         }
         scope.launch {
             runCatching { active.removeMember(solutionId, catalogId) }
-                .onSuccess {
-                    loadSolutionDetails(solutionId)
-                    refreshSolutions()
-                }
+                .onSuccess { loadSolutionDetails(solutionId) }
                 .onFailure { context.emitError("Couldn't remove project: ${it.message ?: "?"}") }
-        }
-    }
-
-    /**
-     * Create a Solution named [name], then populate it: clone each catalog
-     * project in [catalogIds] (async, surfaced as ghost rows) and create an
-     * empty project for each name in [emptyNames] (synchronous). All
-     * selections are optional — an empty Solution is valid. [onCreated] is
-     * invoked with the new solution id once creation succeeds (before the
-     * member-adds finish) so the caller can navigate straight into it.
-     */
-    fun createSolutionWith(
-        name: String,
-        catalogIds: List<String> = emptyList(),
-        emptyNames: List<String> = emptyList(),
-        onCreated: (solutionId: String) -> Unit = {},
-    ) {
-        val active = context.activeClient()
-        if (active == null) {
-            context.emitError(context.notConnectedMessage())
-            return
-        }
-        val params = buildJsonObject { put("name", name) }
-        scope.launch {
-            runCatching {
-                val resp = active.call("remote.solutions.create", params)
-                resp.decodeResultOrThrow(CreateSolutionResult.serializer()).solutionId
-            }
-                .onSuccess { solutionId ->
-                    refreshSolutions()
-                    onCreated(solutionId)
-                    // NOTE: don't open here — a brand-new solution has no
-                    // members yet and the desktop can only open a solution
-                    // that has at least one project. The open happens once
-                    // the first project is added (see [createEmptyMember] /
-                    // [onMemberAddCompleted]).
-                    // Fan out the member-adds against the freshly-created
-                    // solution. Catalog clones seed ghost rows; empty
-                    // projects resolve synchronously and refresh detail.
-                    for (catalogId in catalogIds) {
-                        addMemberFromCatalog(solutionId, catalogId)
-                    }
-                    for (emptyName in emptyNames) {
-                        createEmptyMember(solutionId, emptyName)
-                    }
-                }
-                .onFailure { context.emitError("Couldn't create solution: ${it.message ?: "?"}") }
         }
     }
 
@@ -371,7 +252,7 @@ internal class SolutionStore(
         }
         scope.launch {
             runCatching { active.call("remote.solutions.open", params) }
-                .onFailure { android.util.Log.w("SolutionStore", "open on desktop failed: ${it.message}") }
+                .onFailure { android.util.Log.w("CatalogStore", "open on desktop failed: ${it.message}") }
         }
     }
 
@@ -412,9 +293,9 @@ internal class SolutionStore(
 
     override fun onSolutionChanged() {
         // A solution mutated server-side (member added/removed/created).
-        // Refresh the list and, if a detail is currently shown, re-fetch
-        // it so the member list reflects the change.
-        refreshSolutions()
+        // Re-fetch the open detail (if any) so the member list reflects
+        // the change. The workspace mirror has its own dedicated
+        // notification stream for the open-set; we don't touch it here.
         (_solutionDetails.value as? UiData.Loaded)?.value?.solution?.id?.let {
             loadSolutionDetails(it)
         }
@@ -436,7 +317,7 @@ data class MemberAddProgress(
 
 /**
  * Callback surface [SessionListStore]'s consolidated collector uses to
- * forward solution member-add + change notifications to [SolutionStore].
+ * forward solution member-add + change notifications to [CatalogStore].
  * Mirrors [DetailNotificationRouter]; wired by the coordinator after both
  * stores are constructed.
  */
