@@ -42,6 +42,14 @@ Usage:
   method:       JSON-RPC method (default: remote.editor.capabilities)
   params-json:  optional JSON for `params`, e.g. '{"kinds":["buffer_opened"]}'
 
+workspace.* smoke commands (shorthand subcommands):
+  spk-remote-cli <pairing-url> workspace snapshot
+  spk-remote-cli <pairing-url> workspace list-solutions [--open|--closed|--all]
+  spk-remote-cli <pairing-url> workspace open-solution <SOLUTION_ID>
+  spk-remote-cli <pairing-url> workspace close-solution <SOLUTION_ID>
+  spk-remote-cli <pairing-url> workspace open-session <SESSION_ID>
+  spk-remote-cli <pairing-url> workspace close-session <SESSION_ID>
+
 Exit codes:
   0  success
   1  bad args / connect / parse / JSON-RPC error response
@@ -171,7 +179,84 @@ private fun parseArgs(args: List<String>): CliArgs? {
         }
     }
 
+    // `workspace <subcmd> [args...]` — translate to the real RPC method + params.
+    if (rest.firstOrNull() == "workspace") {
+        return parseWorkspaceSubcommand(pairing, rest.drop(1))
+    }
+
     val method = rest.getOrNull(0)?.takeIf { it.isNotBlank() } ?: "remote.editor.capabilities"
     val paramsJson = rest.getOrNull(1)
     return CliArgs(pairing, method, paramsJson)
+}
+
+/**
+ * Translate `workspace <subcmd> [args]` into the matching MCP method + params.
+ *
+ * Subcommands:
+ *   snapshot                                → workspace.snapshot            {}
+ *   list-solutions [--open|--closed|--all]  → workspace.list_solutions      {"open": true|false|null}
+ *   open-solution  <SOLUTION_ID>            → workspace.open_solution       {"solution_id": "..."}
+ *   close-solution <SOLUTION_ID>            → workspace.close_solution      {"solution_id": "..."}
+ *   open-session   <SESSION_ID>             → workspace.open_session        {"session_id": "..."}
+ *   close-session  <SESSION_ID>             → workspace.close_session       {"session_id": "..."}
+ */
+private fun parseWorkspaceSubcommand(pairing: String, sub: List<String>): CliArgs? {
+    val subcmd = sub.firstOrNull() ?: run {
+        System.err.println("error: 'workspace' requires a subcommand (snapshot|list-solutions|open-solution|close-solution|open-session|close-session)")
+        return null
+    }
+    return when (subcmd) {
+        "snapshot" -> CliArgs(pairing, "workspace.snapshot", "{}")
+
+        "list-solutions" -> {
+            val flag = sub.getOrNull(1)
+            val openValue: String = when (flag) {
+                "--open"   -> "true"
+                "--closed" -> "false"
+                "--all", null -> "null"
+                else -> {
+                    System.err.println("error: list-solutions: unknown flag '$flag' (expected --open, --closed, or --all)")
+                    return null
+                }
+            }
+            CliArgs(pairing, "workspace.list_solutions", """{"open":$openValue}""")
+        }
+
+        "open-solution" -> {
+            val id = sub.getOrNull(1) ?: run {
+                System.err.println("error: open-solution requires <SOLUTION_ID>")
+                return null
+            }
+            CliArgs(pairing, "workspace.open_solution", """{"solution_id":"$id"}""")
+        }
+
+        "close-solution" -> {
+            val id = sub.getOrNull(1) ?: run {
+                System.err.println("error: close-solution requires <SOLUTION_ID>")
+                return null
+            }
+            CliArgs(pairing, "workspace.close_solution", """{"solution_id":"$id"}""")
+        }
+
+        "open-session" -> {
+            val id = sub.getOrNull(1) ?: run {
+                System.err.println("error: open-session requires <SESSION_ID>")
+                return null
+            }
+            CliArgs(pairing, "workspace.open_session", """{"session_id":"$id"}""")
+        }
+
+        "close-session" -> {
+            val id = sub.getOrNull(1) ?: run {
+                System.err.println("error: close-session requires <SESSION_ID>")
+                return null
+            }
+            CliArgs(pairing, "workspace.close_session", """{"session_id":"$id"}""")
+        }
+
+        else -> {
+            System.err.println("error: unknown workspace subcommand '$subcmd'")
+            null
+        }
+    }
 }
