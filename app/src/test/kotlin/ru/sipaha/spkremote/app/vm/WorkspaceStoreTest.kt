@@ -258,6 +258,13 @@ open class FakeWorkspaceClient(
 ) : WorkspaceClient {
     override suspend fun fetchSnapshot(): WorkspaceSnapshotVM = snapshotResult
     override suspend fun fetchClosedSolutions(): List<ClosedSolutionRow> = closedListResult
+    // Lifecycle methods are exercised by C6 — C5 ships only the wire surface,
+    // and the eight existing tests don't drive them. Throw loudly if anything
+    // calls them so a regression in the test setup is obvious.
+    override suspend fun openSolution(id: String): Long = throw NotImplementedError("not used in C5 tests")
+    override suspend fun closeSolution(id: String): Long = throw NotImplementedError("not used in C5 tests")
+    override suspend fun openSession(id: String): Long = throw NotImplementedError("not used in C5 tests")
+    override suspend fun closeSession(id: String): Long = throw NotImplementedError("not used in C5 tests")
 }
 
 /** Minimal valid SolutionSummary for tests that don't care about specifics. */

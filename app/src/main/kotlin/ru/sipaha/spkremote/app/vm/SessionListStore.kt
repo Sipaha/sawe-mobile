@@ -27,6 +27,14 @@ import ru.sipaha.spkremote.core.SessionCreatedPayload
 import ru.sipaha.spkremote.core.SessionQueueChangedPayload
 import ru.sipaha.spkremote.core.SessionSummary
 import ru.sipaha.spkremote.core.UploadChunkAckedPayload
+import ru.sipaha.spkremote.core.WorkspaceSessionClosedPayload
+import ru.sipaha.spkremote.core.WorkspaceSessionDeletedPayload
+import ru.sipaha.spkremote.core.WorkspaceSessionMetricsChangedPayload
+import ru.sipaha.spkremote.core.WorkspaceSessionOpenedPayload
+import ru.sipaha.spkremote.core.WorkspaceSessionStateChangedPayload
+import ru.sipaha.spkremote.core.WorkspaceSolutionClosedPayload
+import ru.sipaha.spkremote.core.WorkspaceSolutionDeletedPayload
+import ru.sipaha.spkremote.core.WorkspaceSolutionOpenedPayload
 
 /**
  * Sessions-list + agents + create-session + sub-agent children + the
@@ -100,6 +108,14 @@ internal class SessionListStore(
      * subscription, [SolutionStore] just consumes the typed payloads.
      */
     internal var solutionNotificationRouter: SolutionNotificationRouter? = null
+
+    /**
+     * Workspace (`workspace.*`) notification routing — wired by the
+     * coordinator to [WorkspaceStore]. Same single-collector discipline
+     * as the detail / upload / solution routers above: this store owns
+     * the subscription, [WorkspaceStore] consumes the typed payloads.
+     */
+    internal var workspaceNotificationRouter: WorkspaceNotificationRouter? = null
 
     private var listSubscribed = false
     private var detailSubscribed = false
@@ -247,6 +263,19 @@ internal class SessionListStore(
                             "solution_member_add_progress",
                             "solution_member_add_completed",
                             "solution_changed",
+                            // Workspace (open-set) notifications — routed
+                            // to WorkspaceStore via [workspaceNotificationRouter].
+                            // Carry sequenced deltas for the desktop's open
+                            // workspace mirror; gap detection is internal
+                            // to the store.
+                            "workspace.solution_opened",
+                            "workspace.solution_closed",
+                            "workspace.solution_deleted",
+                            "workspace.session_opened",
+                            "workspace.session_closed",
+                            "workspace.session_deleted",
+                            "workspace.session_state_changed",
+                            "workspace.session_metrics_changed",
                         ),
                     )
                 }.onSuccess {
@@ -327,6 +356,62 @@ internal class SessionListStore(
             }
             "solution_changed" -> {
                 solutionNotificationRouter?.onSolutionChanged()
+                return
+            }
+        }
+
+        // Workspace open-set notifications — fan out the typed payloads
+        // to WorkspaceStore. Decoding failures (e.g. an unexpected wire
+        // shape from a future server) silently drop the delta; the store
+        // will detect the gap on the next sequenced event and trigger a
+        // bulk resync.
+        when (kind) {
+            "workspace.solution_opened" -> {
+                val router = workspaceNotificationRouter ?: return
+                val payload = data?.decodeOrNull(WorkspaceSolutionOpenedPayload.serializer()) ?: return
+                router.onSolutionOpened(payload)
+                return
+            }
+            "workspace.solution_closed" -> {
+                val router = workspaceNotificationRouter ?: return
+                val payload = data?.decodeOrNull(WorkspaceSolutionClosedPayload.serializer()) ?: return
+                router.onSolutionClosed(payload)
+                return
+            }
+            "workspace.solution_deleted" -> {
+                val router = workspaceNotificationRouter ?: return
+                val payload = data?.decodeOrNull(WorkspaceSolutionDeletedPayload.serializer()) ?: return
+                router.onSolutionDeleted(payload)
+                return
+            }
+            "workspace.session_opened" -> {
+                val router = workspaceNotificationRouter ?: return
+                val payload = data?.decodeOrNull(WorkspaceSessionOpenedPayload.serializer()) ?: return
+                router.onSessionOpened(payload)
+                return
+            }
+            "workspace.session_closed" -> {
+                val router = workspaceNotificationRouter ?: return
+                val payload = data?.decodeOrNull(WorkspaceSessionClosedPayload.serializer()) ?: return
+                router.onSessionClosed(payload)
+                return
+            }
+            "workspace.session_deleted" -> {
+                val router = workspaceNotificationRouter ?: return
+                val payload = data?.decodeOrNull(WorkspaceSessionDeletedPayload.serializer()) ?: return
+                router.onSessionDeleted(payload)
+                return
+            }
+            "workspace.session_state_changed" -> {
+                val router = workspaceNotificationRouter ?: return
+                val payload = data?.decodeOrNull(WorkspaceSessionStateChangedPayload.serializer()) ?: return
+                router.onSessionStateChanged(payload)
+                return
+            }
+            "workspace.session_metrics_changed" -> {
+                val router = workspaceNotificationRouter ?: return
+                val payload = data?.decodeOrNull(WorkspaceSessionMetricsChangedPayload.serializer()) ?: return
+                router.onSessionMetricsChanged(payload)
                 return
             }
         }
@@ -658,3 +743,15 @@ internal interface DetailNotificationRouter {
      */
     fun onActiveSubagentsChanged(payload: SessionActiveSubagentsChangedPayload)
 }
+
+/**
+ * Compact decode helper for the workspace notification dispatch — mirrors
+ * the `runCatching { JsonRpc.json.decodeFromJsonElement(...) }.getOrNull()`
+ * idiom used inline elsewhere in this file. Centralised here purely to
+ * cut down the per-kind boilerplate when there are 8 kinds to wire.
+ */
+private fun <T> JsonObject.decodeOrNull(
+    deserializer: kotlinx.serialization.DeserializationStrategy<T>,
+): T? = runCatching {
+    JsonRpc.json.decodeFromJsonElement(deserializer, this)
+}.getOrNull()

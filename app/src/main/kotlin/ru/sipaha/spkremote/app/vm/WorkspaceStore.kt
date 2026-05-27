@@ -10,6 +10,14 @@ import kotlinx.coroutines.sync.withLock
 import ru.sipaha.spkremote.core.SessionStateDto
 import ru.sipaha.spkremote.core.SessionSummary
 import ru.sipaha.spkremote.core.SolutionSummary
+import ru.sipaha.spkremote.core.WorkspaceSessionClosedPayload
+import ru.sipaha.spkremote.core.WorkspaceSessionDeletedPayload
+import ru.sipaha.spkremote.core.WorkspaceSessionMetricsChangedPayload
+import ru.sipaha.spkremote.core.WorkspaceSessionOpenedPayload
+import ru.sipaha.spkremote.core.WorkspaceSessionStateChangedPayload
+import ru.sipaha.spkremote.core.WorkspaceSolutionClosedPayload
+import ru.sipaha.spkremote.core.WorkspaceSolutionDeletedPayload
+import ru.sipaha.spkremote.core.WorkspaceSolutionOpenedPayload
 
 sealed interface WorkspaceUiState {
     object Loading : WorkspaceUiState
@@ -46,15 +54,22 @@ data class ClosedSolutionRow(
 )
 
 /**
- * Minimal client surface consumed by [WorkspaceStore]. The real wire
- * implementation lives in a later task — tests inject a fake.
+ * Minimal client surface consumed by [WorkspaceStore]. Implemented by
+ * [WorkspaceClientImpl] in production and a fake in tests.
  *
- * Lifecycle calls (openSolution, closeSolution, openSession, closeSession)
- * are deferred to C6, when they are actually used.
+ * The four lifecycle calls return the server-assigned monotonic `seq`
+ * (via the [ru.sipaha.spkremote.core.WorkspaceSeqAck] wire shape). The
+ * caller uses that to reconcile optimistic mutations against the
+ * matching delta — C6 wires the optimistic UI; C5 only ships the wire
+ * surface so the picker / open-flow code paths in D can compile.
  */
 interface WorkspaceClient {
     suspend fun fetchSnapshot(): WorkspaceSnapshotVM
     suspend fun fetchClosedSolutions(): List<ClosedSolutionRow>
+    suspend fun openSolution(id: String): Long
+    suspend fun closeSolution(id: String): Long
+    suspend fun openSession(id: String): Long
+    suspend fun closeSession(id: String): Long
 }
 
 /**
@@ -90,7 +105,7 @@ interface WorkspaceClient {
 class WorkspaceStore(
     private val client: WorkspaceClient,
     private val scope: CoroutineScope,
-) {
+) : WorkspaceNotificationRouter {
     private val _state = MutableStateFlow<WorkspaceUiState>(WorkspaceUiState.Loading)
     val state: StateFlow<WorkspaceUiState> = _state.asStateFlow()
 
@@ -129,6 +144,53 @@ class WorkspaceStore(
 
     fun onSessionDeleted(seq: Long, solutionId: String, sessionId: String) {
         applyOrBufferSequenced(SequencedDelta.SessionDeleted(seq, solutionId, sessionId))
+    }
+
+    fun onSessionStateChanged(
+        seq: Long, solutionId: String, sessionId: String, state: SessionStateDto,
+    ) {
+        applyOrBufferSequenced(SequencedDelta.SessionStateChanged(seq, solutionId, sessionId, state))
+    }
+
+    // ---- WorkspaceNotificationRouter — typed-payload fan-out from the
+    // single shared collector in SessionListStore. Each one unpacks into the
+    // existing split-arg public method above. ----
+
+    override fun onSolutionOpened(payload: WorkspaceSolutionOpenedPayload) {
+        onSolutionOpened(payload.seq, payload.solution, payload.sessions)
+    }
+
+    override fun onSolutionClosed(payload: WorkspaceSolutionClosedPayload) {
+        onSolutionClosed(payload.seq, payload.solutionId)
+    }
+
+    override fun onSolutionDeleted(payload: WorkspaceSolutionDeletedPayload) {
+        onSolutionDeleted(payload.seq, payload.solutionId)
+    }
+
+    override fun onSessionOpened(payload: WorkspaceSessionOpenedPayload) {
+        onSessionOpened(payload.seq, payload.solutionId, payload.session)
+    }
+
+    override fun onSessionClosed(payload: WorkspaceSessionClosedPayload) {
+        onSessionClosed(payload.seq, payload.solutionId, payload.sessionId)
+    }
+
+    override fun onSessionDeleted(payload: WorkspaceSessionDeletedPayload) {
+        onSessionDeleted(payload.seq, payload.solutionId, payload.sessionId)
+    }
+
+    override fun onSessionStateChanged(payload: WorkspaceSessionStateChangedPayload) {
+        onSessionStateChanged(payload.seq, payload.solutionId, payload.sessionId, payload.state)
+    }
+
+    override fun onSessionMetricsChanged(payload: WorkspaceSessionMetricsChangedPayload) {
+        onSessionMetricsChanged(
+            sessionId = payload.sessionId,
+            lastActivityAt = payload.lastActivityAt,
+            totalTokens = payload.totalTokens,
+            maxTokens = payload.maxTokens,
+        )
     }
 
     fun onSessionMetricsChanged(
@@ -316,3 +378,24 @@ private fun SessionSummary.toVM(): OpenSessionVM = OpenSessionVM(
     lastActivityAt = lastActivityAt,
     totalTokens = totalTokens, maxTokens = maxTokens,
 )
+
+/**
+ * Typed fan-out for the 8 `workspace.*` notifications dispatched by the
+ * single shared collector in [SessionListStore]. Mirrors the
+ * [SolutionNotificationRouter] / [DetailNotificationRouter] pattern:
+ * [SessionListStore] owns the wire subscription, decodes the payload,
+ * and delegates here. [WorkspaceStore] is the canonical implementation.
+ *
+ * `seq` ordering + gap detection is internal to the store — the router
+ * just forwards typed payloads.
+ */
+internal interface WorkspaceNotificationRouter {
+    fun onSolutionOpened(payload: WorkspaceSolutionOpenedPayload)
+    fun onSolutionClosed(payload: WorkspaceSolutionClosedPayload)
+    fun onSolutionDeleted(payload: WorkspaceSolutionDeletedPayload)
+    fun onSessionOpened(payload: WorkspaceSessionOpenedPayload)
+    fun onSessionClosed(payload: WorkspaceSessionClosedPayload)
+    fun onSessionDeleted(payload: WorkspaceSessionDeletedPayload)
+    fun onSessionStateChanged(payload: WorkspaceSessionStateChangedPayload)
+    fun onSessionMetricsChanged(payload: WorkspaceSessionMetricsChangedPayload)
+}

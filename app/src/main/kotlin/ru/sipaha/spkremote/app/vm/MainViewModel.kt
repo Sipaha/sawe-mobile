@@ -155,6 +155,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
 
     private val lastSeenIndex: LastSeenIndex = LastSeenIndex(lastSeenRepository)
 
+    /**
+     * Open-workspace mirror. Wired here so its lifetime matches the
+     * coordinator's; the UI (D-phase) collects [workspaceState] and
+     * [closedSolutions] flows exposed below. The wire client closes over
+     * [connectionMgr.activeClient] so a server-switch is transparent.
+     */
+    private val workspaceStore: WorkspaceStore = WorkspaceStore(
+        client = WorkspaceClientImpl(getClient = { connectionMgr.activeClient() }),
+        scope = viewModelScope,
+    )
+
     private val sessionList: SessionListStore = SessionListStore(
         scope = viewModelScope,
         context = this,
@@ -166,6 +177,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
         // single shared collector into SolutionStore (ghost rows + member
         // list refresh). Mirrors the upload-ack wiring below.
         it.solutionNotificationRouter = solutionStore
+        // Workspace open-set notifications — same single-collector
+        // fan-out; WorkspaceStore implements the router interface
+        // directly so no adapter is needed.
+        it.workspaceNotificationRouter = workspaceStore
     }
 
     private val sessionDetail: SessionDetailStore = SessionDetailStore(
@@ -242,6 +257,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
         if (observingSid != null) {
             sessionList.refreshSessions(observingSid)
         }
+        // Workspace mirror — the server is authoritative on which
+        // solutions / sessions are currently open. If we missed a
+        // delta while backgrounded the next sequenced notification
+        // would land with a gap and trigger a resync anyway; doing
+        // it eagerly here cuts the lag on resume.
+        viewModelScope.launch { workspaceStore.refresh() }
     }
 
     // ---- ConnectionLifecycle impl (audit Fix T light variant) ----
@@ -290,6 +311,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
             sessionDetail.resumeSession(openSid)
         }
         solutionStore.refreshSolutions()
+        // Workspace mirror — same reconnect resync semantics as the
+        // solutions list; treats the server as authoritative for the
+        // open-set after any disconnect window.
+        viewModelScope.launch { workspaceStore.refresh() }
         // Wake any paused upload coroutines back up. Each will hit
         // upload_status first (server is authoritative on offset).
         uploadManager.resumeAll()
@@ -421,6 +446,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
         solutionStore.removeMember(solutionId, catalogId)
     fun removeCatalogProject(catalogId: String) =
         solutionStore.removeCatalogProject(catalogId)
+
+    // ---- Workspace (open-set) surface ----
+    //
+    // The desktop's open workspace mirrored over the wire — solutions
+    // currently open in the editor + their open sessions. Lifecycle
+    // RPCs (open / close) are exposed for the D-phase picker; the
+    // notification dispatcher in [SessionListStore] keeps the snapshot
+    // in sync via sequenced deltas + gap-driven resync.
+
+    val workspaceState: StateFlow<WorkspaceUiState> get() = workspaceStore.state
+    val closedSolutions: StateFlow<UiData<List<ClosedSolutionRow>>>
+        get() = workspaceStore.closedSolutions
+
+    /** Pull-to-refresh handle for the workspace pane. */
+    fun refreshWorkspace() = viewModelScope.launch { workspaceStore.refresh() }
+
+    /** Lazy picker query — call when the closed-solutions sheet opens. */
+    fun refreshClosedSolutions() = viewModelScope.launch {
+        workspaceStore.refreshClosedSolutions()
+    }
 
     // ---- Sessions surface ----
 
