@@ -41,8 +41,13 @@ import kotlinx.serialization.json.put
  * NOT gated: the server's contract is to keep emitting decodable shapes
  * within a major version, and every DTO already defaults forward-compat
  * fields. Only `server > supported` blocks the UI.
+ *
+ * **Version history**
+ * - v1: initial versioned wire (structured [SessionStateDto]/[EntryRoleDto]/[ToolCallStatusDto])
+ * - v2: added `workspace.*` notification namespace; renamed `window_open` → `workspace.open`
+ *       and `close_session` → `workspace.close_session`
  */
-const val SUPPORTED_WIRE_SCHEMA_VERSION: Int = 1
+const val SUPPORTED_WIRE_SCHEMA_VERSION: Int = 2
 
 /**
  * True iff the server advertises a chat-wire schema this client doesn't

@@ -42,9 +42,9 @@ class RemoteDtosTest {
         // Unknown extra keys are tolerated (per JsonRpc.json config).
         val extra = JsonRpc.json.decodeFromString(
             CapabilitiesDto.serializer(),
-            """{"protocol_version":"x","wire_schema_version":2,"build":"abc"}""",
+            """{"protocol_version":"x","wire_schema_version":3,"build":"abc"}""",
         )
-        assertEquals(2, extra.wireSchemaVersion)
+        assertEquals(3, extra.wireSchemaVersion)
         assertTrue(isServerTooNew(extra.wireSchemaVersion))
     }
 
