@@ -712,6 +712,95 @@ enum class DisplayState { Idle, Running, Stopping, AwaitingInput, Errored, Unkno
 
 enum class EntryRole { User, Assistant, ToolCall, Plan, Unknown }
 
+// =====================================================================
+// workspace.* DTOs (wire schema v2)
+// =====================================================================
+
+@Serializable
+data class WorkspaceSolution(
+    val id: String,
+    val name: String,
+    val root: String,
+    @SerialName("member_count") val memberCount: Int,
+    @SerialName("last_opened_at") val lastOpenedAt: String? = null,
+    val open: Boolean,
+    @SerialName("main_window_id") val mainWindowId: String? = null,
+    val sessions: List<SessionSummary> = emptyList(),
+)
+
+@Serializable
+data class WorkspaceSnapshot(
+    val seq: Long,
+    val solutions: List<WorkspaceSolution> = emptyList(),
+)
+
+@Serializable
+data class WorkspaceListSolutionsResult(
+    val solutions: List<SolutionSummary> = emptyList(),
+)
+
+@Serializable
+data class WorkspaceSeqAck(val seq: Long)
+
+// Delta payloads (sequenced — every one carries `seq`).
+
+@Serializable
+data class WorkspaceSolutionOpenedPayload(
+    val seq: Long,
+    val solution: SolutionSummary? = null,
+    val sessions: List<SessionSummary> = emptyList(),
+)
+
+@Serializable
+data class WorkspaceSolutionClosedPayload(
+    val seq: Long,
+    @SerialName("solution_id") val solutionId: String,
+)
+
+@Serializable
+data class WorkspaceSolutionDeletedPayload(
+    val seq: Long,
+    @SerialName("solution_id") val solutionId: String,
+)
+
+@Serializable
+data class WorkspaceSessionOpenedPayload(
+    val seq: Long,
+    @SerialName("solution_id") val solutionId: String,
+    val session: SessionSummary,
+)
+
+@Serializable
+data class WorkspaceSessionClosedPayload(
+    val seq: Long,
+    @SerialName("solution_id") val solutionId: String,
+    @SerialName("session_id") val sessionId: String,
+)
+
+@Serializable
+data class WorkspaceSessionDeletedPayload(
+    val seq: Long,
+    @SerialName("solution_id") val solutionId: String,
+    @SerialName("session_id") val sessionId: String,
+)
+
+@Serializable
+data class WorkspaceSessionStateChangedPayload(
+    val seq: Long,
+    @SerialName("solution_id") val solutionId: String,
+    @SerialName("session_id") val sessionId: String,
+    val state: SessionStateDto,
+)
+
+// Non-sequenced — no `seq` field, never triggers gap detection.
+@Serializable
+data class WorkspaceSessionMetricsChangedPayload(
+    @SerialName("session_id") val sessionId: String,
+    @SerialName("last_activity_at") val lastActivityAt: Long? = null,
+    @SerialName("total_tokens") val totalTokens: Long? = null,
+    @SerialName("max_tokens") val maxTokens: Long? = null,
+)
+
 /**
  * Structured session state as emitted by the editor — a tagged object
  * discriminated on the `kind` field (NOT kotlinx's default `type`).
