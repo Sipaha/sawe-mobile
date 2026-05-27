@@ -164,16 +164,36 @@ class WorkspaceStore(
             if (cur != null) {
                 _state.value = WorkspaceUiState.Loaded(cur.snapshot, stale = true)
             }
-            val snap = client.fetchSnapshot()
-            var s = snap
-            // Replay buffered deltas with seq > snap.seq.
-            val drained = pending.toList()
-            pending.clear()
-            for (d in drained.filter { it.seq > s.seq }.sortedBy { it.seq }) {
-                if (d.seq == s.seq + 1) s = applyDelta(s, d)
-                // Skip out-of-order; will be picked up by next round-trip.
+
+            // Loop: re-fetch as long as we make no progress on a gap.
+            // Each iteration may drain the contiguous prefix of pending; if a
+            // gap still remains after replay, we re-fetch immediately rather
+            // than leaving stale state until the next incoming delta.
+            while (true) {
+                val snap = client.fetchSnapshot()
+                var s = snap
+                // Replay buffered deltas with seq > snap.seq, contiguous run only.
+                val drained = pending.toList()
+                pending.clear()
+                val sorted = drained.filter { it.seq > s.seq }.sortedBy { it.seq }
+                var i = 0
+                while (i < sorted.size && sorted[i].seq == s.seq + 1) {
+                    s = applyDelta(s, sorted[i])
+                    i += 1
+                }
+                val leftover = sorted.drop(i)
+                if (leftover.isEmpty()) {
+                    // Buffer fully drained — we're done.
+                    _state.value = WorkspaceUiState.Loaded(s, stale = false)
+                    break
+                }
+                // Gap remains: re-queue leftover and loop to fetch again.
+                // (The buffer may also have received new deltas since we drained
+                // it above — they're already in pending; leftover goes back too.)
+                pending.addAll(0, leftover)
+                _state.value = WorkspaceUiState.Loaded(s, stale = true)
+                // Loop continues — resyncInFlight stays true throughout.
             }
-            _state.value = WorkspaceUiState.Loaded(s, stale = false)
         } finally {
             resyncInFlight = false
         }
@@ -182,8 +202,13 @@ class WorkspaceStore(
     private fun ArrayDeque<SequencedDelta>.addLastBounded(d: SequencedDelta) {
         if (size >= 256) {
             // Overflow — drop the buffer and force a resync at next chance.
+            // Guard: addLastBounded is always called under snapshotMutex, so
+            // reading resyncInFlight here is safe.  Skip the launch if a
+            // resync is already in flight to avoid racing concurrent writes.
             clear()
-            scope.launch { snapshotMutex.withLock { runResyncLocked() } }
+            if (!resyncInFlight) {
+                scope.launch { snapshotMutex.withLock { runResyncLocked() } }
+            }
         }
         addLast(d)
     }

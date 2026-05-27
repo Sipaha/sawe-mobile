@@ -112,6 +112,102 @@ class WorkspaceStoreTest {
         val state = store.state.value as WorkspaceUiState.Loaded
         assertEquals(10L, state.snapshot.seq)
     }
+
+    /**
+     * Non-contiguous replay test:
+     *
+     * Initial state: seq=5 (from call 1).
+     * Delta seq=6 applies inline.
+     * Delta seq=8 causes a gap → resync call 2 returns seq=5 (no server progress).
+     * After replay the contiguous run is [6] (seq=5+1=6 applies), but seq=8 is
+     * leftover (gap from 6 to 8). The loop re-fetches (call 3) returning seq=12.
+     * Leftover [8] is now < 12, so it's filtered out and the store settles at seq=12.
+     * snapshotCalls must be 3: initial refresh + gap-resync + leftover-gap-resync.
+     */
+    @Test
+    fun non_contiguous_buffered_deltas_force_additional_resync() = runTest {
+        var snapshotCalls = 0
+        val fake = object : FakeWorkspaceClient() {
+            override suspend fun fetchSnapshot(): WorkspaceSnapshotVM {
+                snapshotCalls += 1
+                return WorkspaceSnapshotVM(
+                    seq = when (snapshotCalls) {
+                        1 -> 5L   // cold start
+                        2 -> 5L   // resync triggered by seq=8 gap — server still at 5
+                        else -> 12L  // second resync resolves the gap
+                    },
+                    solutions = emptyList(),
+                )
+            }
+        }
+        val store = WorkspaceStore(client = fake, scope = backgroundScope)
+
+        // Call 1: cold start
+        store.refresh()
+        runCurrent()
+        assertEquals(1, snapshotCalls, "cold refresh should call fetchSnapshot once")
+
+        // Delta seq=6: contiguous → applies inline (no resync)
+        store.onSolutionOpened(seq = 6, solution = anyTestSolution("s1"), sessions = emptyList())
+        runCurrent()
+        assertEquals(1, snapshotCalls, "seq=6 is contiguous, no resync expected")
+
+        // Delta seq=8: gap (6+1≠8) → triggers call 2.
+        // After call 2 returns seq=5, replay drains pending: seq=6 applies (5→6),
+        // seq=8 is leftover (gap). Loop re-fetches (call 3) returning seq=12.
+        // seq=8 < 12 is filtered, store settles at 12.
+        store.onSolutionOpened(seq = 8, solution = anyTestSolution("s2"), sessions = emptyList())
+        runCurrent()
+
+        assertEquals(3, snapshotCalls,
+            "gap + non-contiguous leftover must trigger two extra fetchSnapshot calls (calls 2 and 3)")
+        val state = store.state.value as WorkspaceUiState.Loaded
+        assertEquals(12L, state.snapshot.seq, "store must settle at seq=12 after second resync")
+        assertEquals(false, state.stale, "store must not be stale after settling")
+    }
+
+    /**
+     * Leftover-in-pending test:
+     *
+     * Demonstrates that when the server makes NO progress (returns same seq on
+     * every call), leftover deltas that can never be applied keep triggering
+     * re-fetches. This test verifies that a single gap-delta (seq=8 when current
+     * is seq=5) results in multiple fetch calls when the server stays at seq=5.
+     *
+     * We cap the fake at 3 calls to avoid an infinite loop, returning a high seq
+     * on the final call so the store can settle.
+     */
+    @Test
+    fun leftover_deltas_trigger_repeated_resync_until_gap_closes() = runTest {
+        var snapshotCalls = 0
+        val fake = object : FakeWorkspaceClient() {
+            override suspend fun fetchSnapshot(): WorkspaceSnapshotVM {
+                snapshotCalls += 1
+                return WorkspaceSnapshotVM(
+                    // calls 1 and 2 return seq=5 (no server progress),
+                    // call 3 returns seq=9 which covers the gap (seq=8 ≤ 9)
+                    seq = if (snapshotCalls < 3) 5L else 9L,
+                    solutions = emptyList(),
+                )
+            }
+        }
+        val store = WorkspaceStore(client = fake, scope = backgroundScope)
+
+        // Call 1: cold start
+        store.refresh()
+        runCurrent()
+
+        // Delta seq=8: gap at seq=5 → resync (call 2, returns 5 → leftover [8] remains)
+        // → loop re-fetches (call 3, returns 9 → [8] filtered, done).
+        store.onSolutionOpened(seq = 8, solution = anyTestSolution("s1"), sessions = emptyList())
+        runCurrent()
+
+        assertEquals(3, snapshotCalls,
+            "two extra fetches needed: first resync at seq=5 still has gap, second resolves it")
+        val state = store.state.value as WorkspaceUiState.Loaded
+        assertEquals(9L, state.snapshot.seq)
+        assertEquals(false, state.stale)
+    }
 }
 
 /** Minimal in-memory mock of the wire client. Fill in surface as needed. */
