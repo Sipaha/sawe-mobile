@@ -63,7 +63,7 @@ fun WorkspaceScreen(
                         EmptyState(onOpenPicker = onOpenPicker, onCreateNew = onCreateNewSolution)
                     } else {
                         if (s.stale) StaleProgressBar()
-                        WorkspaceList(
+                        WorkspaceListContent(
                             solutions = s.snapshot.solutions,
                             onOpenSession = onOpenSession,
                             onOpenProjects = onOpenProjects,
@@ -82,15 +82,15 @@ fun WorkspaceScreen(
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun WorkspaceList(
+internal fun WorkspaceListContent(
     solutions: List<OpenSolutionVM>,
-    onOpenSession: (String) -> Unit,
-    onOpenProjects: (String) -> Unit,
-    onCloseSolution: (String) -> Unit,
-    onDeleteSolution: (String) -> Unit,
-    onCloseSession: (String) -> Unit,
-    onDeleteSession: (String) -> Unit,
-    onCreateNewSessionFor: (String) -> Unit,
+    onOpenSession: (String) -> Unit = {},
+    onOpenProjects: (String) -> Unit = {},
+    onCloseSolution: (String) -> Unit = {},
+    onDeleteSolution: (String) -> Unit = {},
+    onCloseSession: (String) -> Unit = {},
+    onDeleteSession: (String) -> Unit = {},
+    onCreateNewSessionFor: (String) -> Unit = {},
 ) {
     LazyColumn(modifier = Modifier.fillMaxSize()) {
         solutions.forEach { sol ->
@@ -268,7 +268,7 @@ private fun ExpandableFab(onCreateNew: () -> Unit, onOpenPicker: () -> Unit) {
 }
 
 @Composable
-private fun EmptyState(onOpenPicker: () -> Unit, onCreateNew: () -> Unit) {
+internal fun EmptyState(onOpenPicker: () -> Unit = {}, onCreateNew: () -> Unit = {}) {
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.Center,
