@@ -129,6 +129,10 @@ dependencies {
     // here.
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)
+    // Enables @RunWith(RobolectricTestRunner) under the JUnit 5 Platform
+    // (testDebugUnitTest uses useJUnitPlatform(); without this engine JUnit 4
+    // @RunWith tests are silently skipped).
+    testRuntimeOnly(libs.junit.vintage.engine)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(platform(libs.compose.bom))
     testImplementation(libs.robolectric)
@@ -136,6 +140,7 @@ dependencies {
     testImplementation(libs.compose.ui.test.manifest)
     testImplementation(libs.roborazzi.compose)
     testImplementation(libs.roborazzi.junit.rule)
+    testImplementation(libs.roborazzi.core)
 }
 
 tasks.withType<Test>().configureEach {
