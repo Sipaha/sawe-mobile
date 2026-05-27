@@ -63,13 +63,26 @@ data class ClosedSolutionRow(
  *   — patched out-of-band via [WorkspaceSessionMetricsChangedPayload]; never
  *   triggers gap detection.
  */
+/**
+ * Minimal client surface consumed by [WorkspaceStore].
+ * C3 will replace this with the real interface from `:core`.
+ */
+interface WorkspaceStoreClient {
+    suspend fun fetchSnapshot(): WorkspaceSnapshotVM
+}
+
 class WorkspaceStore(
-    // dependencies — injected from MainViewModel
-    // (filled in by later tasks).
+    private val client: WorkspaceStoreClient,
+    private val scope: kotlinx.coroutines.CoroutineScope,
 ) {
     private val _state = MutableStateFlow<WorkspaceUiState>(WorkspaceUiState.Loading)
     val state: StateFlow<WorkspaceUiState> = _state.asStateFlow()
 
     private val _closedSolutions = MutableStateFlow<UiData<List<ClosedSolutionRow>>>(UiData.Loading)
     val closedSolutions: StateFlow<UiData<List<ClosedSolutionRow>>> = _closedSolutions.asStateFlow()
+
+    suspend fun refresh() {
+        val snap = client.fetchSnapshot()
+        _state.value = WorkspaceUiState.Loaded(snap, stale = false)
+    }
 }
