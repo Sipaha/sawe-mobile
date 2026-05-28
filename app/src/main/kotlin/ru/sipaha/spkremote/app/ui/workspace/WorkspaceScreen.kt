@@ -40,6 +40,17 @@ fun WorkspaceScreen(
     onOpenSettings: () -> Unit,
 ) {
     val state by viewModel.workspaceState.collectAsState()
+    // Force a snapshot fetch every time the screen lands. The bulk RPC is
+    // cheap (< 50 ms typical) and side-steps two desync paths that
+    // otherwise leave the strip stale:
+    //   - desktop restart → WS reconnect; the in-process `subscribe(...)`
+    //     for `workspace.*` was a once-per-app-launch flag, so a desktop
+    //     restart could lose the subscription on the new connection;
+    //   - desktop opening additional solutions while the mobile was
+    //     backgrounded but not yet hitting the foreground-resume hook.
+    // Idempotent inside the store (snapshotMutex + `stale`-marked
+    // refresh), so a duplicate fetch on legitimate-fresh state is harmless.
+    LaunchedEffect(Unit) { viewModel.refreshWorkspace() }
     // Picker visibility lives inside the screen now (E1): the FAB and
     // EmptyState both flip it true, and the sheet itself flips it back
     // false on dismiss / "Open" tap. Survives config-change via
