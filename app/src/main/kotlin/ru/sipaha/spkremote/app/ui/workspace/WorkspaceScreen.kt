@@ -23,6 +23,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import ru.sipaha.spkremote.app.ui.common.ConnectionStatusBanner
 import ru.sipaha.spkremote.app.ui.solutions.NewSessionDialog
 import ru.sipaha.spkremote.app.ui.solutions.StatePill
 import ru.sipaha.spkremote.app.vm.MainViewModel
@@ -70,30 +71,42 @@ fun WorkspaceScreen(
             )
         },
     ) { padding ->
-        Box(Modifier.padding(padding)) {
-            when (val s = state) {
-                WorkspaceUiState.Loading -> LoadingState()
-                is WorkspaceUiState.Error -> ErrorState(s.message)
-                is WorkspaceUiState.Loaded -> {
-                    if (s.snapshot.solutions.isEmpty()) {
-                        EmptyState(
-                            onOpenPicker = { showPicker = true },
-                            onCreateNew = { showCreateSolution = true },
-                        )
-                    } else {
-                        if (s.stale) StaleProgressBar()
-                        WorkspaceListContent(
-                            solutions = s.snapshot.solutions,
-                            onOpenSession = onOpenSession,
-                            onOpenProjects = onOpenProjects,
-                            onCloseSolution = { id -> viewModel.closeSolution(id) },
-                            onDeleteSolution = { id -> viewModel.deleteSolution(id) },
-                            onCloseSession = { id -> viewModel.closeSessionTab(id) },
-                            onDeleteSession = { id -> viewModel.deleteSession(id) },
-                            onCreateNewSessionFor = { solutionId ->
-                                newSessionForSolution = solutionId
-                            },
-                        )
+        val connectionState by viewModel.rawConnectionState.collectAsState()
+        val lastConnectedMs by viewModel.lastConnectedMs.collectAsState()
+        Column(Modifier.padding(padding).fillMaxSize()) {
+            // Inline connection banner under the header. Replaces the older
+            // global banner above the NavHost that pushed page content down
+            // on every transient drop. Hidden while Connected — the screen
+            // looks identical to before in the healthy case.
+            ConnectionStatusBanner(
+                state = connectionState,
+                lastConnectedMs = lastConnectedMs,
+            )
+            Box(Modifier.fillMaxSize()) {
+                when (val s = state) {
+                    WorkspaceUiState.Loading -> LoadingState()
+                    is WorkspaceUiState.Error -> ErrorState(s.message)
+                    is WorkspaceUiState.Loaded -> {
+                        if (s.snapshot.solutions.isEmpty()) {
+                            EmptyState(
+                                onOpenPicker = { showPicker = true },
+                                onCreateNew = { showCreateSolution = true },
+                            )
+                        } else {
+                            if (s.stale) StaleProgressBar()
+                            WorkspaceListContent(
+                                solutions = s.snapshot.solutions,
+                                onOpenSession = onOpenSession,
+                                onOpenProjects = onOpenProjects,
+                                onCloseSolution = { id -> viewModel.closeSolution(id) },
+                                onDeleteSolution = { id -> viewModel.deleteSolution(id) },
+                                onCloseSession = { id -> viewModel.closeSessionTab(id) },
+                                onDeleteSession = { id -> viewModel.deleteSession(id) },
+                                onCreateNewSessionFor = { solutionId ->
+                                    newSessionForSolution = solutionId
+                                },
+                            )
+                        }
                     }
                 }
             }

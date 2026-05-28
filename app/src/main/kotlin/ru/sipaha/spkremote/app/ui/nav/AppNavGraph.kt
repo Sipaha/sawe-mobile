@@ -1,13 +1,9 @@
 package ru.sipaha.spkremote.app.ui.nav
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -19,16 +15,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
 import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -42,7 +34,6 @@ import ru.sipaha.spkremote.app.ui.settings.SettingsScreen
 import ru.sipaha.spkremote.app.ui.solutions.SessionDetailScreen
 import ru.sipaha.spkremote.app.ui.solutions.SolutionProjectsScreen
 import ru.sipaha.spkremote.app.ui.workspace.WorkspaceScreen
-import ru.sipaha.spkremote.app.vm.ConnectionBanner
 import ru.sipaha.spkremote.app.vm.MainViewModel
 import ru.sipaha.spkremote.app.vm.UiState
 
@@ -77,7 +68,6 @@ import ru.sipaha.spkremote.app.vm.UiState
 fun AppNav(viewModel: MainViewModel, initialRoute: String? = null) {
     val navController = rememberNavController()
     val uiState by viewModel.state.collectAsState()
-    val banner by viewModel.connectionBanner.collectAsState()
 
     val startDestination = initialRoute ?: "pairing"
 
@@ -157,13 +147,15 @@ fun AppNav(viewModel: MainViewModel, initialRoute: String? = null) {
         return
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        ConnectionStateBanner(
-            banner = banner,
-            onRePair = {
-                navController.navigate("pairing") { launchSingleTop = true }
-            },
-        )
+    // Connection-status feedback now lives INSIDE each screen, just under
+    // its header (see [ConnectionStatusBanner] in `ui/common`). The previous
+    // global strip above the NavHost shifted the whole page down on every
+    // transient drop and flickered on each retry. Screens that need it
+    // (`workspace`, `workspace/sessions/{id}`) render it themselves; the
+    // pairing / connecting / servers / settings screens don't surface it
+    // because they either ARE the disconnected UX (pairing) or have their
+    // own per-row status (servers list).
+    Box(modifier = Modifier.fillMaxSize()) {
         NavHost(navController = navController, startDestination = startDestination) {
             composable("pairing") {
                 val s = uiState
@@ -301,63 +293,6 @@ private fun resolvedRoute(entry: NavBackStackEntry): String? {
 }
 
 /**
- * Surfaced strip above the nav stack when the underlying socket is in
- * trouble. We deliberately do NOT block input on the screen below — the
- * user can still navigate, read existing transcripts, and even queue new
- * messages (which [RemoteClient.queueCall] will flush on reconnect).
- *
- * Color choice:
- *   - [ConnectionBanner.Reconnecting] → `tertiaryContainer` (yellow-ish,
- *     "transient, will heal itself").
- *   - [ConnectionBanner.FailedTerminal] → `errorContainer` (red, "user
- *     action required — re-pair").
- */
-@Composable
-private fun ConnectionStateBanner(banner: ConnectionBanner, onRePair: () -> Unit) {
-    when (banner) {
-        ConnectionBanner.Hidden -> return
-        is ConnectionBanner.Reconnecting -> {
-            // Live countdown. The previous version computed `next try in
-            // Xs` ONCE per emission, so it sat frozen at e.g. "30s" for the
-            // whole backoff and read as a hung connection. Capture a
-            // deadline when this attempt began and tick it down so the
-            // number actually moves.
-            val deadline = remember(banner.attempt, banner.nextRetryMs) {
-                System.currentTimeMillis() + banner.nextRetryMs
-            }
-            var remainingMs by remember(deadline) {
-                mutableLongStateOf((deadline - System.currentTimeMillis()).coerceAtLeast(0L))
-            }
-            LaunchedEffect(deadline) {
-                while (remainingMs > 0) {
-                    delay(500)
-                    remainingMs = (deadline - System.currentTimeMillis()).coerceAtLeast(0L)
-                }
-            }
-            val seconds = remainingMs / 1000
-            val tail = if (seconds > 0) "next try in ${seconds}s…" else "retrying…"
-            val reason = banner.reason
-            val text = if (reason != null) {
-                "$reason · Reconnecting (attempt ${banner.attempt}, $tail)"
-            } else {
-                "Reconnecting (attempt ${banner.attempt}, $tail)"
-            }
-            BannerSurface(MaterialTheme.colorScheme.tertiaryContainer, text, onClick = null)
-        }
-        is ConnectionBanner.FailedTerminal -> {
-            // Terminal failure was previously a dead-end static line. Make
-            // it tappable so the user has a one-tap recovery into pairing
-            // instead of being stuck.
-            BannerSurface(
-                background = MaterialTheme.colorScheme.errorContainer,
-                text = "${banner.reason} · Tap to re-pair.",
-                onClick = onRePair,
-            )
-        }
-    }
-}
-
-/**
  * Terminal "update the app" screen shown when the paired desktop
  * advertises a chat-wire schema this client doesn't understand
  * ([UiState.IncompatibleServer]). Rendered above the NavHost — every
@@ -402,37 +337,3 @@ private fun IncompatibleServerScreen(state: UiState.IncompatibleServer) {
     }
 }
 
-@Composable
-private fun BannerSurface(background: Color, text: String, onClick: (() -> Unit)?) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
-        color = background,
-    ) {
-        Text(
-            text = text,
-            // Single-line, ellipsised: the previous wrap could grow to three
-            // lines on a long failure reason (Reconnecting + attempt + retry
-            // tail), shifting the entire NavHost down by ~60 dp every time
-            // the banner appeared. The reason + countdown still fits on one
-            // line on a 360 dp screen; truncation is acceptable here — the
-            // per-screen banner under the header carries the verbose copy.
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier
-                .fillMaxWidth()
-                // The banner is the top-most element (above the NavHost), so
-                // it must clear the system status bar itself — otherwise the
-                // text draws under the clock / battery icons. Horizontal too
-                // for the landscape camera cutout.
-                .windowInsetsPadding(
-                    WindowInsets.safeDrawing.only(
-                        WindowInsetsSides.Top + WindowInsetsSides.Horizontal,
-                    ),
-                )
-                .padding(horizontal = 16.dp, vertical = 4.dp),
-            style = MaterialTheme.typography.labelMedium,
-        )
-    }
-}

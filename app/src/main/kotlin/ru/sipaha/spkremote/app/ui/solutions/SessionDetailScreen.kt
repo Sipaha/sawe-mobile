@@ -165,7 +165,7 @@ import ru.sipaha.spkremote.app.vm.UploadManager
 import ru.sipaha.spkremote.core.ConnectionState
 import ru.sipaha.spkremote.core.ContentBlockDto
 import ru.sipaha.spkremote.core.DisplayState
-import ru.sipaha.spkremote.core.connectionBannerLabel
+import ru.sipaha.spkremote.app.ui.common.ConnectionStatusBanner
 import ru.sipaha.spkremote.core.EntryImage
 import ru.sipaha.spkremote.core.EntryRoleDto
 import ru.sipaha.spkremote.core.EntrySummary
@@ -525,7 +525,7 @@ fun SessionDetailScreen(
             Column(modifier = Modifier.fillMaxSize()) {
                 // Connection-status strip (Feature B): shown only when NOT
                 // Connected, so a healthy chat looks exactly as before.
-                ConnectionBanner(
+                ConnectionStatusBanner(
                     state = connectionState,
                     lastConnectedMs = lastConnectedMs,
                 )
@@ -3809,91 +3809,6 @@ internal fun RunningElapsed(displayState: DisplayState, stateStartedAtMs: Long?)
         text = formatElapsed(elapsedSeconds),
         style = MaterialTheme.typography.labelSmall,
     )
-}
-
-/**
- * Slim full-width connection-status strip between the top bar and the chat
- * list (Feature B). Hidden entirely when [state] is [ConnectionState.Connected]
- * — a healthy chat shows nothing.
- *
- * The label text is decided by the pure [connectionBannerLabel] helper (unit
- * tested in `core`). When we have a recorded last-connected timestamp the strip
- * appends a localized "· последний обмен N мин назад" via Android's
- * [DateUtils.getRelativeTimeSpanString], with a `now` that ticks every ~15s
- * (same pattern as [LastActivityLabel]) so the relative time stays current
- * while disconnected.
- *
- * Colour: the milder [ConnectionState.Connecting] / [ConnectionState.Reconnecting]
- * states use `tertiaryContainer`; hard outages ([ConnectionState.Disconnected] /
- * [ConnectionState.FailedTerminal]) use `errorContainer`.
- */
-@Composable
-private fun ConnectionBanner(state: ConnectionState, lastConnectedMs: Long?) {
-    val label = connectionBannerLabel(state)
-    var lastLabel by remember { mutableStateOf(label) }
-    if (label != null) lastLabel = label
-    AnimatedVisibility(visible = label != null) {
-        // `label` becomes null the same frame `visible` flips to false, so we
-        // read the cached `lastLabel` here — it stays non-null throughout the
-        // exit animation so the content has something to render while fading.
-        val text = lastLabel ?: return@AnimatedVisibility
-        val isHardOutage = state is ConnectionState.Disconnected ||
-            state is ConnectionState.FailedTerminal
-        val container = if (isHardOutage) {
-            MaterialTheme.colorScheme.errorContainer
-        } else {
-            MaterialTheme.colorScheme.tertiaryContainer
-        }
-        val onContainer = if (isHardOutage) {
-            MaterialTheme.colorScheme.onErrorContainer
-        } else {
-            MaterialTheme.colorScheme.onTertiaryContainer
-        }
-
-        var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-        LaunchedEffect(lastConnectedMs) {
-            if (lastConnectedMs == null) return@LaunchedEffect
-            while (true) {
-                delay(15_000L)
-                now = System.currentTimeMillis()
-            }
-        }
-        val suffix = if (lastConnectedMs != null) {
-            val relative = android.text.format.DateUtils.getRelativeTimeSpanString(
-                lastConnectedMs,
-                now,
-                android.text.format.DateUtils.MINUTE_IN_MILLIS,
-                android.text.format.DateUtils.FORMAT_ABBREV_RELATIVE,
-            ).toString()
-            " · последний обмен $relative"
-        } else {
-            ""
-        }
-
-        Surface(color = container, modifier = Modifier.fillMaxWidth()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    imageVector = if (isHardOutage) Icons.Filled.CloudOff else Icons.Filled.Warning,
-                    contentDescription = null,
-                    tint = onContainer,
-                    modifier = Modifier.size(16.dp),
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = text + suffix,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = onContainer,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-    }
 }
 
 /**
