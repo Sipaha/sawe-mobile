@@ -178,16 +178,21 @@ private fun SolutionHeader(
         contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
         modifier = Modifier.fillMaxWidth(),
     ) {
+        // Vertical padding is intentionally zero — the kebab button at 32 dp
+        // is the dominant child and sets the row height. Smaller paddings
+        // would do nothing; larger ones make the sticky header crowd the
+        // session list. titleSmall + 16 dp icon + 8 dp spacer keep the
+        // header visually distinct from session rows while staying tight.
         Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
                 imageVector = Icons.Filled.Workspaces,
                 contentDescription = null,
-                modifier = Modifier.size(18.dp),
+                modifier = Modifier.size(16.dp),
             )
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(8.dp))
             // Wrap name + count in a weighted Row so the kebab gets pushed to
             // the very right edge. A flat `name.weight(1f, fill=false)` + a
             // trailing `Spacer.weight(1f)` LOOKED right but didn't deliver:
@@ -265,7 +270,7 @@ private fun SessionRow(
 
     Row(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)
-            .padding(start = 28.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+            .padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
@@ -274,7 +279,7 @@ private fun SessionRow(
             modifier = Modifier.size(14.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.width(10.dp))
+        Spacer(Modifier.width(8.dp))
         Text(
             text = session.title.ifBlank { "(untitled session)" },
             style = MaterialTheme.typography.bodyMedium,
