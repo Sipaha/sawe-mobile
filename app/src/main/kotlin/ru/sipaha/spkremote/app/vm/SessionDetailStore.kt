@@ -2078,7 +2078,47 @@ internal class SessionDetailStore(
         draftRepository.save(sessionId, text)
     }
 
+    /**
+     * Synchronous flush of the draft text. Called from the chat detail
+     * screen's `DisposableEffect.onDispose` so a back-press inside the
+     * 500 ms debounce window of the live `saveDraft` writer doesn't drop
+     * the trailing keystrokes. The underlying [DraftRepository.save] is
+     * `SharedPreferences.edit().apply()` — already non-blocking — so
+     * calling it on the main thread is fine.
+     */
+    fun flushDraft(sessionId: String, text: String) {
+        draftRepository.save(sessionId, text)
+    }
+
     fun clearDraft(sessionId: String) {
         draftRepository.clear(sessionId)
+    }
+
+    // ---- Per-session picked-attachment draft (survives screen remount) ----
+
+    private val pickedAttachmentsBySession = mutableMapOf<String, List<PickedAttachment>>()
+
+    /**
+     * Read the picked-attachment list the user had assembled in the
+     * compose bar for [sessionId] before the screen last unmounted.
+     * Empty when the session was never touched or after a successful send.
+     * Held in-memory only — process-death loses these (same V1 contract
+     * the previous composable-local `remember` had; survival across
+     * back-nav is the new property).
+     */
+    fun pickedAttachments(sessionId: String): List<PickedAttachment> =
+        pickedAttachmentsBySession[sessionId] ?: emptyList()
+
+    /**
+     * Stash the picked-attachment list for [sessionId]. Empty list removes
+     * the entry so a long-lived `MainViewModel` with many sessions doesn't
+     * leak references to stale [UploadManager.State] flows.
+     */
+    fun setPickedAttachments(sessionId: String, attachments: List<PickedAttachment>) {
+        if (attachments.isEmpty()) {
+            pickedAttachmentsBySession.remove(sessionId)
+        } else {
+            pickedAttachmentsBySession[sessionId] = attachments
+        }
     }
 }

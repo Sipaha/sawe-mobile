@@ -156,6 +156,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import ru.sipaha.spkremote.app.vm.DeferredUpload
 import ru.sipaha.spkremote.app.vm.MainViewModel
 import ru.sipaha.spkremote.app.vm.PendingUploadProgress
+import ru.sipaha.spkremote.app.vm.PickedAttachment
 import ru.sipaha.spkremote.app.vm.UiData
 import ru.sipaha.spkremote.app.vm.UploadManager
 import ru.sipaha.spkremote.core.ConnectionState
@@ -489,6 +490,9 @@ fun SessionDetailScreen(
                     initialDraft = seedText,
                     seedLoaded = seedLoaded,
                     onDraftChanged = { text -> viewModel.saveDraft(sessionId, text) },
+                    onDraftFlush = { text -> viewModel.flushDraft(sessionId, text) },
+                    initialAttachments = { viewModel.pickedAttachments(sessionId) },
+                    onAttachmentsChanged = { viewModel.setPickedAttachments(sessionId, it) },
                     onStartUpload = { uri, sid, mime, name, size ->
                         viewModel.startAttachmentUpload(uri, sid, mime, name, size)
                     },
@@ -2687,6 +2691,19 @@ private fun ComposeBar(
     seedLoaded: Boolean,
     onDraftChanged: suspend (String) -> Unit,
     /**
+     * Synchronous flush of the current draft text, called when the
+     * compose bar leaves composition (back-nav). The debounced
+     * `onDraftChanged` writer above only fires on the trailing edge of a
+     * 500 ms quiet window, so a keystroke followed within < 500 ms by a
+     * back-press never made it to disk and the user saw their draft
+     * vanish on reopen.
+     */
+    onDraftFlush: (String) -> Unit,
+    /** Initial picked-attachment list, hydrated from the per-session store. */
+    initialAttachments: () -> List<PickedAttachment>,
+    /** Mirror every mutation of the picked-attachment list back to the store. */
+    onAttachmentsChanged: (List<PickedAttachment>) -> Unit,
+    /**
      * Kick off a fresh chunked upload for [uri]. Returns the local key
      * (used for cancel / forget) + the StateFlow the preview card
      * collects to drive progress UI.
@@ -2726,12 +2743,22 @@ private fun ComposeBar(
 ) {
     val context = LocalContext.current
     val composeScope = rememberCoroutineScope()
-    // Live, non-persisted V1: attachments survive config changes (would
-    // need to round-trip Uri/displayName/mime through Bundle, doable but
-    // out of scope) but are dropped on process death. The expected flow
-    // is "pick → optionally type → Send" within seconds.
+    // Live, non-persisted V1: attachments survive config changes AND
+    // back-nav within the same process (via [SessionDetailStore]'s
+    // per-session map provided through `initialAttachments` +
+    // `onAttachmentsChanged`; the previous composable-local `remember`
+    // reset to empty on every chat-screen remount, so a user who
+    // attached a file, hit Back, and reopened the chat lost their picks).
+    // Process death still drops them — round-tripping Uri/displayName/
+    // mime/upload localKey through disk is doable but out of scope.
     var pickedAttachments by remember(sessionId) {
-        mutableStateOf<List<PickedAttachment>>(emptyList())
+        mutableStateOf(initialAttachments())
+    }
+    // Mirror every list mutation into the store so a subsequent
+    // back→reopen on the same session re-hydrates from the same list.
+    LaunchedEffect(sessionId) {
+        androidx.compose.runtime.snapshotFlow { pickedAttachments }
+            .collect { onAttachmentsChanged(it) }
     }
     var showAttachSheet by remember { mutableStateOf(false) }
     val attachSheetState = rememberModalBottomSheetState()
@@ -2827,6 +2854,12 @@ private fun ComposeBar(
             .debounce(500)
             .distinctUntilChanged()
             .collect { text -> onDraftChanged(text) }
+    }
+    // Flush the trailing keystrokes synchronously when the compose bar
+    // leaves composition (back-nav). Without this the debounced writer
+    // misses anything typed within 500 ms of the back-press.
+    DisposableEffect(sessionId) {
+        onDispose { onDraftFlush(draft) }
     }
     val isRunning = state == DisplayState.Running
     // Stopping is the post-cancel transient state — the server is settling
@@ -3180,25 +3213,9 @@ private fun ComposeBar(
     }
 }
 
-/**
- * Live (non-persisted) representation of one file the user has picked
- * for attaching AND for which an upload has been started. URI is the
- * canonical handle — the actual bytes stream through [UploadManager]
- * over the WebSocket binary-frame path, not the old
- * "readBytes into base64" route.
- *
- * [localKey] is the [UploadManager]-assigned identifier used for
- * cancel / forget. [uploadState] is the per-upload StateFlow the
- * preview card collects to drive progress / Done / Failed UI.
- */
-data class PickedAttachment(
-    val uri: Uri,
-    val displayName: String,
-    val mimeType: String,
-    val sizeBytes: Long,
-    val localKey: String,
-    val uploadState: StateFlow<UploadManager.State>,
-)
+// PickedAttachment now lives in `ru.sipaha.spkremote.app.vm.PickedAttachment`
+// so [SessionDetailStore] can keep a per-session draft list across the
+// chat-detail composable's unmount/remount cycle on back-navigation.
 
 /**
  * Lightweight intermediate the picker callbacks emit from the

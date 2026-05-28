@@ -616,7 +616,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
         sessionDetail.loadDraftSeed(sessionId)
 
     suspend fun saveDraft(sessionId: String, text: String) = sessionDetail.saveDraft(sessionId, text)
+    fun flushDraft(sessionId: String, text: String) = sessionDetail.flushDraft(sessionId, text)
     fun clearDraft(sessionId: String) = sessionDetail.clearDraft(sessionId)
+
+    fun pickedAttachments(sessionId: String): List<PickedAttachment> =
+        sessionDetail.pickedAttachments(sessionId)
+    fun setPickedAttachments(sessionId: String, attachments: List<PickedAttachment>) =
+        sessionDetail.setPickedAttachments(sessionId, attachments)
 
     // ---- Chunked-upload surface for the attach flow ----
 
