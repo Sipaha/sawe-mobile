@@ -3,6 +3,7 @@ package ru.sipaha.spkremote.app.data
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import androidx.core.content.edit
 
 /**
  * Persists the active navigation route so cold start can land the user
@@ -71,7 +72,7 @@ class NavStateRepository(
         if (route == "pairing" || route == "connecting" || route == "servers") return
         val p = prefs ?: return
         val key = scopedKey() ?: return
-        runCatching { p.edit().putString(key, route).apply() }
+        runCatching { p.edit {putString(key, route)} }
             .onFailure { Log.w(TAG, "saveRoute() failed", it) }
     }
 
@@ -151,9 +152,10 @@ class NavStateRepository(
     fun clearFor(serverId: String?) {
         val p = prefs ?: return
         runCatching {
-            val editor = p.edit()
-            if (serverId != null) editor.remove("route:$serverId")
-            editor.remove(LEGACY_KEY_ROUTE).apply()
+            p.edit {
+                if (serverId != null) remove("route:$serverId")
+                remove(LEGACY_KEY_ROUTE)
+            }
         }.onFailure { Log.w(TAG, "clearFor() failed", it) }
     }
 
@@ -163,7 +165,7 @@ class NavStateRepository(
      */
     fun clearAllServers() {
         val p = prefs ?: return
-        runCatching { p.edit().clear().apply() }
+        runCatching { p.edit {clear()} }
             .onFailure { Log.w(TAG, "clearAllServers() failed", it) }
     }
 

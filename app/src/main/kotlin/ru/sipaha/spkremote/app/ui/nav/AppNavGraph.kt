@@ -19,6 +19,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -324,7 +325,7 @@ private fun ConnectionStateBanner(banner: ConnectionBanner, onRePair: () -> Unit
                 System.currentTimeMillis() + banner.nextRetryMs
             }
             var remainingMs by remember(deadline) {
-                mutableStateOf((deadline - System.currentTimeMillis()).coerceAtLeast(0L))
+                mutableLongStateOf((deadline - System.currentTimeMillis()).coerceAtLeast(0L))
             }
             LaunchedEffect(deadline) {
                 while (remainingMs > 0) {

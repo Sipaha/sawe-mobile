@@ -3,6 +3,8 @@ package ru.sipaha.spkremote.app.ui.solutions
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.net.Uri
+import androidx.core.graphics.createBitmap
+import java.util.Locale
 import android.provider.OpenableColumns
 import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -112,6 +114,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -1163,7 +1166,7 @@ private fun userBubbleStatusFor(
 
 /** Pretty-print bytes as "N.N MB" / "NN KB" / "NNN B" for the bubble badge. */
 private fun formatBytes(b: Long): String = when {
-    b >= 1024L * 1024L -> String.format("%.1f MB", b / (1024.0 * 1024.0))
+    b >= 1024L * 1024L -> String.format(Locale.ROOT, "%.1f MB", b / (1024.0 * 1024.0))
     b >= 1024L -> "${b / 1024L} KB"
     else -> "$b B"
 }
@@ -2217,7 +2220,7 @@ private fun bitmapPainterFromBase64(data: String): Painter {
 }
 
 private fun emptyBitmapPainter(): Painter {
-    val bm = android.graphics.Bitmap.createBitmap(1, 1, android.graphics.Bitmap.Config.ARGB_8888)
+    val bm = createBitmap(1, 1)
     return BitmapPainter(bm.asImageBitmap())
 }
 
@@ -2293,7 +2296,7 @@ private fun ToolCallBubble(
                     val startedAt: Long? = call.toolStatusStartedAtMs
                     if (startedAt != null && call.status == ToolCallStatusDto.Running) {
                         var elapsedSeconds by remember(startedAt) {
-                            mutableStateOf(((System.currentTimeMillis() - startedAt) / 1000L).coerceAtLeast(0L))
+                            mutableLongStateOf(((System.currentTimeMillis() - startedAt) / 1000L).coerceAtLeast(0L))
                         }
                         LaunchedEffect(startedAt, call.status) {
                             if (call.status != ToolCallStatusDto.Running) return@LaunchedEffect
@@ -3100,70 +3103,70 @@ private fun ComposeBar(
                         val attachments = pickedAttachments
                         if (toSendText.isEmpty() && attachments.isEmpty()) return@FilledIconButton
 
-                            // Branch on whether every attachment is
-                            // already Done. If so, fire the existing
-                            // single-shot path — the optimistic bubble
-                            // transitions straight to "Sending →
-                            // Delivered". If any upload is still in
-                            // flight, route through the deferred path:
-                            // the bubble appears immediately with an
-                            // "Uploading X/Y" badge and the store
-                            // dispatches send_message_blocks once
-                            // every upload terminates Done. Failed
-                            // attachments are already blocked by
-                            // [sendEnabled].
-                            val allDone = attachments.isNotEmpty() &&
-                                attachments.all {
-                                    it.uploadState.value is UploadManager.State.Done
-                                }
-                            if (attachments.isEmpty() || allDone) {
-                                composeScope.launch {
-                                    val blocks = mutableListOf<ContentBlockDto>()
-                                    for (item in attachments) {
-                                        val handle = awaitUploadTerminal(item.localKey)
-                                        if (handle == null) {
-                                            onAttachmentError(
-                                                "`${item.displayName}` failed to upload — drop it and retry",
-                                            )
-                                            continue
-                                        }
-                                        blocks += ContentBlockDto.ResourceLink(
-                                            name = item.displayName,
-                                            uri = handle,
+                        // Branch on whether every attachment is
+                        // already Done. If so, fire the existing
+                        // single-shot path — the optimistic bubble
+                        // transitions straight to "Sending →
+                        // Delivered". If any upload is still in
+                        // flight, route through the deferred path:
+                        // the bubble appears immediately with an
+                        // "Uploading X/Y" badge and the store
+                        // dispatches send_message_blocks once
+                        // every upload terminates Done. Failed
+                        // attachments are already blocked by
+                        // [sendEnabled].
+                        val allDone = attachments.isNotEmpty() &&
+                            attachments.all {
+                                it.uploadState.value is UploadManager.State.Done
+                            }
+                        if (attachments.isEmpty() || allDone) {
+                            composeScope.launch {
+                                val blocks = mutableListOf<ContentBlockDto>()
+                                for (item in attachments) {
+                                    val handle = awaitUploadTerminal(item.localKey)
+                                    if (handle == null) {
+                                        onAttachmentError(
+                                            "`${item.displayName}` failed to upload — drop it and retry",
                                         )
+                                        continue
                                     }
-                                    if (toSendText.isEmpty() && blocks.isEmpty()) return@launch
-                                    onSend(toSendText, blocks)
-                                    attachments.forEach { onForgetUpload(it.localKey) }
-                                    draft = ""
-                                    pickedAttachments = emptyList()
+                                    blocks += ContentBlockDto.ResourceLink(
+                                        name = item.displayName,
+                                        uri = handle,
+                                    )
                                 }
-                            } else {
-                                // Deferred path. We pass DeferredUpload
-                                // descriptors to the store (NOT the
-                                // StateFlows themselves, since the
-                                // store doesn't know about the
-                                // collector — it dereferences localKey
-                                // through the upload manager). The
-                                // store's `cleanupDeferred` calls
-                                // `uploadManager.forget(localKey)` for
-                                // every attachment on both success and
-                                // failure terminals, so no manual
-                                // forget here — same net effect as the
-                                // all-Done path above.
-                                onSendDeferred(
-                                    toSendText,
-                                    attachments.map {
-                                        DeferredUpload(
-                                            localKey = it.localKey,
-                                            displayName = it.displayName,
-                                            mime = it.mimeType,
-                                        )
-                                    },
-                                )
+                                if (toSendText.isEmpty() && blocks.isEmpty()) return@launch
+                                onSend(toSendText, blocks)
+                                attachments.forEach { onForgetUpload(it.localKey) }
                                 draft = ""
                                 pickedAttachments = emptyList()
                             }
+                        } else {
+                            // Deferred path. We pass DeferredUpload
+                            // descriptors to the store (NOT the
+                            // StateFlows themselves, since the
+                            // store doesn't know about the
+                            // collector — it dereferences localKey
+                            // through the upload manager). The
+                            // store's `cleanupDeferred` calls
+                            // `uploadManager.forget(localKey)` for
+                            // every attachment on both success and
+                            // failure terminals, so no manual
+                            // forget here — same net effect as the
+                            // all-Done path above.
+                            onSendDeferred(
+                                toSendText,
+                                attachments.map {
+                                    DeferredUpload(
+                                        localKey = it.localKey,
+                                        displayName = it.displayName,
+                                        mime = it.mimeType,
+                                    )
+                                },
+                            )
+                            draft = ""
+                            pickedAttachments = emptyList()
+                        }
                         },
                     enabled = sendEnabled,
                 ) {
@@ -3790,7 +3793,7 @@ internal fun formatElapsed(secs: Long): String {
 internal fun RunningElapsed(displayState: DisplayState, stateStartedAtMs: Long?) {
     if (displayState != DisplayState.Running || stateStartedAtMs == null) return
     var elapsedSeconds by remember(stateStartedAtMs) {
-        mutableStateOf(
+        mutableLongStateOf(
             ((System.currentTimeMillis() - stateStartedAtMs) / 1000L).coerceAtLeast(0L)
         )
     }
@@ -3847,7 +3850,7 @@ private fun ConnectionBanner(state: ConnectionState, lastConnectedMs: Long?) {
             MaterialTheme.colorScheme.onTertiaryContainer
         }
 
-        var now by remember { mutableStateOf(System.currentTimeMillis()) }
+        var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
         LaunchedEffect(lastConnectedMs) {
             if (lastConnectedMs == null) return@LaunchedEffect
             while (true) {
@@ -3915,7 +3918,7 @@ private fun ConnectionBanner(state: ConnectionState, lastConnectedMs: Long?) {
 @Composable
 internal fun LastActivityLabel(lastActivityMs: Long?) {
     if (lastActivityMs == null) return
-    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(lastActivityMs) {
         while (true) {
             delay(15_000L)

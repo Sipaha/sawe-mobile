@@ -3,6 +3,7 @@ package ru.sipaha.spkremote.app.data
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import androidx.core.content.edit
 import androidx.security.crypto.EncryptedSharedPreferences
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -89,7 +90,7 @@ class PendingSendsRepository(
         val key = scopedKey(record.csid) ?: return
         runCatching {
             val raw = JSON.encodeToString(PersistedPendingSend.serializer(), record)
-            p.edit().putString(key, raw).apply()
+            p.edit {putString(key, raw)}
         }.onFailure { Log.w(TAG, "saveOrUpdate() failed for csid=${record.csid}", it) }
     }
 
@@ -113,7 +114,7 @@ class PendingSendsRepository(
     fun remove(csid: Long) {
         val p = prefs ?: return
         val key = scopedKey(csid) ?: return
-        runCatching { p.edit().remove(key).apply() }
+        runCatching { p.edit {remove(key)} }
             .onFailure { Log.w(TAG, "remove() failed for csid=$csid", it) }
     }
 
@@ -121,11 +122,11 @@ class PendingSendsRepository(
         val p = prefs ?: return
         val prefix = "$KEY_PREFIX:$serverId:"
         runCatching {
-            val editor = p.edit()
-            for (key in p.all.keys) {
-                if (key.startsWith(prefix)) editor.remove(key)
+            p.edit {
+                for (key in p.all.keys) {
+                    if (key.startsWith(prefix)) remove(key)
+                }
             }
-            editor.apply()
         }.onFailure { Log.w(TAG, "removeForServer() failed", it) }
     }
 

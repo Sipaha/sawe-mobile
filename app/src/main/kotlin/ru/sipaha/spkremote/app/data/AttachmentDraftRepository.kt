@@ -3,6 +3,7 @@ package ru.sipaha.spkremote.app.data
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import androidx.core.content.edit
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -49,9 +50,9 @@ class AttachmentDraftRepository(
         val key = attachmentsKey(sessionId) ?: return
         runCatching {
             if (refs.isEmpty()) {
-                p.edit().remove(key).apply()
+                p.edit {remove(key)}
             } else {
-                p.edit().putString(key, json.encodeToString(refs)).apply()
+                p.edit {putString(key, json.encodeToString(refs))}
             }
         }.onFailure { Log.w(TAG, "save() failed", it) }
     }
@@ -71,7 +72,7 @@ class AttachmentDraftRepository(
     fun clear(sessionId: String) {
         val p = prefs ?: return
         val key = attachmentsKey(sessionId) ?: return
-        runCatching { p.edit().remove(key).apply() }
+        runCatching { p.edit {remove(key)} }
             .onFailure { Log.w(TAG, "clear() failed", it) }
     }
 
@@ -79,13 +80,13 @@ class AttachmentDraftRepository(
         val p = prefs ?: return
         runCatching {
             if (serverId == null) {
-                p.edit().clear().apply()
+                p.edit {clear()}
                 return@runCatching
             }
             val prefix = "attachments:$serverId:"
-            val editor = p.edit()
-            for (k in p.all.keys) if (k.startsWith(prefix)) editor.remove(k)
-            editor.apply()
+            p.edit {
+                for (k in p.all.keys) if (k.startsWith(prefix)) remove(k)
+            }
         }.onFailure { Log.w(TAG, "clearAllFor() failed", it) }
     }
 
