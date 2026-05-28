@@ -1,9 +1,11 @@
 package ru.sipaha.spkremote.app.vm
 
 import android.app.Application
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -11,6 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import ru.sipaha.spkremote.app.data.EncryptedQueueStore
 import ru.sipaha.spkremote.app.data.PairedServer
 import ru.sipaha.spkremote.app.data.PairingRepository
@@ -106,6 +109,15 @@ internal class ConnectionManager(
 
     private var client: RemoteClient? = null
     private var connectionObserverJob: Job? = null
+
+    /**
+     * Per-client liveness heartbeat — pings the wire on a fixed cadence
+     * to catch zombie sockets (state reads Connected but the server
+     * isn't responding) that the lifecycle loop can't notice on its own.
+     * Cancelled in [tearDownConnection] and rebound by
+     * [startObservingConnectionState].
+     */
+    private var heartbeatJob: Job? = null
 
     /**
      * Serialises every server-lifecycle mutation. See class KDoc
@@ -411,9 +423,11 @@ internal class ConnectionManager(
         // Idempotent fast-exit: if there's no client we have nothing to
         // tear down, and re-firing [onTearDown] would needlessly reset
         // the stores to Loading.
-        if (client == null && connectionObserverJob == null) return
+        if (client == null && connectionObserverJob == null && heartbeatJob == null) return
         connectionObserverJob?.cancel()
         connectionObserverJob = null
+        heartbeatJob?.cancel()
+        heartbeatJob = null
         // Close the client synchronously BEFORE firing onTearDown so
         // any per-message-dispatcher coroutines spawned by RemoteClient
         // observe the closed state before the stores wipe their caches
@@ -486,8 +500,14 @@ internal class ConnectionManager(
                 if (previousConnected && !isConnected) {
                     // Falling edge: the connection just dropped. Stamp the
                     // moment it last worked so the chat banner can show
-                    // "last exchange N min ago" while we're offline.
+                    // "last exchange N min ago" while we're offline, and
+                    // surface to the coordinator so flows that actively
+                    // drive the wire (chunked uploads, etc.) can pause
+                    // proactively instead of hanging on a send/ack until
+                    // their own timeout fires — which would otherwise race
+                    // the next onReconnected's resumeAll.
                     _lastConnectedMs.value = System.currentTimeMillis()
+                    lifecycle.onConnectionInterrupted()
                 }
                 if (isConnected && !previousConnected) {
                     lifecycle.onReconnected()
@@ -505,5 +525,103 @@ internal class ConnectionManager(
                 previousConnected = isConnected
             }
         }
+        // Liveness watchdog: while Connected, fire a cheap RPC every
+        // [HEARTBEAT_INTERVAL_MS]. A zombie socket (OS reports ESTABLISHED
+        // but no traffic flows — common on Doze / NAT pinch) won't trip
+        // [connectionState] because OkHttp's keepalive frames don't see
+        // it either. Two consecutive failures call `forceReconnect` so the
+        // lifecycle loop tears the dead WS down and reconnects (plain
+        // `wakeReconnect` is gated on Reconnecting and would be a no-op
+        // against a quietly-dead Connected socket).
+        //
+        // Lives in its own [heartbeatJob] handle (NOT connectionObserverJob
+        // — replacing that var here would orphan the collector launched
+        // just above). Cancelled from [tearDownConnection].
+        startHeartbeatLocked(client)
+    }
+
+    private fun startHeartbeatLocked(boundClient: RemoteClient?) {
+        heartbeatJob?.cancel()
+        if (boundClient == null) return
+        heartbeatJob = scope.launch {
+            var consecutiveFailures = 0
+            while (true) {
+                delay(HEARTBEAT_INTERVAL_MS)
+                if (_rawConnectionState.value !is ConnectionState.Connected) {
+                    // Re-check on the next tick. While the lifecycle is
+                    // already in Reconnecting / Connecting / FailedTerminal
+                    // we don't pile on extra RPCs — forceReconnect is also
+                    // gated on Connected, so firing it here would be a
+                    // no-op anyway.
+                    consecutiveFailures = 0
+                    continue
+                }
+                val live = client ?: break
+                if (live !== boundClient) {
+                    // Client rotated under us (server switch) — let the
+                    // next observer-rebind start a fresh heartbeat.
+                    break
+                }
+                // withTimeoutOrNull returns null on timeout (the inner
+                // suspending call is cancelled, CancellationException
+                // propagates through the timeout machinery — DON'T wrap
+                // the inner block in runCatching, that swallows
+                // CancellationException and disarms structured
+                // cancellation). Non-cancellation throwables from
+                // RemoteClient.call (NotConnectedException, transport
+                // errors) are caught here explicitly.
+                val pingResp = try {
+                    withTimeoutOrNull(HEARTBEAT_TIMEOUT_MS) {
+                        live.call("remote.editor.capabilities")
+                    }
+                } catch (t: Throwable) {
+                    if (t is kotlinx.coroutines.CancellationException) throw t
+                    null
+                }
+                val ok = pingResp != null && pingResp.error == null
+                if (ok) {
+                    consecutiveFailures = 0
+                } else {
+                    consecutiveFailures += 1
+                    if (consecutiveFailures >= HEARTBEAT_FAILURE_THRESHOLD) {
+                        // Wire is a zombie: state reads Connected but the
+                        // server isn't responding. wakeReconnect is gated
+                        // on Reconnecting and is a no-op here; force a
+                        // transport teardown so the lifecycle loop sees
+                        // a TransportClosed event and rebuilds the socket
+                        // via the standard backoff path. The reason
+                        // string is what the user sees on the reconnect
+                        // banner via ConnectFailure.Unreachable.userMessage,
+                        // so use a plain user-facing phrase here and log
+                        // the watchdog-specific detail separately.
+                        Log.w(
+                            TAG,
+                            "heartbeat watchdog: $HEARTBEAT_FAILURE_THRESHOLD pings unanswered — forcing reconnect",
+                        )
+                        live.forceReconnect("Server stopped responding — reconnecting…")
+                        consecutiveFailures = 0
+                    }
+                }
+            }
+        }
+    }
+
+    companion object {
+        private const val TAG = "ConnectionManager"
+
+        /** How often to ping the wire while Connected. */
+        private const val HEARTBEAT_INTERVAL_MS: Long = 30_000L
+
+        /** Per-ping wall-clock cap. */
+        private const val HEARTBEAT_TIMEOUT_MS: Long = 8_000L
+
+        /**
+         * Consecutive failed heartbeats before we treat the wire as
+         * zombie and force a reconnect. Two failures ≈ 60s of no
+         * server response on an otherwise-healthy connection — safely
+         * over the noisiest LTE round-trip, but quick enough that a
+         * stuck Doze-suspended socket recovers without the user noticing.
+         */
+        private const val HEARTBEAT_FAILURE_THRESHOLD: Int = 2
     }
 }

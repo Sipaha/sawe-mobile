@@ -242,6 +242,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
                 onForegroundResume()
             }
         }
+        // Stuck-Paused upload watchdog (see UploadManager kdoc). Polls the
+        // raw connection-state flow exposed by ConnectionManager so it can
+        // tell legitimately-paused-while-offline from stuck-Paused-while-
+        // Connected.
+        uploadManager.installStuckPausedWatchdog(connectionMgr.rawConnectionState)
     }
 
     /**
@@ -326,28 +331,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
             sessionDetail.resumeSession(openSid)
         }
         // Server's subscription set is per-WS-connection — every transient
-        // drop loses our previous subscribe. Force a fresh subscribe +
-        // observer relaunch so workspace.* / agent_session_* deltas keep
-        // flowing on the new connection. Without this the workspace strip
-        // stays static (no solution_opened / closed deltas) until the user
-        // restarts the app or navigates into a session detail.
-        sessionList.restartNotificationsObserver()
-        // Workspace mirror — treat the server as authoritative for the
-        // open-set after any disconnect window. The session-list /
-        // catalog stores observe their own notification kinds and
-        // refresh themselves when the user lands on the surface that
-        // needs them. Clear the buffered sequenced-delta queue first so
-        // any pre-disconnect deltas (whose `seq` was minted by the
-        // previous coordinator instance — potentially reset by a desktop
-        // restart) don't poison the replay path with permanently
-        // unreachable gap targets.
+        // drop loses our previous subscribe. The suspend variant SUSPENDS
+        // until the `subscribe` RPC completes before letting workspace.refresh
+        // fire — otherwise the snapshot RPC could land before the server
+        // registers our subscription, opening a window where a delta fires
+        // between snapshot-mint and subscribe-completion and is lost to us
+        // (the gap-detector self-heals on the NEXT delta, but until then
+        // the mirror shows stale data).
         viewModelScope.launch {
+            sessionList.restartNotificationsObserverAndAwait()
+            // Workspace mirror — treat the server as authoritative for
+            // the open-set after any disconnect window. Clear the buffered
+            // sequenced-delta queue first so any pre-disconnect deltas
+            // (whose `seq` was minted by the previous coordinator instance
+            // — potentially reset by a desktop restart) don't poison the
+            // replay path with permanently unreachable gap targets.
             workspaceStore.clearBufferedDeltas()
             workspaceStore.refresh()
         }
         // Wake any paused upload coroutines back up. Each will hit
         // upload_status first (server is authoritative on offset).
+        // The proactive [onConnectionInterrupted] hook ensures uploads
+        // mid-pumpChunks were already moved to Paused on the drop edge,
+        // so this single call covers the common case; the stuck-Paused
+        // watchdog in [UploadManager.installStuckPausedWatchdog] is the
+        // safety net for the rare missed-pauseAll race.
         uploadManager.resumeAll()
+    }
+
+    override fun onConnectionInterrupted() {
+        // Transient drop — proactively pause every in-flight upload so
+        // their chunk coroutines stop banging on a dead socket. Without
+        // this, an upload mid-`pumpChunks` would sit waiting for an ack
+        // until [ACK_TIMEOUT_MS] (30s) before flipping itself to Paused —
+        // by which time the next [onReconnected] has already run its
+        // `resumeAll` and missed this upload (state still Uploading at
+        // the moment of resume).
+        uploadManager.pauseAll("connection interrupted")
     }
 
     override fun onMessageExpired(message: QueuedMessage) {
@@ -710,4 +730,5 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
         // resets all three stores. No separate hook needed (audit Fix U).
         connectionMgr.tearDownConnection()
     }
+
 }

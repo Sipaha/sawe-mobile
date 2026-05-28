@@ -42,6 +42,25 @@ internal interface ConnectionLifecycle {
     fun onReconnected()
 
     /**
+     * Called on every Connected → non-Connected falling edge. Distinct
+     * from [onTearDown] which is for explicit server-switch / teardown:
+     * this fires on transient drops the `RemoteClient` lifecycle loop
+     * recovers from on its own (network blip, Wi-Fi flap, NAT timeout).
+     *
+     * The active client + observers stay alive; only flows that
+     * actively *use* the wire (e.g. an in-flight chunked upload waiting
+     * on an ack) need to react. Without this hook, those flows have to
+     * detect the drop reactively via send-failure / ack-timeout, which
+     * can sit for up to 30s before they pause — by which time the
+     * subsequent [onReconnected]'s `resumeAll` has already run and
+     * missed them (state still `Uploading`, not `Paused`).
+     *
+     * Default no-op so callers that don't care (e.g. tests stubbing the
+     * lifecycle) can ignore it.
+     */
+    fun onConnectionInterrupted() {}
+
+    /**
      * Routes expired queued messages back to the coordinator for
      * bounce-to-input recovery.
      */

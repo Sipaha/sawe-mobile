@@ -220,18 +220,32 @@ internal class SessionListStore(
 
     /**
      * Force a fresh `subscribe(...)` + observer relaunch on the active
-     * client. Called from [ConnectionLifecycle.onReconnected] because the
-     * server's subscription set is per-WS-connection — a transient drop
-     * + reconnect on the same [RemoteClient] silently loses every kind
-     * we had subscribed to, and the existing observer's collect loop
-     * (still alive on the in-memory notifications [Flow]) wouldn't
-     * naturally re-send the subscribe. Cancelling the job here makes
-     * [ensureNotificationsObserver] relaunch with a fresh subscribe.
+     * client, blocking until the `subscribe` RPC has settled. Critical on
+     * the [ConnectionLifecycle.onReconnected] path — the server's
+     * subscription set is per-WS-connection, so a transient drop +
+     * reconnect on the same [RemoteClient] silently loses every kind we
+     * had subscribed to, and the existing observer's collect loop (still
+     * alive on the in-memory notifications [Flow]) wouldn't naturally
+     * re-send the subscribe.
+     *
+     * Suspending until subscribe lands is what callers that race a
+     * `workspace.snapshot` RPC against this restart need: the snapshot
+     * must be minted while the new subscription set is already
+     * registered server-side, otherwise a delta firing between snapshot-
+     * mint and subscribe-completion is silently dropped (the gap-detector
+     * self-heals on the next delta, but until then the mirror shows
+     * stale data).
      */
-    fun restartNotificationsObserver() {
+    suspend fun restartNotificationsObserverAndAwait() {
         notificationsObserverJob?.cancel()
         notificationsObserverJob = null
-        ensureNotificationsObserver()
+        val active = context.activeClient() ?: return
+        // Synchronously dispatch the subscribe first. Result is best-effort:
+        // a transient failure here means the collector still launches and
+        // the next reconnect cycle will retry — better than leaving the
+        // wire un-observed.
+        runCatching { active.subscribe(SUBSCRIPTION_KINDS) }
+        notificationsObserverJob = scope.launch { runNotificationsCollector(active) }
     }
 
     /**
@@ -249,80 +263,86 @@ internal class SessionListStore(
             // workspace.* / agent_session_* deltas never make it back to us.
             // (subscribe is documented idempotent server-side, so a duplicate
             // when the observer restarts for any other reason is harmless.)
-            runCatching {
-                active.subscribe(
-                    listOf(
-                            "agent_session_state_changed",
-                            "agent_session_created",
-                            "agent_session_closed",
-                            "agent_session_title_changed",
-                            "agent_session_message_appended",
-                            "agent_session_queue_changed",
-                            // Task/Agent subagent set changed mid-turn —
-                            // routes to SessionDetailStore.onActiveSubagentsChanged
-                            // which moves the tab strip; without this the
-                            // strip only refreshes via cold-start seed.
-                            "agent_session_active_subagents_changed",
-                            // Server wiped this session's transcript in-place
-                            // (`/clear` reset_context or `/compact` rotate_context).
-                            // Without this kind, the chat surface keeps showing
-                            // stale entries until a foreground / cold refresh.
-                            "agent_session_context_reset",
-                            // Chunked-upload acks share this collector — server
-                            // forwards them through the same notification path
-                            // (allow_list pattern `upload_*`). Subscribing
-                            // here keeps a single notification observer per
-                            // active client; without this UploadManager would
-                            // need its own subscribe + collector duplicating
-                            // the lifecycle handling.
-                            "upload_chunk_acked",
-                            // Solution member-add progress + completion +
-                            // generic solution change — drive the project-
-                            // registry ghost rows and the member-list
-                            // refresh. Routed to CatalogStore via
-                            // [solutionNotificationRouter].
-                            "solution_member_add_progress",
-                            "solution_member_add_completed",
-                            "solution_changed",
-                            // Workspace (open-set) notifications — routed
-                            // to WorkspaceStore via [workspaceNotificationRouter].
-                            // Carry sequenced deltas for the desktop's open
-                            // workspace mirror; gap detection is internal
-                            // to the store.
-                            "workspace.solution_opened",
-                            "workspace.solution_closed",
-                            "workspace.solution_deleted",
-                            "workspace.session_opened",
-                            "workspace.session_closed",
-                            "workspace.session_deleted",
-                        "workspace.session_state_changed",
-                        "workspace.session_metrics_changed",
-                    ),
-                )
-            }
-            active.notifications.collect { frame ->
-                val params = (frame as? JsonObject)?.get("params") as? JsonObject
-                    ?: return@collect
-                val kind = params["kind"]?.jsonPrimitive?.content ?: return@collect
-                // The server (`editor_mcp::notifications::emit`) wraps each
-                // notification as `params: { kind, payload }`. An earlier
-                // mobile revision read `params["data"]` — that key never
-                // exists on the wire, so EVERY notification arrived with
-                // `data = null`. Most handlers had a "data missing →
-                // refresh-all" fallback, which masked the bug for text
-                // chat (`agent_session_message_appended` triggered a
-                // full re-fetch and the new entry appeared via that
-                // path). `upload_chunk_acked` has no fallback (its only
-                // job is to forward the ack offset into the per-upload
-                // channel), so the silent null sent every chunk-ack
-                // straight to /dev/null and the upload coroutine timed
-                // out at 30 s → Paused at 0 B. Diagnosed 2026-05-19
-                // via server-side `binary frame written: offset=0` +
-                // mobile `Paused at 0 B / 3.0 MB`.
-                val payload = params["payload"] as? JsonObject
-                handleNotification(kind, payload)
-            }
+            runCatching { active.subscribe(SUBSCRIPTION_KINDS) }
+            runNotificationsCollector(active)
         }
+    }
+
+    private suspend fun runNotificationsCollector(active: RemoteClient) {
+        active.notifications.collect { frame ->
+            val params = (frame as? JsonObject)?.get("params") as? JsonObject
+                ?: return@collect
+            val kind = params["kind"]?.jsonPrimitive?.content ?: return@collect
+            // The server (`editor_mcp::notifications::emit`) wraps each
+            // notification as `params: { kind, payload }`. An earlier
+            // mobile revision read `params["data"]` — that key never
+            // exists on the wire, so EVERY notification arrived with
+            // `data = null`. Most handlers had a "data missing →
+            // refresh-all" fallback, which masked the bug for text
+            // chat (`agent_session_message_appended` triggered a
+            // full re-fetch and the new entry appeared via that
+            // path). `upload_chunk_acked` has no fallback (its only
+            // job is to forward the ack offset into the per-upload
+            // channel), so the silent null sent every chunk-ack
+            // straight to /dev/null and the upload coroutine timed
+            // out at 30 s → Paused at 0 B. Diagnosed 2026-05-19
+            // via server-side `binary frame written: offset=0` +
+            // mobile `Paused at 0 B / 3.0 MB`.
+            val payload = params["payload"] as? JsonObject
+            handleNotification(kind, payload)
+        }
+    }
+
+    private companion object {
+        /**
+         * Notification kinds re-subscribed on every reconnect (server-side
+         * subscription set is per-WS-connection, so we must replay
+         * everything we want to hear after each new socket).
+         */
+        private val SUBSCRIPTION_KINDS: List<String> = listOf(
+            "agent_session_state_changed",
+            "agent_session_created",
+            "agent_session_closed",
+            "agent_session_title_changed",
+            "agent_session_message_appended",
+            "agent_session_queue_changed",
+            // Task/Agent subagent set changed mid-turn — routes to
+            // SessionDetailStore.onActiveSubagentsChanged which moves
+            // the tab strip; without this the strip only refreshes
+            // via cold-start seed.
+            "agent_session_active_subagents_changed",
+            // Server wiped this session's transcript in-place (`/clear`
+            // reset_context or `/compact` rotate_context). Without this
+            // kind, the chat surface keeps showing stale entries until
+            // a foreground / cold refresh.
+            "agent_session_context_reset",
+            // Chunked-upload acks share this collector — server
+            // forwards them through the same notification path
+            // (allow_list pattern `upload_*`). Subscribing here keeps a
+            // single notification observer per active client; without
+            // this UploadManager would need its own subscribe +
+            // collector duplicating the lifecycle handling.
+            "upload_chunk_acked",
+            // Solution member-add progress + completion + generic
+            // solution change — drive the project-registry ghost rows
+            // and the member-list refresh. Routed to CatalogStore via
+            // [solutionNotificationRouter].
+            "solution_member_add_progress",
+            "solution_member_add_completed",
+            "solution_changed",
+            // Workspace (open-set) notifications — routed to
+            // WorkspaceStore via [workspaceNotificationRouter]. Carry
+            // sequenced deltas for the desktop's open workspace mirror;
+            // gap detection is internal to the store.
+            "workspace.solution_opened",
+            "workspace.solution_closed",
+            "workspace.solution_deleted",
+            "workspace.session_opened",
+            "workspace.session_closed",
+            "workspace.session_deleted",
+            "workspace.session_state_changed",
+            "workspace.session_metrics_changed",
+        )
     }
 
     private fun handleNotification(kind: String, data: JsonObject?) {

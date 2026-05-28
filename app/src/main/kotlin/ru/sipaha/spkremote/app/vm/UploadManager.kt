@@ -3,6 +3,7 @@ package ru.sipaha.spkremote.app.vm
 import android.content.ContentResolver
 import android.net.Uri
 import android.util.Log
+import androidx.core.net.toUri
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
@@ -20,6 +21,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import ru.sipaha.spkremote.app.data.InFlightUploadsRepository
 import ru.sipaha.spkremote.app.data.PersistedUpload
+import ru.sipaha.spkremote.core.ConnectionState
 import ru.sipaha.spkremote.core.JsonRpc
 import ru.sipaha.spkremote.core.RemoteClient
 import ru.sipaha.spkremote.core.UPLOAD_CHUNK_PAYLOAD_BYTES
@@ -242,7 +244,7 @@ class UploadManager internal constructor(
             // Skip if we already have a live record (e.g. resume fired
             // twice on rapid reconnects).
             if (states.containsKey(entry.localKey)) continue
-            val uri = runCatching { Uri.parse(entry.uriString) }.getOrNull()
+            val uri = runCatching { entry.uriString.toUri() }.getOrNull()
             if (uri == null) {
                 persistence.remove(entry.localKey)
                 continue
@@ -310,6 +312,18 @@ class UploadManager internal constructor(
      * the compose row's collector unbinds.
      */
     fun cancel(localKey: String) {
+        // Flip state to Failed BEFORE removing the map entry so any
+        // deferred-send waiter (`SessionDetailStore.runDeferredSend`)
+        // observing this localKey's StateFlow unblocks immediately
+        // instead of spinning on its 5-minute outer timeout. Done by
+        // the same MutableStateFlow instance the waiter captured, so
+        // the emission lands even after the map entry is gone.
+        states[localKey]?.let { flow ->
+            val current = flow.value
+            if (current !is State.Done && current !is State.Failed) {
+                flow.value = State.Failed("upload cancelled")
+            }
+        }
         jobs.remove(localKey)?.cancel()
         states.remove(localKey)
         val meta = metadata.remove(localKey)
@@ -780,6 +794,60 @@ class UploadManager internal constructor(
         return (capped + jitter).coerceAtLeast(100L)
     }
 
+    /**
+     * Periodic safety net: if any upload sits in Paused while the
+     * client claims Connected for [STUCK_PAUSED_THRESHOLD_MS], force a
+     * resumeAll. Covers the corner case where the proactive
+     * `onConnectionInterrupted` hook + the reactive `sendBinary=false`
+     * pause both missed somehow, or the lifecycle layer didn't
+     * surface the reconnect edge cleanly (rare but possible after a
+     * long Doze suspension where state transitions get coalesced).
+     *
+     * Bound to the manager's [scope]; cancelled implicitly when the
+     * ViewModel scope is cleared.
+     */
+    @Volatile
+    private var stuckPausedWatchdogJob: Job? = null
+
+    fun installStuckPausedWatchdog(connectionState: StateFlow<ConnectionState>) {
+        // Idempotent: a second install (test rig, hot-reload, refactor that
+        // wires it from a different lifecycle) cancels the previous loop
+        // before starting a fresh one — without this, two infinite-loop
+        // watchdog coroutines would race on `states` and double-fire
+        // resumeAll.
+        stuckPausedWatchdogJob?.cancel()
+        stuckPausedWatchdogJob = scope.launch {
+            val pausedSince = ConcurrentHashMap<String, Long>()
+            while (true) {
+                delay(STUCK_PAUSED_POLL_MS)
+                val connected = connectionState.value is ConnectionState.Connected
+                if (!connected) {
+                    // Drop the timers — uploads are legitimately paused while
+                    // the wire is down. We don't want to count that time.
+                    pausedSince.clear()
+                    continue
+                }
+                val now = System.currentTimeMillis()
+                var anyStuck = false
+                for ((localKey, flow) in states) {
+                    if (flow.value is State.Paused) {
+                        val since = pausedSince.getOrPut(localKey) { now }
+                        if (now - since >= STUCK_PAUSED_THRESHOLD_MS) {
+                            anyStuck = true
+                        }
+                    } else {
+                        pausedSince.remove(localKey)
+                    }
+                }
+                if (anyStuck) {
+                    Log.w(TAG, "stuck-Paused watchdog: forcing resumeAll while Connected")
+                    resumeAll()
+                    pausedSince.clear()
+                }
+            }
+        }
+    }
+
     companion object {
         /**
          * Maximum wall time to wait for one chunk's ack before
@@ -790,5 +858,18 @@ class UploadManager internal constructor(
          */
         private const val TAG = "UploadManager"
         private const val ACK_TIMEOUT_MS: Long = 30_000L
+
+        /** Poll cadence for the stuck-Paused watchdog. */
+        private const val STUCK_PAUSED_POLL_MS: Long = 5_000L
+
+        /**
+         * How long an upload can sit in Paused while the wire claims
+         * Connected before we treat it as stuck and force a resume.
+         * 15s is large enough to ride out the natural Paused→Uploading
+         * settle after a reconnect (upload_status RPC + first chunk
+         * round-trip), short enough that a genuinely stuck upload
+         * recovers without the user noticing.
+         */
+        private const val STUCK_PAUSED_THRESHOLD_MS: Long = 15_000L
     }
 }

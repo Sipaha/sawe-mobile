@@ -3,6 +3,7 @@ package ru.sipaha.spkremote.core
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CompletableDeferred
@@ -270,6 +271,36 @@ class RemoteClient internal constructor(
         if (_connectionState.value is ConnectionState.Reconnecting) {
             wakeRequests.trySend(Unit)
         }
+    }
+
+    /**
+     * Tear down the live transport and trigger a fresh reconnect cycle.
+     * Used by the mobile heartbeat watchdog when a zombie socket is
+     * detected (state reads `Connected` but a `capabilities` ping has
+     * failed N times in a row) — [wakeReconnect] is gated on
+     * `Reconnecting` and would be a silent no-op in that scenario.
+     *
+     * Closes the active transport and pushes a synthetic
+     * [LifecycleEvent.TransportClosed] so the lifecycle loop's
+     * `awaitDisconnect` sees a Transient reason and rebuilds the socket
+     * via the standard backoff path. Safe to call from any thread.
+     *
+     * No-ops when [_connectionState] is not `Connected` (any other
+     * value means a reconnect is either already running or terminal,
+     * neither of which we want to disturb).
+     */
+    fun forceReconnect(reason: String = "heartbeat watchdog: server unresponsive") {
+        if (_connectionState.value !is ConnectionState.Connected) return
+        val toClose: RemoteTransport?
+        synchronized(stateLock) {
+            if (closing) return
+            toClose = transport
+            transport = null
+        }
+        toClose?.close()
+        events.trySend(
+            LifecycleEvent.TransportClosed(ConnectFailure.Unreachable(reason)),
+        )
     }
 
     /** Whether a programmatic close has been requested (lifecycle ends). */
@@ -637,7 +668,7 @@ class RemoteClient internal constructor(
         // the listener stops using this and the shared field takes
         // over for app-side RPC traffic.
         val handshakeTransportRef =
-            java.util.concurrent.atomic.AtomicReference<RemoteTransport?>(null)
+            AtomicReference<RemoteTransport?>(null)
         val listener = HandshakeListener(handshake, stage, handshakeTransportRef)
         val tx = transportFactory.connect(url, listener)
         handshakeTransportRef.set(tx)
@@ -765,7 +796,7 @@ class RemoteClient internal constructor(
          * state advances past AwaitingNonce, so post-Established
          * onText paths fall back to whatever the shared field carries.
          */
-        private val handshakeTx: java.util.concurrent.atomic.AtomicReference<RemoteTransport?>,
+        private val handshakeTx: AtomicReference<RemoteTransport?>,
     ) : RemoteTransportListener {
 
         override fun onBinary(bytes: ByteArray) {
