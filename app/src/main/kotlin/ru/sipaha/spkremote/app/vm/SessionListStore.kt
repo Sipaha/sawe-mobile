@@ -14,6 +14,7 @@ import ru.sipaha.spkremote.app.data.ListCacheRepository
 import ru.sipaha.spkremote.app.data.SessionHistoryRepository
 import ru.sipaha.spkremote.core.AgentSummary
 import ru.sipaha.spkremote.core.CreateSessionResult
+import ru.sipaha.spkremote.core.GetSessionBackgroundAgentsResult
 import ru.sipaha.spkremote.core.GetSessionBackgroundShellsResult
 import ru.sipaha.spkremote.core.GetSessionChildrenResult
 import ru.sipaha.spkremote.core.JsonRpc
@@ -25,6 +26,7 @@ import ru.sipaha.spkremote.core.MessageAppendedPayload
 import ru.sipaha.spkremote.core.RemoteClient
 import ru.sipaha.spkremote.core.AgentSessionContextResetPayload
 import ru.sipaha.spkremote.core.SessionActiveSubagentsChangedPayload
+import ru.sipaha.spkremote.core.SessionBackgroundAgentsChangedPayload
 import ru.sipaha.spkremote.core.SessionBackgroundShellsChangedPayload
 import ru.sipaha.spkremote.core.SessionCreatedPayload
 import ru.sipaha.spkremote.core.SessionQueueChangedPayload
@@ -319,6 +321,12 @@ internal class SessionListStore(
             // the background-shell pill strip; without this the strip
             // only refreshes via cold-start seed.
             "agent_session_background_shells_changed",
+            // Background-agent set changed (a managed background agent
+            // launched / stopped) — routes to
+            // SessionDetailStore.onBackgroundAgentsChanged which updates
+            // the background-agent pill strip; without this the strip
+            // only refreshes via cold-start seed.
+            "agent_session_background_agents_changed",
             // Server wiped this session's transcript in-place (`/clear`
             // reset_context or `/compact` rotate_context). Without this
             // kind, the chat surface keeps showing stale entries until
@@ -559,6 +567,17 @@ internal class SessionListStore(
                 } ?: return
                 router.onBackgroundShellsChanged(payload)
             }
+            "agent_session_background_agents_changed" -> {
+                val payload = data?.let {
+                    runCatching {
+                        JsonRpc.json.decodeFromJsonElement(
+                            SessionBackgroundAgentsChangedPayload.serializer(),
+                            it,
+                        )
+                    }.getOrNull()
+                } ?: return
+                router.onBackgroundAgentsChanged(payload)
+            }
             "agent_session_context_reset" -> {
                 val payload = data?.decodeOrNull(AgentSessionContextResetPayload.serializer()) ?: return
                 router.onSessionContextReset(payload)
@@ -611,6 +630,31 @@ internal class SessionListStore(
                 resp.decodeResultOrThrow(GetSessionBackgroundShellsResult.serializer())
             }
             .getOrDefault(GetSessionBackgroundShellsResult())
+    }
+
+    /**
+     * Fetch the managed background agents for [sessionId] via
+     * `remote.solution_agent.get_session_background_agents`. Unlike
+     * [loadBackgroundShells] there is NO include flag — the DTO carries
+     * everything (label / mtime / stop_reason), so a single shape serves
+     * both the strip seed and the minimal drill-in. Returns an empty
+     * result on failure or when no client is connected — callers treat
+     * "no agents" and "couldn't fetch" identically (strip stays hidden).
+     */
+    suspend fun loadBackgroundAgents(
+        sessionId: String,
+    ): GetSessionBackgroundAgentsResult {
+        val active = context.activeClient() ?: return GetSessionBackgroundAgentsResult()
+        val params = buildJsonObject {
+            put("session_id", sessionId)
+        }
+        return runCatching {
+            active.call("remote.solution_agent.get_session_background_agents", params)
+        }
+            .mapCatching { resp ->
+                resp.decodeResultOrThrow(GetSessionBackgroundAgentsResult.serializer())
+            }
+            .getOrDefault(GetSessionBackgroundAgentsResult())
     }
 
     fun loadAgents() {
@@ -845,6 +889,14 @@ internal interface DetailNotificationRouter {
      * matches the server-side ordering — render as-is.
      */
     fun onBackgroundShellsChanged(payload: SessionBackgroundShellsChangedPayload)
+
+    /**
+     * The managed background-agent set changed for [payload.sessionId].
+     * The payload always carries the FULL new set of DTOs (empty = no
+     * agents); insertion order matches the server-side ordering — render
+     * as-is.
+     */
+    fun onBackgroundAgentsChanged(payload: SessionBackgroundAgentsChangedPayload)
 
     /**
      * The server wiped this session's transcript in-place via /clear or

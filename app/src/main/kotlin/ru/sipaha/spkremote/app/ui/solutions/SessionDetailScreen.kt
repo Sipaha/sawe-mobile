@@ -163,6 +163,7 @@ import ru.sipaha.spkremote.app.vm.PendingUploadProgress
 import ru.sipaha.spkremote.app.vm.PickedAttachment
 import ru.sipaha.spkremote.app.vm.UiData
 import ru.sipaha.spkremote.app.vm.UploadManager
+import ru.sipaha.spkremote.core.BackgroundAgentDto
 import ru.sipaha.spkremote.core.BackgroundShellDto
 import ru.sipaha.spkremote.core.ConnectionState
 import ru.sipaha.spkremote.core.ContentBlockDto
@@ -219,6 +220,7 @@ fun SessionDetailScreen(
     val activeSubagents by viewModel.activeSubagents.collectAsState()
     val selectedSubagent by viewModel.selectedSubagent.collectAsState()
     val backgroundShells by viewModel.backgroundShells.collectAsState()
+    val backgroundAgents by viewModel.backgroundAgents.collectAsState()
     val cancelInFlight by viewModel.cancelInFlight.collectAsState()
     val isLoadingOlder by viewModel.isLoadingOlder.collectAsState()
     val childrenMap by viewModel.sessionChildren.collectAsState()
@@ -230,6 +232,9 @@ fun SessionDetailScreen(
     // Background-shell drill-in: id of the shell whose stdout sheet is
     // open, or null when no sheet is showing.
     var selectedShellId by remember { mutableStateOf<String?>(null) }
+    // Background-agent drill-in: id of the agent whose detail sheet is
+    // open, or null when no sheet is showing.
+    var selectedAgentId by remember { mutableStateOf<String?>(null) }
 
     DisposableEffect(sessionId) {
         viewModel.openSession(sessionId)
@@ -551,6 +556,13 @@ fun SessionDetailScreen(
                     shells = backgroundShells,
                     onSelect = { selectedShellId = it },
                 )
+                // Background-agent strip — one pill per managed background
+                // agent. Hidden when none exist. Tapping a pill opens the
+                // minimal drill-in sheet (no network fetch).
+                BackgroundAgentStrip(
+                    agents = backgroundAgents,
+                    onSelect = { selectedAgentId = it },
+                )
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     when (val s = sessionState) {
                         is UiData.Loading -> Box(
@@ -640,6 +652,23 @@ fun SessionDetailScreen(
             loadOutput = { viewModel.loadBackgroundShellOutput(shellId) },
             onDismiss = { selectedShellId = null },
         )
+    }
+
+    val agentId = selectedAgentId
+    if (agentId != null) {
+        // Everything the sheet shows is already in the DTO (label /
+        // stop_reason / mtime) — no network fetch. If the agent vanished
+        // from the strip (e.g. removed by a notification while the sheet
+        // was open), dismiss instead of showing a stale sheet.
+        val agent = backgroundAgents.firstOrNull { it.id == agentId }
+        if (agent == null) {
+            selectedAgentId = null
+        } else {
+            BackgroundAgentDetailSheet(
+                agent = agent,
+                onDismiss = { selectedAgentId = null },
+            )
+        }
     }
 }
 
@@ -4156,6 +4185,114 @@ private fun BackgroundShellOutputSheet(
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Horizontally-scrollable strip of pills — one per managed background
+ * agent the agent launched. Hidden when none exist so a plain
+ * conversation looks unchanged. Tapping a pill fires [onSelect] with the
+ * agent id (opens the minimal drill-in sheet).
+ *
+ * Order is the server-side order — iterate as-is, never re-sort.
+ */
+@Composable
+private fun BackgroundAgentStrip(
+    agents: List<BackgroundAgentDto>,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (agents.isEmpty()) return
+    val scrollState = rememberScrollState()
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .horizontalScroll(scrollState)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        for (agent in agents) {
+            BackgroundAgentPill(agent = agent, onClick = { onSelect(agent.id) })
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun BackgroundAgentPill(agent: BackgroundAgentDto, onClick: () -> Unit) {
+    // State is DERIVED client-side: no stop_reason -> running, else done.
+    val running = agent.stopReason == null
+    val container = if (running) MaterialTheme.colorScheme.primaryContainer
+                    else MaterialTheme.colorScheme.tertiaryContainer
+    val content = if (running) MaterialTheme.colorScheme.onPrimaryContainer
+                  else MaterialTheme.colorScheme.onTertiaryContainer
+    val label = agent.label.let { if (it.length > 24) it.take(24) + "…" else it }
+    Surface(
+        onClick = onClick,
+        shape = MaterialTheme.shapes.small,
+        color = container,
+        contentColor = content,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            maxLines = 1,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+        )
+    }
+}
+
+/**
+ * Minimal read-only drill-in for one managed background agent — a
+ * ModalBottomSheet showing the agent's [BackgroundAgentDto.label], its
+ * derived state (`running` while [BackgroundAgentDto.stopReason] is null,
+ * else `done: <stopReason>`) and a relative last-activity timestamp.
+ *
+ * Unlike the background-shell sheet there is NO network fetch: the DTO
+ * already carries everything shown (no separate output_tail to load).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun BackgroundAgentDetailSheet(
+    agent: BackgroundAgentDto,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val stopReason = agent.stopReason
+    val stateText = if (stopReason == null) "running" else "done: $stopReason"
+    val mtimeMs = agent.mtimeMs
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 24.dp),
+        ) {
+            Text(
+                text = agent.label,
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Text(
+                text = stateText,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+            if (mtimeMs != null) {
+                val relative = android.text.format.DateUtils.getRelativeTimeSpanString(
+                    mtimeMs,
+                    System.currentTimeMillis(),
+                    android.text.format.DateUtils.MINUTE_IN_MILLIS,
+                    android.text.format.DateUtils.FORMAT_ABBREV_RELATIVE,
+                ).toString()
+                Text(
+                    text = relative,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
             }
         }
     }

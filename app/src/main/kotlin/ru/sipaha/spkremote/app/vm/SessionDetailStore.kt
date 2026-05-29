@@ -29,12 +29,14 @@ import ru.sipaha.spkremote.app.data.PersistedPendingSend
 import ru.sipaha.spkremote.app.data.SessionHistoryRepository
 import ru.sipaha.spkremote.core.AgentSessionContextResetPayload
 import ru.sipaha.spkremote.core.AppendedPlaceholderOutcome
+import ru.sipaha.spkremote.core.BackgroundAgentDto
 import ru.sipaha.spkremote.core.BackgroundShellDto
 import ru.sipaha.spkremote.core.ContentBlockDto
 import ru.sipaha.spkremote.core.EntryRoleDto
 import ru.sipaha.spkremote.core.EntrySummary
 import ru.sipaha.spkremote.core.QueuedBundleSummary
 import ru.sipaha.spkremote.core.SessionActiveSubagentsChangedPayload
+import ru.sipaha.spkremote.core.SessionBackgroundAgentsChangedPayload
 import ru.sipaha.spkremote.core.SessionBackgroundShellsChangedPayload
 import ru.sipaha.spkremote.core.SessionQueueChangedPayload
 import ru.sipaha.spkremote.core.SubagentDto
@@ -350,6 +352,18 @@ internal class SessionDetailStore(
     private val _backgroundShells = MutableStateFlow<List<BackgroundShellDto>>(emptyList())
     val backgroundShells: StateFlow<List<BackgroundShellDto>> = _backgroundShells.asStateFlow()
 
+    /**
+     * Managed background agents for the open session, in server-side
+     * order. Seeded once on [openSession] via `get_session_background_agents`
+     * (no include flag), then live-updated from the
+     * `agent_session_background_agents_changed` notification (which already
+     * carries the full list — no refetch). Drives the `BackgroundAgentStrip`
+     * on the detail screen. Empty for sessions that never launched one, or
+     * pre-feature servers.
+     */
+    private val _backgroundAgents = MutableStateFlow<List<BackgroundAgentDto>>(emptyList())
+    val backgroundAgents: StateFlow<List<BackgroundAgentDto>> = _backgroundAgents.asStateFlow()
+
 
     /**
      * One-shot signal emitted after a successful Reset context. Carries the
@@ -406,6 +420,7 @@ internal class SessionDetailStore(
                 _activeSubagents.value = emptyList()
                 _selectedSubagent.value = null
                 _backgroundShells.value = emptyList()
+                _backgroundAgents.value = emptyList()
             }
         }
     }
@@ -461,6 +476,8 @@ internal class SessionDetailStore(
                 // Drop the previous session's background-shell strip; the
                 // explicit fetch below (after the mutex) re-seeds it.
                 _backgroundShells.value = emptyList()
+                // Same for the background-agent strip.
+                _backgroundAgents.value = emptyList()
                 lastSeen.primeFromDisk(sessionId)
                 // Re-materialise optimistic state for every deferred
                 // send whose waiter coroutine is still alive for THIS
@@ -555,6 +572,17 @@ internal class SessionDetailStore(
                 _backgroundShells.value = result.backgroundShells
             }
         }
+        // Seed the background-agent strip once (no include flag — the DTO
+        // already carries everything the strip + drill-in show). Subsequent
+        // mutations ride the `agent_session_background_agents_changed`
+        // notification.
+        scope.launch {
+            val result = sessionList.loadBackgroundAgents(sessionId)
+            sessionMutex.withLock {
+                if (openSessionId != sessionId) return@withLock
+                _backgroundAgents.value = result.backgroundAgents
+            }
+        }
         sessionList.ensureNotificationsObserver()
     }
 
@@ -571,6 +599,7 @@ internal class SessionDetailStore(
                 _activeSubagents.value = emptyList()
                 _selectedSubagent.value = null
                 _backgroundShells.value = emptyList()
+                _backgroundAgents.value = emptyList()
             }
         }
     }
@@ -719,6 +748,20 @@ internal class SessionDetailStore(
             sessionMutex.withLock {
                 if (openSessionId != payload.sessionId) return@withLock
                 _backgroundShells.value = payload.backgroundShells
+            }
+        }
+    }
+
+    override fun onBackgroundAgentsChanged(payload: SessionBackgroundAgentsChangedPayload) {
+        val openSid = openSessionId ?: return
+        if (payload.sessionId != openSid) return
+        // The notification carries the FULL post-change list — mirror it
+        // verbatim. Cross the mutex so the write can't race a concurrent
+        // openSession seed / stale-write barrier on the same flow.
+        scope.launch {
+            sessionMutex.withLock {
+                if (openSessionId != payload.sessionId) return@withLock
+                _backgroundAgents.value = payload.backgroundAgents
             }
         }
     }

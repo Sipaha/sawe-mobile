@@ -592,6 +592,53 @@ data class SessionBackgroundShellsChangedPayload(
 )
 
 /**
+ * One managed background agent the agent launched for the open session.
+ * Mirrors `BackgroundAgentDto` on the desktop side. [id] is the stable
+ * agent id; [label] is a human-readable name. Unlike the background-shell
+ * DTO there is no `command`, no free-form `state` string, and no
+ * `output_tail`: the run/done state is DERIVED client-side from
+ * [stopReason] ([stopReason] == null → running, else → done with that
+ * reason), and the minimal drill-in sheet needs no separate output fetch
+ * since this DTO already carries everything it shows.
+ *
+ * [mtimeMs] is wall-clock unix-millis of the agent's last activity (null
+ * when the server hasn't captured one). [stopReason] is null while the
+ * agent is still running, else the reason string it stopped with.
+ */
+@Serializable
+data class BackgroundAgentDto(
+    val id: String,
+    val label: String,
+    @SerialName("mtime_ms") val mtimeMs: Long? = null,
+    @SerialName("stop_reason") val stopReason: String? = null,
+)
+
+/**
+ * Result envelope for
+ * `remote.solution_agent.get_session_background_agents`. Empty list is a
+ * normal response for sessions that never launched a background agent.
+ * Defaulted to empty so a pre-feature server response decodes cleanly.
+ */
+@Serializable
+data class GetSessionBackgroundAgentsResult(
+    @SerialName("background_agents") val backgroundAgents: List<BackgroundAgentDto> = emptyList(),
+)
+
+/**
+ * Decoded `params.payload` of an `agent_session_background_agents_changed`
+ * notification. Server emits this whenever the background-agent set for
+ * [sessionId] mutates; [backgroundAgents] is the FULL post-change list of
+ * DTOs. Mobile mirrors the list verbatim into the detail store's pill
+ * strip — the DTO already carries everything the strip + drill-in show,
+ * so no refetch is triggered by the notification.
+ */
+@Serializable
+data class SessionBackgroundAgentsChangedPayload(
+    @SerialName("session_id") val sessionId: String,
+    @SerialName("background_agents") val backgroundAgents: List<BackgroundAgentDto> = emptyList(),
+)
+
+/**
  * Server-emitted `agent_session_context_reset` — fires when the desktop
  * wipes a session's transcript in-place via `/clear` (reset_context) or
  * `/compact` (rotate_context). The session_id is stable across the swap;

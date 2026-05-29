@@ -578,6 +578,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
     val selectedSubagent: StateFlow<String?> get() = sessionDetail.selectedSubagent
     val backgroundShells: StateFlow<List<ru.sipaha.spkremote.core.BackgroundShellDto>>
         get() = sessionDetail.backgroundShells
+    val backgroundAgents: StateFlow<List<ru.sipaha.spkremote.core.BackgroundAgentDto>>
+        get() = sessionDetail.backgroundAgents
     val cancelInFlight: StateFlow<Boolean> get() = sessionDetail.cancelInFlight
     val sessionChildren: StateFlow<Map<String, List<SessionSummary>>> get() = sessionList.sessionChildren
     val agents: StateFlow<UiData<List<AgentSummary>>> get() = sessionList.agents
