@@ -143,6 +143,45 @@ internal class ConnectionManager(
     fun activeClient(): RemoteClient? = client
 
     /**
+     * On-demand liveness probe for the foreground-resume edge. After a
+     * Doze / background window a socket that still reads `Connected` is
+     * frequently a zombie (OS reports ESTABLISHED but no traffic flows),
+     * and the periodic [startHeartbeatLocked] watchdog only catches it on
+     * its 30s cadence — up to ~76s of a silently-stale open session. This
+     * runs the SAME `capabilities` ping once, immediately:
+     *  - alive → returns `true`; the caller refetches over the known-good
+     *    socket.
+     *  - dead → [RemoteClient.forceReconnect] tears the zombie down so the
+     *    lifecycle loop rebuilds it and [ConnectionLifecycle.onReconnected]
+     *    drives the session catch-up; returns `false`.
+     *
+     * No-op returning `false` when not [ConnectionState.Connected] — a
+     * reconnect is already running, so there's nothing to probe (and
+     * `forceReconnect` would be a no-op there anyway).
+     */
+    suspend fun probeLivenessNow(): Boolean {
+        val live = client ?: return false
+        if (_rawConnectionState.value !is ConnectionState.Connected) return false
+        // Mirror the watchdog's cancellation discipline: withTimeoutOrNull
+        // cancels the inner call on timeout; don't let a runCatching here
+        // swallow CancellationException and disarm structured cancellation.
+        val pingResp = try {
+            withTimeoutOrNull(HEARTBEAT_TIMEOUT_MS) {
+                live.call("remote.editor.capabilities")
+            }
+        } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException) throw t
+            null
+        }
+        val ok = pingResp != null && pingResp.error == null
+        if (!ok) {
+            Log.w(TAG, "foreground-resume liveness probe failed — forcing reconnect")
+            live.forceReconnect("Reconnecting…")
+        }
+        return ok
+    }
+
+    /**
      * Same classification used by both the nav banner and the
      * per-screen `UiData.Error` text. See KDoc on the original
      * `notConnectedMessage` for the contract.

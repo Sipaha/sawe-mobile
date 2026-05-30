@@ -20,4 +20,15 @@ internal interface ConnectionContext {
 
     /** Emit a transient one-shot user-facing error onto the shared snackbar channel. */
     fun emitError(message: String)
+
+    /**
+     * Probe wire liveness once, immediately (see
+     * [ConnectionManager.probeLivenessNow]). Returns true if the socket
+     * answered, false if it was dead (in which case a reconnect was
+     * forced) or no client is bound. Stores call this at moments where a
+     * silently-dead "Connected" socket would otherwise leave the UI
+     * stale — e.g. opening a session whose initial fetch would just time
+     * out against a zombie socket.
+     */
+    suspend fun probeLivenessNow(): Boolean
 }

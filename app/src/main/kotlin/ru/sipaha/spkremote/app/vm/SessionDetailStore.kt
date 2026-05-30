@@ -584,6 +584,17 @@ internal class SessionDetailStore(
             }
         }
         sessionList.ensureNotificationsObserver()
+        // Opening a session over a silently-dead socket (a zombie left by a
+        // Doze window or a server restart the client never detected — state
+        // still reads "Connected", no banner) would let the initial
+        // `fetchInitialOrDiff` above time out silently, leaving an empty
+        // transcript and a stale subagent strip. Probe liveness in parallel:
+        // a healthy socket answers in <8s (cheap no-op) and the fetch lands
+        // normally; a dead one is force-reconnected, and `onReconnected`
+        // re-runs the fetch via `resumeSession(openSessionId)`. Without this
+        // the only recovery was the ~30–76s heartbeat watchdog or the user
+        // sending a message (whose write trips broken-pipe detection sooner).
+        scope.launch { context.probeLivenessNow() }
     }
 
     fun closeSession() {

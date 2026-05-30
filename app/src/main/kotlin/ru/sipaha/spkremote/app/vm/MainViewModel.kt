@@ -268,20 +268,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
         // "next try in 30s" banner the moment they unlock the phone.
         // No-op when we're already Connected/Connecting.
         client.wakeReconnect()
-        val openSid = sessionDetail.openSessionId
-        if (openSid != null) {
-            sessionDetail.resumeSession(openSid)
+        viewModelScope.launch {
+            // A socket that survived the background window is usually a
+            // zombie (Doze froze traffic; OkHttp still reads Connected).
+            // Probe once before refetching: every resume refetch below
+            // would otherwise be dispatched over the dead socket and
+            // silently time out (30s), leaving the open chat stale until
+            // the slow heartbeat watchdog (~76s) forces a reconnect — the
+            // "messages only appear after I send one" symptom. If the
+            // probe finds the wire dead it forceReconnects, and
+            // onReconnected runs the catch-up; so we skip the redundant
+            // (and doomed) refetch here.
+            if (!connectionMgr.probeLivenessNow()) return@launch
+            val openSid = sessionDetail.openSessionId
+            if (openSid != null) {
+                sessionDetail.resumeSession(openSid)
+            }
+            val observingSid = sessionList.currentObservingSolutionId()
+            if (observingSid != null) {
+                sessionList.refreshSessions(observingSid)
+            }
+            // Workspace mirror — the server is authoritative on which
+            // solutions / sessions are currently open. If we missed a
+            // delta while backgrounded the next sequenced notification
+            // would land with a gap and trigger a resync anyway; doing
+            // it eagerly here cuts the lag on resume.
+            workspaceStore.refresh()
         }
-        val observingSid = sessionList.currentObservingSolutionId()
-        if (observingSid != null) {
-            sessionList.refreshSessions(observingSid)
-        }
-        // Workspace mirror — the server is authoritative on which
-        // solutions / sessions are currently open. If we missed a
-        // delta while backgrounded the next sequenced notification
-        // would land with a gap and trigger a resync anyway; doing
-        // it eagerly here cuts the lag on resume.
-        viewModelScope.launch { workspaceStore.refresh() }
     }
 
     // ---- ConnectionLifecycle impl (audit Fix T light variant) ----
@@ -386,6 +399,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
 
     override fun activeClient(): RemoteClient? = connectionMgr.activeClient()
     override fun notConnectedMessage(): String = connectionMgr.notConnectedMessage()
+    override suspend fun probeLivenessNow(): Boolean = connectionMgr.probeLivenessNow()
     override fun emitError(message: String) {
         _sendError.tryEmit(message)
     }
