@@ -159,6 +159,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import ru.sipaha.spkremote.app.vm.DeferredUpload
 import ru.sipaha.spkremote.app.vm.MainViewModel
+import ru.sipaha.spkremote.app.vm.OpenSessionVM
+import ru.sipaha.spkremote.app.vm.WorkspaceUiState
 import ru.sipaha.spkremote.app.vm.PendingUploadProgress
 import ru.sipaha.spkremote.app.vm.PickedAttachment
 import ru.sipaha.spkremote.app.vm.UiData
@@ -225,6 +227,7 @@ fun SessionDetailScreen(
     val isLoadingOlder by viewModel.isLoadingOlder.collectAsState()
     val childrenMap by viewModel.sessionChildren.collectAsState()
     val sessionsList by viewModel.sessions.collectAsState()
+    val workspaceState by viewModel.workspaceState.collectAsState()
     val connectionState by viewModel.rawConnectionState.collectAsState()
     val lastConnectedMs by viewModel.lastConnectedMs.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -344,19 +347,31 @@ fun SessionDetailScreen(
     var showResetConfirm by rememberSaveable { mutableStateOf(false) }
     var showCompactConfirm by rememberSaveable { mutableStateOf(false) }
 
-    // Cross-reference the open session in the list cache to pull its
-    // `total_tokens` / `max_tokens`. `GetSessionResult` doesn't carry
-    // those today; the list-side `SessionSummary` does (post-F-server /
-    // R-6g), and the list cache is already loaded by the time the
-    // detail surface is on screen.
+    // Cross-reference the open session to pull its `total_tokens` /
+    // `max_tokens` — `GetSessionResult` doesn't carry those today.
+    //
+    // The live source is the workspace mirror: each open session's
+    // `OpenSessionVM` carries the tokens and is kept current by
+    // `workspace.session_metrics_changed`. We read it FIRST because the
+    // unified-workspace navigation goes straight from the mirror to this
+    // screen WITHOUT a per-solution `refreshSessions`, so the list-side
+    // `SessionListStore.sessions` cache (`sessionsCache`) is usually empty
+    // here — relying on it alone is what silently blanked the
+    // ContextFillMeter after the unified-workspace refactor. Fall back to
+    // the list cache for any session the mirror doesn't hold.
+    val mirrorSession: OpenSessionVM? = (workspaceState as? WorkspaceUiState.Loaded)
+        ?.snapshot
+        ?.solutions
+        ?.firstNotNullOfOrNull { sol -> sol.sessions.firstOrNull { it.id == sessionId } }
     val activeSummary: SessionSummary? = sessionsCache.firstOrNull { it.id == sessionId }
-    val activeTotalTokens: Long? = activeSummary?.totalTokens
-    val activeMaxTokens: Long? = activeSummary?.maxTokens
+    val activeTotalTokens: Long? = mirrorSession?.totalTokens ?: activeSummary?.totalTokens
+    val activeMaxTokens: Long? = mirrorSession?.maxTokens ?: activeSummary?.maxTokens
     // `state_started_at_ms` now lives inside the structured
     // [SessionStateDto.Running] variant (post-DTO migration). The list-side
     // cache is still authoritative for the chat header anchor — the
     // active session's `SessionSummary` is freshest re: state transitions.
-    val activeStateStartedAtMs: Long? = activeSummary?.state?.startedAtMs()
+    val activeStateStartedAtMs: Long? =
+        mirrorSession?.state?.startedAtMs() ?: activeSummary?.state?.startedAtMs()
     // "Last activity" anchor for the status bar: the newest chat entry's
     // wall-clock timestamp, filtered to a real value (> 0). This mirrors
     // `combined.lastOrNull()?.createdMs` from [ChatList] — optimistic and
