@@ -2750,12 +2750,14 @@ private fun SlimTopBar(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        // Indent under the title (back button 40dp + the
-                        // title's 4dp inset) so the strip reads as a
-                        // subtitle line. Horizontal scroll guards against
-                        // an overflow on very narrow screens.
+                        // Flush-left at the standard content inset (a deep
+                        // indent under the title left the small indicators
+                        // floating mid-row). No top padding — it sits
+                        // directly under the title row; a small bottom pad
+                        // keeps the strip off the content edge. Horizontal
+                        // scroll guards against overflow on narrow screens.
                         .horizontalScroll(rememberScrollState())
-                        .padding(start = 48.dp, end = 12.dp, top = 2.dp, bottom = 6.dp),
+                        .padding(start = 16.dp, end = 12.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
