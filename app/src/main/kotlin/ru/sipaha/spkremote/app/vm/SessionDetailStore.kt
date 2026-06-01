@@ -65,13 +65,21 @@ import java.util.concurrent.atomic.AtomicLong
 private const val SESSION_PAGE_SIZE = 50
 
 /**
- * Cadence of the tail-resync poll while the open session's agent is
- * actively producing — the safety net for a lost (and unsequenced)
- * `agent_session_message_appended` on a live socket. Short enough that a
- * stranded reply surfaces within a few seconds; only runs while
- * Running/Stopping, so it costs nothing on an idle session.
+ * Cadence of the tail-resync poll — the safety net for a lost (and
+ * unsequenced) `agent_session_message_appended` on a live socket. Short
+ * enough that a stranded reply surfaces within a few seconds; runs while
+ * the agent produces and for a brief trailing window after it stops, so a
+ * long-idle session eventually costs nothing.
  */
 private const val TAIL_RESYNC_INTERVAL_MS: Long = 4_000L
+
+/**
+ * How many resync ticks to keep running after the agent stops producing.
+ * Covers the stranded-final-message case (the lost notification that has
+ * no follow-up): ~[TAIL_RESYNC_TRAILING_TICKS] × [TAIL_RESYNC_INTERVAL_MS]
+ * of catch-up after Idle, then the poller goes quiet.
+ */
+private const val TAIL_RESYNC_TRAILING_TICKS: Int = 3
 
 /**
  * Per-attachment grand timeout for deferred-send. `UploadManager` has
@@ -403,9 +411,10 @@ internal class SessionDetailStore(
      * producing (Running / Stopping). The `agent_session_message_appended`
      * stream is best-effort and NOT sequenced, so a notification lost on a
      * live socket with no follow-up (the lost one was the last) would
-     * never be re-fetched until the next reconnect / resume / send. This
-     * poller closes that gap by pulling an `after_index` diff every
-     * [TAIL_RESYNC_INTERVAL_MS]; it's a no-op once the session goes Idle.
+     * never be re-fetched until the next reconnect / resume / send — the
+     * stranded final-message-in-Idle bug. This poller closes that gap by
+     * pulling an `after_index` diff while producing and for a short
+     * trailing window after the agent stops (see [startTailResync]).
      */
     private var tailResyncJob: Job? = null
         private set
@@ -625,18 +634,24 @@ internal class SessionDetailStore(
 
     /**
      * Start (or restart) the tail-resync poller for [sessionId]. Runs for
-     * the lifetime of the open session; each tick pulls an `after_index`
-     * diff via [resumeSession] ONLY while the agent is actively producing
-     * (Running / Stopping), which is exactly when a lost
-     * `message_appended` would strand the tail. Idle / awaiting-input /
-     * errored ticks are cheap no-ops (no poll), so an open-but-quiet
-     * session generates no traffic. `resumeSession` also refreshes the
-     * session state, so a missed Idle-transition notification is picked up
-     * here and the poller naturally goes quiet.
+     * the lifetime of the open session and pulls an `after_index` diff via
+     * [resumeSession] while the agent is producing (Running / Stopping)
+     * AND for a short TRAILING window after it stops.
+     *
+     * The trailing window is the whole point: mid-turn losses self-heal
+     * (the next `message_appended` gap-detects → full fetch), but the
+     * FINAL message of a turn has no follow-up — if its notification (or
+     * the Idle-transition notification) is lost, the reply strands until
+     * the user sends again. Keeping a few ticks of resync running after
+     * the agent goes Idle catches that last message. `resumeSession` also
+     * adopts the response's session state, so a missed Idle transition is
+     * recovered here too. Once the trailing budget is spent on a quiet
+     * session, the poller idles (no traffic).
      */
     private fun startTailResync(sessionId: String) {
         tailResyncJob?.cancel()
         tailResyncJob = scope.launch {
+            var trailing = 0
             while (true) {
                 delay(TAIL_RESYNC_INTERVAL_MS)
                 if (openSessionId != sessionId) break
@@ -644,7 +659,18 @@ internal class SessionDetailStore(
                     is SessionStateDto.Running, SessionStateDto.Stopping -> true
                     else -> false
                 }
-                if (producing) resumeSession(sessionId)
+                when {
+                    producing -> {
+                        trailing = TAIL_RESYNC_TRAILING_TICKS
+                        resumeSession(sessionId)
+                    }
+                    trailing > 0 -> {
+                        // Agent just stopped — keep resyncing briefly to
+                        // recover a stranded final message / Idle transition.
+                        trailing--
+                        resumeSession(sessionId)
+                    }
+                }
             }
         }
     }
