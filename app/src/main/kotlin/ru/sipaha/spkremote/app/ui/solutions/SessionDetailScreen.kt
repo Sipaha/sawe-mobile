@@ -187,7 +187,7 @@ import ru.sipaha.spkremote.core.ToolCallSummary
 import ru.sipaha.spkremote.core.displayState
 import ru.sipaha.spkremote.core.erroredMessage
 import ru.sipaha.spkremote.core.startedAtMs
-import ru.sipaha.spkremote.core.stripQueueMarker
+import ru.sipaha.spkremote.core.stripInjectedMeta
 import ru.sipaha.spkremote.core.stripRoleHeading
 
 /**
@@ -1393,7 +1393,16 @@ private fun DateSeparatorRow(label: String) {
 
 @Composable
 private fun UserBubble(entry: EntrySummary, status: UserBubbleStatus = UserBubbleStatus.None) {
-    val rawText = stripQueueMarker(stripRoleHeading(entry.markdown ?: entry.preview))
+    val rawText = stripInjectedMeta(stripRoleHeading(entry.markdown ?: entry.preview))
+    // Fold the auto-injected compact-context prompt (a large, agent-only
+    // template) into a tappable placeholder instead of dumping it into the
+    // chat — matches the desktop's folded one-line strip. Detected by its
+    // stable first heading; the compact prompt is sent as a plain turn so
+    // it carries no queue marker and `rawText` already begins with it.
+    if (rawText.trimStart().startsWith(COMPACT_PROMPT_HEADING)) {
+        CompactPromptCard(bodyText = rawText, index = entry.index)
+        return
+    }
     val images = entry.images.orEmpty()
     var fullscreen by remember(entry.index) { mutableStateOf<EntryImage?>(null) }
     // Decode images once per entry so the [Image #N] tap target opens
@@ -1756,6 +1765,86 @@ private fun AssistantBubble(entry: EntrySummary) {
                         Text(
                             text = stripRoleHeading(entry.preview),
                             style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Must stay byte-identical to the Rust side's
+// `solution_agent::compact::COMPACT_PROMPT_HEADING` (the first line of
+// `crates/solution_agent/resources/compact_context_instructions.md`). If
+// that heading ever changes, change this too — the Rust test
+// `compaction_template_starts_with_heading` guards the desktop half, but
+// this copy is a separate codebase with no compile-time link.
+private const val COMPACT_PROMPT_HEADING = "# Compact this session and prepare a clean handoff"
+
+/**
+ * Collapsible placeholder for the auto-generated compact-context prompt —
+ * a large, agent-only template the editor injects on a Compact action.
+ * Default collapsed: the user never needs to read it and asked not to have
+ * to scroll past it (mirrors the desktop's folded one-line strip). Tap the
+ * header to expand. Rendered on the user (right) side because the prompt is
+ * delivered as a user message.
+ */
+@Composable
+private fun CompactPromptCard(bodyText: String, index: Int) {
+    var expanded by rememberSaveable(index) { mutableStateOf(false) }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 48.dp),
+        horizontalArrangement = Arrangement.End,
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            shape = RoundedCornerShape(12.dp),
+            tonalElevation = 0.dp,
+            modifier = Modifier.widthIn(max = 360.dp),
+        ) {
+            Column {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { expanded = !expanded }
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                ) {
+                    Text(
+                        text = "Compact-context request",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Icon(
+                        imageVector = if (expanded) {
+                            Icons.Filled.KeyboardArrowUp
+                        } else {
+                            Icons.Filled.KeyboardArrowDown
+                        },
+                        contentDescription = if (expanded) {
+                            "Collapse compact-context prompt"
+                        } else {
+                            "Expand compact-context prompt"
+                        },
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                if (expanded) {
+                    SelectionContainer {
+                        Text(
+                            text = bodyText.trim(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(
+                                start = 12.dp,
+                                end = 12.dp,
+                                bottom = 10.dp,
+                            ),
                         )
                     }
                 }

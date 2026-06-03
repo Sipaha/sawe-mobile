@@ -1153,23 +1153,53 @@ private val ROLE_HEADING_REGEX = Regex(
 )
 
 /**
- * Strip the leading queue marker that `solution_agent::store::queue` prepends
- * on the FIRST enqueue into a busy session's `pending_messages`. The marker
- * is for the agent — "the user typed this in advance, not in reply to your
- * last question" — and clutters the user bubble with text the user didn't
- * type. Mirrors the desktop's `conversation_render::strip_queue_marker`;
- * keep the prefix + separator in sync if the upstream wording changes.
+ * Remove the agent-only metadata the desktop queue bakes into a follow-up
+ * message before it lands in the transcript — an optional leading hint line
+ * ([QUEUE_HINT_LINE]) and a per-`\n\n`-segment `[HH:MM:SS] ` timestamp
+ * prefix — so the user bubble shows only what the user actually typed.
  *
- * Conservative: returns [text] unchanged unless BOTH the prefix and the
- * closing `]\n\n` separator are present, so an unrelated `[...]` lead-in
- * a user wrote themselves doesn't get eaten.
+ * Kotlin mirror of the desktop's `conversation_render::strip_injected_meta`.
+ * The desktop bakes the timestamp at enqueue and strips it only at render
+ * time, so the wire `EntrySummary` for a delivered follow-up still carries
+ * it — stripping is the client's job. Keep [QUEUE_HINT_LINE] and the
+ * timestamp shape byte-identical to `solution_agent::store::queue` so the
+ * writer (desktop) and this stripper never desync.
+ *
+ * (Replaces the old `stripQueueMarker`, which targeted the verbose
+ * "[The user typed the following at …]" marker the desktop has since
+ * dropped in favour of the compact per-message timestamp + hint.)
+ *
+ * Conservative: a segment's `[..] ` lead-in is removed ONLY when the
+ * bracket body is a valid `HH:MM:SS`, so an unrelated `[note] ` the user
+ * wrote themselves is preserved verbatim.
  */
-fun stripQueueMarker(text: String): String {
-    if (!text.startsWith(QUEUE_MARKER_PREFIX)) return text
-    val sepIdx = text.indexOf(QUEUE_MARKER_BODY_SEP)
-    if (sepIdx < 0) return text
-    return text.substring(sepIdx + QUEUE_MARKER_BODY_SEP.length)
+fun stripInjectedMeta(text: String): String {
+    val body = if (text.startsWith(QUEUE_HINT_LINE)) {
+        text.substring(QUEUE_HINT_LINE.length).trimStart('\n')
+    } else {
+        text
+    }
+    return body.split("\n\n").joinToString("\n\n", transform = ::stripOneTimestamp)
 }
 
-private const val QUEUE_MARKER_PREFIX = "[The user typed the following at "
-private const val QUEUE_MARKER_BODY_SEP = "]\n\n"
+/**
+ * Drop a single leading `[HH:MM:SS] ` prefix from one `\n\n` segment, if
+ * present and shaped like a real timestamp. Mirrors the desktop's
+ * `conversation_render::strip_one_timestamp`.
+ */
+private fun stripOneTimestamp(segment: String): String {
+    if (!segment.startsWith(TS_PREFIX_OPEN)) return segment
+    val rest = segment.substring(TS_PREFIX_OPEN.length)
+    val close = rest.indexOf(TS_PREFIX_CLOSE)
+    if (close < 0) return segment
+    val stamp = rest.substring(0, close)
+    val isHms = stamp.length == 8 &&
+        stamp[2] == ':' && stamp[5] == ':' &&
+        stamp.withIndex().all { (i, c) -> i == 2 || i == 5 || c.isDigit() }
+    return if (isHms) rest.substring(close + TS_PREFIX_CLOSE.length) else segment
+}
+
+private const val TS_PREFIX_OPEN = "["
+private const val TS_PREFIX_CLOSE = "] "
+private const val QUEUE_HINT_LINE =
+    "[Queued before your turn ended — not a reply to your last message.]"

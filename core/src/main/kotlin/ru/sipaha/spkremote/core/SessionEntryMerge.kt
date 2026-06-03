@@ -236,9 +236,17 @@ fun reconcileOptimistic(
             }
         }
     }
+    // Strip the queue's injected meta (`[HH:MM:SS] ` timestamp + hint line)
+    // from the SERVER side of the content-match key: a queued follow-up's
+    // echo carries it but the optimistic bubble below (raw local text)
+    // does not, so without this the keys never match and the message
+    // double-renders. Only the server side is stripped — stripping the
+    // optimistic too would over-strip a user who literally typed
+    // `[HH:MM:SS] …`. csid-stamped echoes never reach here (filtered out
+    // above); this is the no-csid / legacy fallback path.
     val serverPreviews: MutableList<String> = serverUser
         .filter { it.clientSendId == null }
-        .map { stripRoleHeading(it.preview) }
+        .map { stripInjectedMeta(stripRoleHeading(it.preview)) }
         .toMutableList()
     val keptEntries = mutableListOf<EntrySummary>()
     val keptIds = mutableListOf<Long>()
