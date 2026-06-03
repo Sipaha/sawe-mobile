@@ -33,14 +33,18 @@ sealed interface AppendedPlaceholderOutcome {
 
 /**
  * Apply a `agent_session_message_appended` placeholder onto the current
- * entry list.
+ * entry list. Addresses entries by their SERVER index, never by list
+ * position — [current] may be a paginated window (e.g. indices 878..927 at
+ * list positions 0..49) where the two diverge. [current] must be sorted
+ * ascending by [EntrySummary.index].
  *
- *   - When `payload.entryIndex == current.size` — append at the end.
- *   - When `payload.entryIndex < current.size` — replace the slot
- *     in-place (idempotent: replaying the same payload yields the same
+ *   - `entryIndex` already present (≤ max index, slot exists) — replace the
+ *     slot in-place (idempotent: replaying the same payload yields the same
  *     list).
- *   - Otherwise (`payload.entryIndex > current.size`) — the local view is
- *     missing intermediate entries; caller must refetch.
+ *   - `entryIndex == maxIndex + 1` — append at the end (the next entry; works
+ *     on a window without refetching the whole transcript).
+ *   - Otherwise (`entryIndex > maxIndex + 1`, a gap, or an index below the
+ *     window) — the local view is missing the slot; caller must refetch.
  *
  * Pure — never mutates [current].
  */
@@ -57,16 +61,12 @@ fun applyAppendedPlaceholder(
     // entries (server-side `event_sources::build_message_appended_payload`),
     // so we can pre-stamp the placeholder and keep the status as
     // `Delivered` from the moment the slot exists.
-    // Stamp the server index onto the placeholder. Without it the slot
-    // carries the sentinel `index = -1` and is invisible to the index-based
-    // dedup in `SessionDetailStore.resumeSession` / `loadOlder` — a
-    // tail-resync `after_index` diff that was already in flight when this
-    // notification landed then re-merges the SAME entry as a second slot,
-    // and the subsequent position-based `fetchAndReplaceEntry` turns the
-    // placeholder into a duplicate. Two slots with the same index resolve to
-    // the same `idx:N` LazyColumn key and crash the chat
-    // ("Key idx:N was already used"). Carrying the real index keeps the
-    // placeholder a first-class indexed entry the dedup can recognise.
+    //
+    // The server index is stamped on too: it makes the placeholder a
+    // first-class indexed entry that the index-based dedup in
+    // `SessionDetailStore.resumeSession` / `loadOlder` recognises (a sentinel
+    // -1 was invisible to that dedup and a racing tail-resync could merge a
+    // second copy → the `idx:N` duplicate-key crash).
     val placeholder = EntrySummary(
         role = payload.role,
         preview = payload.preview,
@@ -75,14 +75,55 @@ fun applyAppendedPlaceholder(
         clientSendIds = payload.clientSendIds,
         createdMs = payload.createdMs,
     )
+    val maxIndex = current.lastOrNull()?.index ?: -1
     return when {
-        payload.entryIndex == current.size ->
+        // Existing slot (idempotent replay / in-place update). Find by index,
+        // not position — they differ on a paginated window. A `null` slot
+        // inside the range means a hole the diff can't bridge → refetch.
+        payload.entryIndex in 0..maxIndex -> {
+            val pos = current.indexOfFirst { it.index == payload.entryIndex }
+            if (pos < 0) {
+                AppendedPlaceholderOutcome.OutOfRange
+            } else {
+                AppendedPlaceholderOutcome.Replaced(
+                    current.toMutableList().also { it[pos] = placeholder },
+                )
+            }
+        }
+        payload.entryIndex == maxIndex + 1 ->
             AppendedPlaceholderOutcome.Replaced(current + placeholder)
-        payload.entryIndex in 0 until current.size ->
-            AppendedPlaceholderOutcome.Replaced(
-                current.toMutableList().also { it[payload.entryIndex] = placeholder },
-            )
         else -> AppendedPlaceholderOutcome.OutOfRange
+    }
+}
+
+/**
+ * Replace the entry whose server index is [index], or insert [entry] at the
+ * sorted-ascending-by-index position when no such slot exists. [current] must
+ * be sorted ascending by [EntrySummary.index].
+ *
+ * [entry] is stamped with [index] so the stored list always carries correct
+ * indices even when the single-entry fetch (`get_session_entry`) returned the
+ * sentinel `index = -1` (pre-R-6e servers omit the field). The store addresses
+ * entries by the index it requested, so the stored copy must agree — otherwise
+ * the row would key on `pos`/hash instead of `idx:N`.
+ *
+ * Pure — never mutates [current].
+ */
+fun upsertEntryAtIndex(
+    current: List<EntrySummary>,
+    index: Int,
+    entry: EntrySummary,
+): List<EntrySummary> {
+    val stamped = if (entry.index == index) entry else entry.copy(index = index)
+    val pos = current.indexOfFirst { it.index == index }
+    if (pos >= 0) {
+        return current.toMutableList().also { it[pos] = stamped }
+    }
+    val insertAt = current.indexOfFirst { it.index > index }
+    return if (insertAt < 0) {
+        current + stamped
+    } else {
+        current.toMutableList().also { it.add(insertAt, stamped) }
     }
 }
 

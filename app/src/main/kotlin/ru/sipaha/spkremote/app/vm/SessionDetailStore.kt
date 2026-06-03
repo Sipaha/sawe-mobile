@@ -57,6 +57,7 @@ import ru.sipaha.spkremote.core.mergeSessionHistory
 import ru.sipaha.spkremote.core.parseExpiredSendMessage
 import ru.sipaha.spkremote.core.reconcileOptimistic
 import ru.sipaha.spkremote.core.stampClientSendId
+import ru.sipaha.spkremote.core.upsertEntryAtIndex
 import ru.sipaha.spkremote.core.withOptimisticStopping
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicLong
@@ -787,7 +788,13 @@ internal class SessionDetailStore(
                     // [fetchAndReplaceEntry] races the new content in.
                     val current = _session.value as? UiData.Loaded ?: return@withLock
                     val entries = current.value.entries
-                    if (payload.entryIndex >= entries.size) {
+                    // "New entry?" keys on the SERVER index, not list size —
+                    // a paginated window's positions don't match indices. A
+                    // notification for an index we already hold is a content
+                    // update; skip the placeholder so the rendered body stays
+                    // put while [fetchAndReplaceEntry] races the new content in.
+                    val maxIndex = entries.lastOrNull()?.index ?: -1
+                    if (payload.entryIndex > maxIndex) {
                         when (val outcome = applyAppendedPlaceholder(entries, payload)) {
                             is AppendedPlaceholderOutcome.Replaced -> {
                                 _session.value = UiData.Loaded(
@@ -1005,6 +1012,13 @@ internal class SessionDetailStore(
                 if (openSessionId != sessionId) return@withLock
                 val current = _session.value as? UiData.Loaded ?: return@withLock
                 val entries = current.value.entries
+                // Address the slot by SERVER index, never by list position —
+                // a paginated window's positions don't match indices (the old
+                // `entries[index]` splice silently corrupted or dropped to a
+                // full refetch there). [index] is the index we requested, so
+                // it is the authoritative key even if the single-entry fetch
+                // returned `entry.index == -1` (pre-R-6e).
+                val existingPos = entries.indexOfFirst { it.index == index }
                 // Dedup: if the freshly-fetched entry is structurally equal
                 // to the existing slot, skip the StateFlow write. The
                 // markdown widget's recomposition cycle is non-trivial
@@ -1014,23 +1028,24 @@ internal class SessionDetailStore(
                 // content didn't actually change (server-side throttle
                 // sometimes refires a trailing-edge emit with the same
                 // body it already sent) shouldn't pay that cost.
-                if (index in entries.indices && entries[index] == result.entry) {
+                if (existingPos >= 0 && entries[existingPos] == result.entry) {
                     return@withLock
                 }
-                val newEntries = when {
-                    index < entries.size ->
-                        entries.toMutableList().also { it[index] = result.entry }
-                    index == entries.size -> entries + result.entry
-                    else -> {
-                        val client = context.activeClient()
-                        if (client != null) {
-                            scope.launch {
-                                runCatching { fetchFullSession(client, sessionId) }
-                            }
+                // A genuine gap (the requested index is more than one past the
+                // tail and we don't already hold it) means we're missing
+                // intermediate entries — upserting would leave a hole, so fall
+                // back to a full refetch. Otherwise replace-or-insert by index.
+                val maxIndex = entries.lastOrNull()?.index ?: -1
+                if (existingPos < 0 && index > maxIndex + 1) {
+                    val client = context.activeClient()
+                    if (client != null) {
+                        scope.launch {
+                            runCatching { fetchFullSession(client, sessionId) }
                         }
-                        return@withLock
                     }
+                    return@withLock
                 }
+                val newEntries = upsertEntryAtIndex(entries, index, result.entry)
                 val updated = current.value.copy(entries = newEntries)
                 _session.value = UiData.Loaded(updated)
                 reconcileOptimisticLocked(newEntries)
@@ -1372,23 +1387,15 @@ internal class SessionDetailStore(
      * self-heal once the socket is back. Bounded by the (small) number of
      * stuck slots; each fetch is itself retry- and dedup-guarded.
      *
-     * **Index precondition:** relies on the store-wide invariant that list
-     * position == server index (the same assumption `onMessageAppended`'s
-     * `fetchAndReplaceEntry(payload.entryIndex)` already makes). This is safe
-     * because stuck tool-call placeholders only arise during active streaming
-     * sessions that have not been paginated backward via loadOlder, so
-     * list position 0 always corresponds to server index 0.
+     * Addresses each slot by its SERVER index ([EntrySummary.index]), so it
+     * is correct even on a paginated window where list position != index.
      */
     private fun healIncompletePlaceholders(sessionId: String) {
         if (openSessionId != sessionId) return
         val loaded = _session.value as? UiData.Loaded ?: return
-        // Use the list position as the entry index: placeholders from
-        // `applyAppendedPlaceholder` carry the default `index = -1` (the
-        // notification doesn't echo a server index), and `fetchAnd
-        // ReplaceEntry` itself addresses entries by list position.
-        loaded.value.entries.forEachIndexed { position, entry ->
-            if (entry.role == EntryRoleDto.ToolCall && entry.toolCall == null) {
-                fetchAndReplaceEntry(sessionId, position)
+        loaded.value.entries.forEach { entry ->
+            if (entry.role == EntryRoleDto.ToolCall && entry.toolCall == null && entry.index >= 0) {
+                fetchAndReplaceEntry(sessionId, entry.index)
             }
         }
     }

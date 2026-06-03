@@ -72,8 +72,8 @@ class SessionEntryMergeTest {
     }
 
     @Test
-    fun `append at end - entryIndex equals size - lands at the end`() {
-        val current = listOf(entry("user", "a"), entry("assistant", "b"))
+    fun `append - entryIndex one past the max index - lands at the end`() {
+        val current = listOf(entry("user", "a", index = 0), entry("assistant", "b", index = 1))
         val out = applyAppendedPlaceholder(
             current = current,
             payload = payload(entryIndex = 2, role = "assistant", preview = "c"),
@@ -82,11 +82,12 @@ class SessionEntryMergeTest {
         val entries = (out as AppendedPlaceholderOutcome.Replaced).entries
         assertEquals(3, entries.size)
         assertEquals("c", entries[2].preview)
+        assertEquals(2, entries[2].index)
     }
 
     @Test
-    fun `in-place replace - entryIndex less than size - overwrites the slot without growing`() {
-        val current = listOf(entry("user", "a"), entry("assistant", "stale"))
+    fun `in-place replace - existing index - overwrites the slot without growing`() {
+        val current = listOf(entry("user", "a", index = 0), entry("assistant", "stale", index = 1))
         val out = applyAppendedPlaceholder(
             current = current,
             payload = payload(entryIndex = 1, role = "assistant", preview = "fresh"),
@@ -100,8 +101,8 @@ class SessionEntryMergeTest {
     }
 
     @Test
-    fun `out-of-range entryIndex returns OutOfRange so caller refetches`() {
-        val current = listOf(entry("user", "a"))
+    fun `gap above the max index returns OutOfRange so caller refetches`() {
+        val current = listOf(entry("user", "a", index = 0))
         val out = applyAppendedPlaceholder(
             current = current,
             payload = payload(entryIndex = 5, role = "assistant", preview = "future"),
@@ -109,9 +110,52 @@ class SessionEntryMergeTest {
         assertEquals(AppendedPlaceholderOutcome.OutOfRange, out)
     }
 
+    // ---- the class-eliminating cases: a paginated WINDOW where list
+    //      position != server index. The old size-based logic refetched the
+    //      whole transcript on every append/update here; index-based does not.
+
+    @Test
+    fun `append onto a paginated window keys on index not position`() {
+        // Window holds indices 878..879 (list positions 0..1).
+        val current = listOf(entry("assistant", "x", index = 878), entry("assistant", "y", index = 879))
+        val out = applyAppendedPlaceholder(
+            current = current,
+            payload = payload(entryIndex = 880, role = "assistant", preview = "z"),
+        )
+        assertTrue(out is AppendedPlaceholderOutcome.Replaced)
+        val entries = (out as AppendedPlaceholderOutcome.Replaced).entries
+        assertEquals(3, entries.size)
+        assertEquals(880, entries[2].index)
+        assertEquals("z", entries[2].preview)
+    }
+
+    @Test
+    fun `in-place update onto a paginated window keys on index not position`() {
+        val current = listOf(entry("assistant", "x", index = 878), entry("assistant", "stale", index = 879))
+        val out = applyAppendedPlaceholder(
+            current = current,
+            payload = payload(entryIndex = 879, role = "assistant", preview = "fresh"),
+        )
+        assertTrue(out is AppendedPlaceholderOutcome.Replaced)
+        val entries = (out as AppendedPlaceholderOutcome.Replaced).entries
+        assertEquals(2, entries.size)
+        assertEquals("fresh", entries[1].preview)
+        assertEquals(879, entries[1].index)
+    }
+
+    @Test
+    fun `gap above a paginated window returns OutOfRange`() {
+        val current = listOf(entry("assistant", "x", index = 878), entry("assistant", "y", index = 879))
+        val out = applyAppendedPlaceholder(
+            current = current,
+            payload = payload(entryIndex = 882, role = "assistant", preview = "z"),
+        )
+        assertEquals(AppendedPlaceholderOutcome.OutOfRange, out)
+    }
+
     @Test
     fun `idempotent — replaying the same payload twice yields identical results`() {
-        val current = listOf(entry("user", "a"), entry("assistant", "old"))
+        val current = listOf(entry("user", "a", index = 0), entry("assistant", "old", index = 1))
         val p = payload(entryIndex = 1, role = "assistant", preview = "new")
         val first = applyAppendedPlaceholder(current, p) as AppendedPlaceholderOutcome.Replaced
         val second = applyAppendedPlaceholder(first.entries, p) as AppendedPlaceholderOutcome.Replaced
@@ -120,13 +164,51 @@ class SessionEntryMergeTest {
 
     @Test
     fun `does not mutate the input list`() {
-        val current = mutableListOf(entry("user", "a"))
+        val current = mutableListOf(entry("user", "a", index = 0))
         val before = current.toList()
         applyAppendedPlaceholder(
             current = current,
             payload = payload(entryIndex = 0, role = "user", preview = "MUTATED"),
         )
         assertEquals(before, current, "input list must not be mutated")
+    }
+
+    // -------------------------------------------------------------------------
+    // upsertEntryAtIndex
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `upsert replaces the slot with the matching index in a window`() {
+        val current = listOf(entry("assistant", "x", index = 878), entry("assistant", "ph", index = 879))
+        val out = upsertEntryAtIndex(current, 879, entry("assistant", "full body", index = 879))
+        assertEquals(2, out.size)
+        assertEquals("full body", out[1].preview)
+        assertEquals(879, out[1].index)
+    }
+
+    @Test
+    fun `upsert inserts at the sorted position when the index is absent`() {
+        val current = listOf(entry("user", "a", index = 0), entry("assistant", "c", index = 2))
+        val out = upsertEntryAtIndex(current, 1, entry("assistant", "b", index = 1))
+        assertEquals(listOf(0, 1, 2), out.map { it.index })
+        assertEquals("b", out[1].preview)
+    }
+
+    @Test
+    fun `upsert appends when the index is past the tail`() {
+        val current = listOf(entry("user", "a", index = 0))
+        val out = upsertEntryAtIndex(current, 1, entry("assistant", "b", index = 1))
+        assertEquals(listOf(0, 1), out.map { it.index })
+    }
+
+    @Test
+    fun `upsert stamps the requested index onto an entry the server left un-indexed`() {
+        // get_session_entry may return index = -1 on a pre-R-6e server; the
+        // store addresses by the requested index, so the stored entry must
+        // carry it (else it would render with a pos/hash key, not idx:N).
+        val current = listOf(entry("user", "a", index = 0))
+        val out = upsertEntryAtIndex(current, 1, entry("assistant", "b", index = -1))
+        assertEquals(1, out[1].index)
     }
 
     @Test
@@ -137,7 +219,7 @@ class SessionEntryMergeTest {
         // merge a SECOND copy of the same entry — two list slots then resolve
         // to the same `idx:N` LazyColumn key and the app hard-crashes
         // ("Key idx:N was already used").
-        val current = listOf(entry("user", "a"), entry("assistant", "b"))
+        val current = listOf(entry("user", "a", index = 0), entry("assistant", "b", index = 1))
         val out = applyAppendedPlaceholder(
             current = current,
             payload = payload(entryIndex = 2, role = "assistant", preview = "c"),
