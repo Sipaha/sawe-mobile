@@ -1782,69 +1782,73 @@ private fun AssistantBubble(entry: EntrySummary) {
 private const val COMPACT_PROMPT_HEADING = "# Compact this session and prepare a clean handoff"
 
 /**
- * Collapsible placeholder for the auto-generated compact-context prompt —
- * a large, agent-only template the editor injects on a Compact action.
- * Default collapsed: the user never needs to read it and asked not to have
- * to scroll past it (mirrors the desktop's folded one-line strip). Tap the
- * header to expand. Rendered on the user (right) side because the prompt is
- * delivered as a user message.
+ * Distinct, tappable chip standing in for the auto-generated compact-context
+ * prompt — a large, agent-only template the editor injects on a Compact
+ * action. Tapping opens the full prompt in a dialog rather than expanding it
+ * inline: the prompt is hundreds of lines and inline expansion balloons the
+ * transcript scroll. Mirrors the desktop's chip + popover. Rendered on the
+ * user (right) side because the prompt is delivered as a user message.
  */
 @Composable
 private fun CompactPromptCard(bodyText: String, index: Int) {
-    var expanded by rememberSaveable(index) { mutableStateOf(false) }
+    var showDialog by rememberSaveable(index) { mutableStateOf(false) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(start = 48.dp),
         horizontalArrangement = Arrangement.End,
     ) {
+        // Accent-tinted container + ripple makes it read clearly as a
+        // tappable affordance, distinct from ordinary message bubbles.
         Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant,
-            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            onClick = { showDialog = true },
+            color = MaterialTheme.colorScheme.secondaryContainer,
+            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
             shape = RoundedCornerShape(12.dp),
             tonalElevation = 0.dp,
             modifier = Modifier.widthIn(max = 360.dp),
         ) {
-            Column {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { expanded = !expanded }
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                ) {
-                    Text(
-                        text = "Compact-context request",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Icon(
-                        imageVector = if (expanded) {
-                            Icons.Filled.KeyboardArrowUp
-                        } else {
-                            Icons.Filled.KeyboardArrowDown
-                        },
-                        contentDescription = if (expanded) {
-                            "Collapse compact-context prompt"
-                        } else {
-                            "Expand compact-context prompt"
-                        },
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
-                if (expanded) {
-                    SelectionContainer {
+            Text(
+                text = "🗜  Compact-context request",
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            )
+        }
+    }
+
+    if (showDialog) {
+        Dialog(onDismissRequest = { showDialog = false }) {
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.onSurface,
+                shape = RoundedCornerShape(16.dp),
+                tonalElevation = 6.dp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 560.dp),
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Compact-context request",
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier.weight(1f),
+                        )
+                        IconButton(onClick = { showDialog = false }) {
+                            Icon(
+                                imageVector = Icons.Filled.Close,
+                                contentDescription = "Close",
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    SelectionContainer(
+                        modifier = Modifier.verticalScroll(rememberScrollState()),
+                    ) {
                         Text(
                             text = bodyText.trim(),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(
-                                start = 12.dp,
-                                end = 12.dp,
-                                bottom = 10.dp,
-                            ),
                         )
                     }
                 }
