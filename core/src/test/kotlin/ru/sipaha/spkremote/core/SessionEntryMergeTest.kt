@@ -128,6 +128,88 @@ class SessionEntryMergeTest {
         assertEquals(before, current, "input list must not be mutated")
     }
 
+    @Test
+    fun `appended placeholder carries the server entryIndex`() {
+        // The placeholder MUST be stamped with the notification's server
+        // index. A sentinel index (-1) makes it invisible to the index-based
+        // dedup in resumeSession / loadOlder, which lets a racing tail-resync
+        // merge a SECOND copy of the same entry — two list slots then resolve
+        // to the same `idx:N` LazyColumn key and the app hard-crashes
+        // ("Key idx:N was already used").
+        val current = listOf(entry("user", "a"), entry("assistant", "b"))
+        val out = applyAppendedPlaceholder(
+            current = current,
+            payload = payload(entryIndex = 2, role = "assistant", preview = "c"),
+        ) as AppendedPlaceholderOutcome.Replaced
+        assertEquals(2, out.entries[2].index)
+    }
+
+    @Test
+    fun `in-place placeholder replace also carries the server entryIndex`() {
+        val current = listOf(entry("user", "a"), entry("assistant", "stale", index = 1))
+        val out = applyAppendedPlaceholder(
+            current = current,
+            payload = payload(entryIndex = 1, role = "assistant", preview = "fresh"),
+        ) as AppendedPlaceholderOutcome.Replaced
+        assertEquals(1, out.entries[1].index)
+    }
+
+    @Test
+    fun `placeholder then racing tail-resync does not duplicate the entry index`() {
+        // End-to-end repro of the "Key idx:N already used" crash. While the
+        // agent streams, a tail-resync `get_session(after_index = N-1)` is in
+        // flight when `message_appended(N)` lands. Sequence:
+        //   1. message_appended adds a placeholder for index N.
+        //   2. the in-flight resync returns entry N; resumeSession dedups
+        //      incoming entries by index, then appends the survivors.
+        //   3. fetchAndReplaceEntry(N) replaces list POSITION N in place.
+        // If the placeholder doesn't carry index N, step 2's dedup can't see
+        // it, so entry N is appended a second time and step 3 turns the
+        // placeholder slot into a duplicate — two slots with index N.
+        val full = listOf(
+            entry("user", "a", index = 0),
+            entry("assistant", "b", index = 1),
+            entry("user", "c", index = 2),
+        )
+
+        val afterPlaceholder = (
+            applyAppendedPlaceholder(
+                current = full,
+                payload = payload(entryIndex = 3, role = "assistant", preview = "d"),
+            ) as AppendedPlaceholderOutcome.Replaced
+            ).entries
+
+        val afterResync = resumeMerge(
+            current = afterPlaceholder,
+            fetched = listOf(entry("assistant", "d", index = 3)),
+        )
+
+        // fetchAndReplaceEntry(3) replaces list position 3.
+        val afterReplace = afterResync.toMutableList().also {
+            if (3 < it.size) it[3] = entry("assistant", "d", index = 3)
+        }
+
+        assertEquals(
+            1,
+            afterReplace.count { it.index == 3 },
+            "a placeholder + racing resync must not yield two slots with index 3",
+        )
+    }
+
+    /**
+     * Faithful inline model of the index-based dedup the store performs in
+     * `resumeSession` / `loadOlder`: drop incoming entries whose index is
+     * already present locally, then append the survivors.
+     */
+    private fun resumeMerge(
+        current: List<EntrySummary>,
+        fetched: List<EntrySummary>,
+    ): List<EntrySummary> {
+        val existing = current.mapNotNull { it.index.takeIf { i -> i >= 0 } }.toHashSet()
+        val fresh = fetched.filterNot { it.index >= 0 && existing.contains(it.index) }
+        return current + fresh
+    }
+
     // -------------------------------------------------------------------------
     // reconcileOptimisticContent
     // -------------------------------------------------------------------------

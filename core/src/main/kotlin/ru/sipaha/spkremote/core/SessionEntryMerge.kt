@@ -57,9 +57,20 @@ fun applyAppendedPlaceholder(
     // entries (server-side `event_sources::build_message_appended_payload`),
     // so we can pre-stamp the placeholder and keep the status as
     // `Delivered` from the moment the slot exists.
+    // Stamp the server index onto the placeholder. Without it the slot
+    // carries the sentinel `index = -1` and is invisible to the index-based
+    // dedup in `SessionDetailStore.resumeSession` / `loadOlder` — a
+    // tail-resync `after_index` diff that was already in flight when this
+    // notification landed then re-merges the SAME entry as a second slot,
+    // and the subsequent position-based `fetchAndReplaceEntry` turns the
+    // placeholder into a duplicate. Two slots with the same index resolve to
+    // the same `idx:N` LazyColumn key and crash the chat
+    // ("Key idx:N was already used"). Carrying the real index keeps the
+    // placeholder a first-class indexed entry the dedup can recognise.
     val placeholder = EntrySummary(
         role = payload.role,
         preview = payload.preview,
+        index = payload.entryIndex,
         clientSendId = payload.clientSendId,
         clientSendIds = payload.clientSendIds,
         createdMs = payload.createdMs,
