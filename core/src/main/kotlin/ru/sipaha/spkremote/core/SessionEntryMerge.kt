@@ -128,6 +128,33 @@ fun upsertEntryAtIndex(
 }
 
 /**
+ * True when [entries] (sorted ascending by index) form a CONTIGUOUS window
+ * anchored at the session's newest entry:
+ *   - contiguous — no holes between the oldest and newest loaded index;
+ *   - tail-anchored — the newest loaded index is the server's newest
+ *     (`totalCount - 1`).
+ *
+ * This is the integrity invariant a resume / `after_index` diff merge must
+ * preserve. A paginated window legitimately omits OLDER entries, so
+ * `entries.size < totalCount` is NOT a problem (that's what `loadOlder` is
+ * for) — checking size against totalCount instead wrongly nukes a scrolled-up
+ * reader's loaded-older window on every resync tick. A hole, or a window that
+ * doesn't reach the newest entry, DOES mean the diff fell short → refetch.
+ *
+ * [totalCount] < 0 (unknown / pre-R-6e) relaxes the tail-anchor requirement to
+ * contiguity only. Empty [entries] counts as complete only when the session is
+ * itself empty (or totalCount unknown).
+ */
+fun isContiguousTailWindow(entries: List<EntrySummary>, totalCount: Int): Boolean {
+    if (entries.isEmpty()) return totalCount <= 0
+    val oldest = entries.first().index
+    val newest = entries.last().index
+    val contiguous = entries.size == (newest - oldest + 1)
+    val tailAnchored = totalCount < 0 || newest >= totalCount - 1
+    return contiguous && tailAnchored
+}
+
+/**
  * Defense-in-depth guard for the chat list: collapse any entries that share
  * a server `index` (>= 0) down to their FIRST occurrence, preserving order.
  *

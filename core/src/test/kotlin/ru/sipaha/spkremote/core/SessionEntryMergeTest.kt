@@ -6,6 +6,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -277,6 +278,57 @@ class SessionEntryMergeTest {
             afterReplace.count { it.index == 3 },
             "a placeholder + racing resync must not yield two slots with index 3",
         )
+    }
+
+    // -------------------------------------------------------------------------
+    // isContiguousTailWindow (pagination-aware resume integrity check)
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `paginated window reaching the newest entry is a valid tail window`() {
+        // The user scrolled up + loaded older: window holds 829..928, the
+        // session has 929 entries total. size (100) < totalCount (929) is the
+        // NORMAL paginated state and must NOT trigger a refetch/reset.
+        val window = (829..928).map { entry("assistant", "e$it", index = it) }
+        assertTrue(isContiguousTailWindow(window, totalCount = 929))
+    }
+
+    @Test
+    fun `full from-zero transcript is a valid tail window`() {
+        val all = (0..3).map { entry("assistant", "e$it", index = it) }
+        assertTrue(isContiguousTailWindow(all, totalCount = 4))
+    }
+
+    @Test
+    fun `window missing the newest entry is not tail-anchored`() {
+        // Have 829..900 but the session's newest is 928 — the diff fell short.
+        val window = (829..900).map { entry("assistant", "e$it", index = it) }
+        assertFalse(isContiguousTailWindow(window, totalCount = 929))
+    }
+
+    @Test
+    fun `window with a hole is not contiguous`() {
+        val holed = listOf(
+            entry("assistant", "a", index = 0),
+            entry("assistant", "b", index = 1),
+            entry("assistant", "z", index = 928),
+        )
+        assertFalse(isContiguousTailWindow(holed, totalCount = 929))
+    }
+
+    @Test
+    fun `unknown totalCount relaxes the tail anchor to contiguity only`() {
+        val window = (829..928).map { entry("assistant", "e$it", index = it) }
+        assertTrue(isContiguousTailWindow(window, totalCount = -1))
+        val holed = listOf(entry("assistant", "a", index = 0), entry("assistant", "z", index = 5))
+        assertFalse(isContiguousTailWindow(holed, totalCount = -1))
+    }
+
+    @Test
+    fun `empty entries is complete only for an empty or unknown session`() {
+        assertTrue(isContiguousTailWindow(emptyList(), totalCount = 0))
+        assertTrue(isContiguousTailWindow(emptyList(), totalCount = -1))
+        assertFalse(isContiguousTailWindow(emptyList(), totalCount = 5))
     }
 
     // -------------------------------------------------------------------------

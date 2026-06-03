@@ -53,6 +53,7 @@ import ru.sipaha.spkremote.core.RemoteClient
 import ru.sipaha.spkremote.core.ResetContextResult
 import ru.sipaha.spkremote.core.StartCompactResult
 import ru.sipaha.spkremote.core.applyAppendedPlaceholder
+import ru.sipaha.spkremote.core.isContiguousTailWindow
 import ru.sipaha.spkremote.core.mergeSessionHistory
 import ru.sipaha.spkremote.core.parseExpiredSendMessage
 import ru.sipaha.spkremote.core.reconcileOptimistic
@@ -1324,8 +1325,19 @@ internal class SessionDetailStore(
                     }
                     val merged = if (fresh.isEmpty()) latest.value.entries else latest.value.entries + fresh
                     val mergedTotal = maxOf(latest.value.totalCount, result.totalCount)
-                    if (result.totalCount >= 0 && merged.size < result.totalCount) {
-                        // Truly fell short — kick a full refetch.
+                    // Pagination-aware integrity check. A windowed view (the
+                    // user scrolled up + loaded older, or any session > one
+                    // page) LEGITIMATELY has `merged.size < totalCount` — the
+                    // older entries simply aren't loaded, which is what
+                    // `loadOlder` is for. Comparing size to totalCount instead
+                    // nuked the loaded-older window and the reading position on
+                    // EVERY tail-resync tick of any paginated session (a reset
+                    // ~every 4s while the agent runs). [isContiguousTailWindow]
+                    // holds when the merge is a hole-free window reaching the
+                    // server's newest entry; anything else means the
+                    // `after_index` diff fell short (a gap or missing newer
+                    // entries) → full refetch.
+                    if (!isContiguousTailWindow(merged, result.totalCount)) {
                         scope.launch { fetchInitialPage(active, sessionId) }
                         return@withLock
                     }
