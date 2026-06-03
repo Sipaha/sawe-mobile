@@ -24,9 +24,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -50,6 +50,7 @@ import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.items
@@ -888,60 +889,38 @@ private fun ChatList(
     val lazyState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
-    // Auto-scroll behaviour: with reverseLayout = true, item 0 is the
-    // newest entry visually pinned to the bottom of the viewport.
-    // `atBottom` is used by the "jump to bottom" FAB — strict index 0
-    // + offset 0 = the viewport is showing the newest entry flush at
-    // the bottom edge.
-    val atBottom by remember {
-        derivedStateOf {
-            lazyState.firstVisibleItemIndex == 0 && lazyState.firstVisibleItemScrollOffset == 0
-        }
-    }
-    // Identity of the newest entry (= `combined.last()`; reverseLayout
-    // maps it to item 0). Keying the auto-scroll on this — not just on
-    // `combined.size` — catches the optimistic→server-echo swap, where a
-    // pending bubble is popped AND its confirmed server entry is appended
-    // in the same frame: size is unchanged, but the newest slot's
-    // identity flips (`csid:N` → `idx:M`). Without this the just-sent
-    // message landed below the fold and the user had to scroll down to
-    // it. Content-only updates to an existing entry (streaming markdown)
-    // keep the same key, so they don't trigger spurious scrolls.
+    // Identity of the newest entry (= `combined.last()`, the last list item).
+    // Keying the auto-scroll on this — not just on `combined.size` — catches
+    // the optimistic→server-echo swap, where a pending bubble is popped AND
+    // its confirmed server entry is appended in the same frame: size is
+    // unchanged, but the newest slot's identity flips (`csid:N` → `idx:M`).
     val newestEntryKey: String? = combined.lastOrNull()?.let { entry ->
         entry.clientSendId?.let { "csid:$it" }
             ?: if (entry.index >= 0) "idx:${entry.index}"
             else "role:${entry.role}#${entry.preview.hashCode()}"
     }
-    // The "Thinking…" sentinel slot below renders as item 0 in
-    // reverseLayout source order when the agent is Running and the
-    // latest entry is still the user message. Lift the check up here
-    // so the auto-scroll keys on the row appearing — without that the
-    // row materialised below the fold and the user had to scroll down
-    // to see it.
+    // Length of the newest entry's body. Content-only streaming updates keep
+    // the same key, so the auto-scroll keys on this too — a growing reply
+    // changes its length, which (while pinned) re-pins to the new bottom. When
+    // the user has scrolled up to read, the follow effect is gated off, so the
+    // growth (which happens BELOW the viewport in natural layout) never moves
+    // their read position.
+    val newestContentLen: Int = combined.lastOrNull()
+        ?.let { (it.markdown ?: it.preview).length } ?: 0
+    // The "Thinking…" sentinel renders as the LAST list item (newest end)
+    // when the agent is Running and the latest entry is still the user
+    // message. Lifted here so the auto-scroll keys on the row appearing.
     val showThinking = sessionDisplayState == DisplayState.Running &&
         combined.lastOrNull()?.role == ru.sipaha.spkremote.core.EntryRoleDto.User
 
-    // Sticky-bottom flag: drives auto-scroll on content growth. Starts
-    // true and flips off ONLY when a user-initiated drag lands the
-    // viewport away from the bottom. Auto-scroll animations don't toggle
-    // it, so an interrupted `animateScrollToItem(0)` (next chunk arrives
-    // mid-flight, cancelling the previous animate) doesn't make the
-    // chat "un-stick" — the next size/key change just re-fires the
-    // animate. Previously the pin/un-pin decision sampled the live
-    // scroll position every time, so an interrupted animate at offset
-    // ≠ 0 read as "user scrolled away".
+    // Follow-the-newest flag. true = pinned to the bottom, so auto-scroll keeps
+    // the newest content in view as it streams; false = the user dragged up to
+    // read and must be left alone. A LATCHED flag (not a live position sample)
+    // so an in-flight programmatic scroll mid-stream doesn't read as "user
+    // scrolled away".
     val stickyBottom = remember { mutableStateOf(true) }
-    val isUserDragging by lazyState.interactionSource.collectIsDraggedAsState()
     LaunchedEffect(lazyState) {
-        // Unstick the moment the user starts dragging — they've taken
-        // control of the viewport, so a streaming reply they're reading
-        // mid-message must stop yanking back to the bottom.
-        //
-        // Previously sticky was resampled only at drag-END gated on
-        // `!isScrollInProgress`. During active streaming the back-to-back
-        // `animateScrollToItem(0)` calls keep `isScrollInProgress`
-        // continuously true, so that resample was starved and sticky never
-        // flipped off — hence the jump-on-every-update while scrolled up.
+        // Unstick the instant the user starts dragging — they've taken control.
         launch {
             lazyState.interactionSource.interactions.collect { i ->
                 if (i is androidx.compose.foundation.interaction.DragInteraction.Start) {
@@ -949,53 +928,40 @@ private fun ChatList(
                 }
             }
         }
-        // Re-arm sticky-bottom only when the viewport SETTLES at the bottom
-        // (scroll finished, index 0 / offset 0) — the user scrolled back
-        // down or tapped jump-to-bottom. Gating on `!isScrollInProgress`
-        // avoids a race at drag-start (the first drag frame is still at the
-        // bottom) and is harmless during streaming (sticky is already true
-        // there, so an in-progress auto-scroll doesn't need to re-arm).
+        // Re-arm only when the viewport SETTLES at the bottom (scroll finished,
+        // nothing more below) — the user scrolled back down or tapped jump-to-
+        // bottom. Gating on `!isScrollInProgress` avoids a drag-start race.
         launch {
             androidx.compose.runtime.snapshotFlow {
-                !lazyState.isScrollInProgress &&
-                    lazyState.firstVisibleItemIndex == 0 &&
-                    lazyState.firstVisibleItemScrollOffset == 0
+                !lazyState.isScrollInProgress && !lazyState.canScrollForward
             }.collect { settledAtBottom ->
                 if (settledAtBottom) stickyBottom.value = true
             }
         }
     }
-    LaunchedEffect(combined.size, newestEntryKey, showThinking) {
-        if (combined.isEmpty()) return@LaunchedEffect
-        if (isUserDragging) return@LaunchedEffect
-        if (stickyBottom.value) {
-            lazyState.animateScrollToItem(0)
-        }
-    }
-    // Counter the reverseLayout drift bug: when item 0 (the newest
-    // bubble, typically the streaming agent reply) grows by ΔH and the
-    // user is NOT pinned to the bottom, the LazyColumn measures `offset`
-    // from item 0's BOTTOM edge — so growth shifts the visible portion
-    // of item 0 DOWN by ΔH within the bubble. The user, mid-read of
-    // the message's start, perceives the viewport "scrolling itself
-    // forward through the text". Compensate by scrolling forward by ΔH,
-    // which keeps the visible content rooted at the same offset from
-    // item 0's TOP. No-op when pinned — there the natural anchoring is
-    // what we want (latest tokens visible at the bubble's top edge).
-    LaunchedEffect(lazyState) {
-        var prevSize: Int? = null
-        androidx.compose.runtime.snapshotFlow {
-            lazyState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == 0 }?.size
-        }.collect { size ->
-            val prev = prevSize
-            prevSize = size
-            if (size == null || prev == null) return@collect
-            val delta = size - prev
-            if (delta <= 0) return@collect
-            val pinned = lazyState.firstVisibleItemIndex == 0 &&
-                lazyState.firstVisibleItemScrollOffset == 0
-            if (pinned) return@collect
-            lazyState.scrollBy(delta.toFloat())
+    // Keep the newest content in view while following. Fires on new entries
+    // (`combined.size`), a new newest entry (`newestEntryKey`), the thinking
+    // row, and — for a streaming reply — the newest body GROWING
+    // (`newestContentLen`). In natural top-anchored layout the growth is at the
+    // BOTTOM of the last item, so when the user has scrolled up to read
+    // (stickyBottom == false) NOTHING scrolls — the read position is stable
+    // with no drift and no per-frame compensation. Only the follower pinned at
+    // the bottom is moved. This replaces the reverseLayout + drift-compensation
+    // design, which jittered the read position on every token.
+    LaunchedEffect(combined.size, newestEntryKey, showThinking, newestContentLen) {
+        if (combined.isEmpty() || !stickyBottom.value) return@LaunchedEffect
+        val info = lazyState.layoutInfo
+        val last = info.visibleItemsInfo.lastOrNull()
+        if (last != null && last.index == info.totalItemsCount - 1) {
+            // Newest item already on screen — smoothly consume just the
+            // below-fold overshoot. For a growing streaming reply this nudges
+            // down by the new tokens' height with no jump-to-top flicker.
+            val overshoot = last.offset + last.size - info.viewportEndOffset
+            if (overshoot > 0) lazyState.scrollBy(overshoot.toFloat())
+        } else {
+            // Newest item off-screen (a new entry landed, or initial open) —
+            // snap to it.
+            lazyState.scrollToChatBottom()
         }
     }
 
@@ -1009,27 +975,20 @@ private fun ChatList(
     val hasOlder: Boolean = oldestLoadedIndex > 0
 
     // Auto-trigger when the user scrolls towards the top of loaded history.
-    // With reverseLayout = true and our `combined.asReversed()` rendering,
-    // the LAST item in the lazy list (highest index) is the OLDEST entry —
-    // so "near top of history" = firstVisibleItemIndex within a small
-    // window of totalItemsCount. `distinctUntilChanged()` keeps the
-    // collector quiet between identical pairs (e.g. recompositions that
-    // didn't actually shift the viewport).
+    // Natural top-anchored layout: the history-edge row is item 0 and the
+    // OLDEST entries follow it, so "near top of history" = firstVisibleItemIndex
+    // within a small window of 0. Prepending older entries keeps the visible
+    // item anchored by its stable key, so the viewport doesn't jump.
+    // `distinctUntilChanged()` keeps the collector quiet between identical
+    // values (recompositions that didn't shift the viewport).
     LaunchedEffect(lazyState, hasOlder) {
         if (!hasOlder) return@LaunchedEffect
-        androidx.compose.runtime.snapshotFlow {
-            val info = lazyState.layoutInfo
-            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-            lastVisible to info.totalItemsCount
-        }
+        androidx.compose.runtime.snapshotFlow { lazyState.firstVisibleItemIndex }
             .distinctUntilChanged()
-            .collect { (lastVisible, total) ->
-                // Trigger when the oldest-area sentinel is within ~5 items
-                // of the viewport bottom-of-history (= reverse-layout top).
-                // `total - 5` keeps the trigger one screen ahead of the
-                // user hitting the literal end — gives the fetch a head
-                // start so the user perceives near-instant loading.
-                if (total > 0 && lastVisible >= total - 5 && !isLoadingOlder) {
+            .collect { firstVisible ->
+                // Trigger one screen ahead of the literal top so the fetch has
+                // a head start and loading feels near-instant.
+                if (firstVisible <= 5 && !isLoadingOlder) {
                     onRequestOlder()
                 }
             }
@@ -1044,51 +1003,42 @@ private fun ChatList(
         } else {
             // C3: weave date-separator rows into the timeline. The pure
             // helper produces a CHRONOLOGICAL list (separator BEFORE its
-            // day's messages); `.asReversed()` flips it for reverseLayout
-            // so the newest message stays at reversed index 0 (flush at the
-            // bottom) and a day's separator sits ABOVE that day's messages.
-            // This preserves the auto-scroll invariant: `combined.last()`
-            // is still the newest entry and maps to the FIRST Message in
-            // `timeline` — `animateScrollToItem(0)` reaches it as long as
-            // no separator precedes it in reversed order (the trailing
-            // separator of the newest day would chronologically come
-            // BEFORE the newest message, i.e. AFTER it post-reversal, so
-            // index 0 is always a Message when a newest message exists).
+            // day's messages) — exactly the order a natural top-anchored
+            // LazyColumn wants: oldest at the top, newest (`combined.last()`)
+            // as the last item flush at the bottom, each day's separator
+            // ABOVE that day's messages.
             val timeline = remember(combined) {
                 ru.sipaha.spkremote.core.withDateSeparators(
                     combined,
                     java.time.ZoneId.systemDefault(),
-                ).asReversed()
+                )
             }
             val today = remember(combined) { java.time.LocalDate.now() }
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 state = lazyState,
-                reverseLayout = true,
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     horizontal = 12.dp,
                     vertical = 8.dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                // "Thinking…" sentinel at the logical bottom of the chat
-                // (= first item in reverseLayout source order). Visible
-                // only when the agent is Running AND no assistant entry
-                // has appeared yet for the current turn — i.e. the most
-                // recent message in the timeline is still a user bubble.
-                // The moment the first assistant chunk arrives, the most-
-                // recent message becomes Assistant and this row hides,
-                // leaving the streaming reply in its place. [showThinking]
-                // is lifted to the enclosing scope so the auto-scroll
-                // trigger keys on it — appearance of the row scrolls it
-                // into view instead of materialising it below the fold.
-                if (showThinking) {
-                    item("thinking-row") { ThinkingRow() }
+                // R-6e: history-edge affordance at the TOP (oldest end) of the
+                // list — item 0. Two states:
+                //   - hasOlder && isLoadingOlder: spinner row.
+                //   - hasOlder && !isLoadingOlder: "Load older" tappable. The
+                //     scroll trigger usually fires this automatically, but the
+                //     explicit tap recovers if the trigger missed (e.g. a fling
+                //     that stopped just shy of the trigger window).
+                item("history-edge") {
+                    HistoryEdgeRow(
+                        isLoadingOlder = isLoadingOlder,
+                        hasOlder = hasOlder,
+                        onTap = onRequestOlder,
+                    )
                 }
-                // reverseLayout flips list order — pass the reversed list
-                // so newest-at-the-bottom maps to item 0. itemsIndexed
-                // keeps the stable original index for any future need
-                // (e.g. jump-to-message), even though we don't expose it.
+                // itemsIndexed keeps the stable original index for any future
+                // need (e.g. jump-to-message), even though we don't expose it.
                 //
                 // STABLE KEYS: without `key = ...` LazyColumn falls back
                 // on positional identity, which means every
@@ -1157,30 +1107,27 @@ private fun ChatList(
                         }
                     }
                 }
-                // R-6e: history-edge affordance. Sits at the LOGICAL TOP
-                // of the visible list (= last item in the reverse-layout
-                // LazyColumn). Two states:
-                //   - hasOlder && isLoadingOlder: spinner row.
-                //   - hasOlder && !isLoadingOlder: "Load older" tappable.
-                //     The scroll trigger usually fires this automatically,
-                //     but the explicit tap gives the user a way to recover
-                //     if the trigger missed (e.g. fling stopped just shy
-                //     of the trigger window).
-                item("history-edge") {
-                    HistoryEdgeRow(
-                        isLoadingOlder = isLoadingOlder,
-                        hasOlder = hasOlder,
-                        onTap = onRequestOlder,
-                    )
+                // "Thinking…" sentinel at the BOTTOM (newest end) of the chat —
+                // the last list item. Visible only when the agent is Running
+                // AND no assistant entry has appeared yet for the current turn
+                // (the most recent message is still a user bubble). The moment
+                // the first assistant chunk arrives the most-recent message
+                // becomes Assistant and this row hides, leaving the streaming
+                // reply in its place. [showThinking] is lifted to the enclosing
+                // scope so the follow auto-scroll keys on it appearing.
+                if (showThinking) {
+                    item("thinking-row") { ThinkingRow() }
                 }
             }
         }
 
-        // "Jump to bottom" pill: only when the user has scrolled away
-        // from the newest entry. Reset-button-style FAB feels right for
-        // a chat UI but a small Surface pill works in a pinch.
+        // "Jump to bottom" pill: shown while the user is NOT following the
+        // newest entry (they scrolled up to read). Keying on the follow flag
+        // rather than a live `canScrollForward` sample avoids a flicker each
+        // streaming token, where new content briefly sits below the fold
+        // before the follow effect consumes it.
         AnimatedVisibility(
-            visible = !atBottom && combined.isNotEmpty(),
+            visible = !stickyBottom.value && combined.isNotEmpty(),
             enter = fadeIn() + slideInVertically { it / 2 },
             exit = fadeOut() + slideOutVertically { it / 2 },
             modifier = Modifier
@@ -1188,7 +1135,7 @@ private fun ChatList(
                 .padding(16.dp),
         ) {
             FloatingActionButton(
-                onClick = { scope.launch { lazyState.animateScrollToItem(0) } },
+                onClick = { scope.launch { lazyState.scrollToChatBottom(animate = true) } },
                 modifier = Modifier.heightIn(min = 40.dp),
                 containerColor = MaterialTheme.colorScheme.secondaryContainer,
                 contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -1196,6 +1143,36 @@ private fun ChatList(
                 Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Jump to bottom")
             }
         }
+    }
+}
+
+/**
+ * Scroll the chat to the very bottom (newest content), revealing the END of
+ * the last item even when it is taller than the viewport — a long streaming
+ * reply whose latest tokens sit below the fold. Instant by default so
+ * back-to-back streaming updates don't queue animations; the jump-to-bottom
+ * FAB passes [animate] = true for a smooth ride.
+ */
+private suspend fun LazyListState.scrollToChatBottom(animate: Boolean = false) {
+    if (animate) {
+        val count = layoutInfo.totalItemsCount
+        if (count == 0) return
+        animateScrollToItem(count - 1)
+    } else {
+        // Int.MAX_VALUE is coerced to the last item at measure time, so this
+        // also lands a freshly-opened chat at the newest entry before the
+        // first layout has reported a count.
+        scrollToItem(Int.MAX_VALUE)
+    }
+    // `scrollToItem` lands the item's TOP at the viewport top; if the last item
+    // is taller than the viewport its bottom is still below the fold. Nudge by
+    // the overshoot so the newest tokens are actually visible.
+    val info = layoutInfo
+    val last = info.visibleItemsInfo.lastOrNull() ?: return
+    if (last.index != info.totalItemsCount - 1) return
+    val overshoot = last.offset + last.size - info.viewportEndOffset
+    if (overshoot > 0) {
+        if (animate) animateScrollBy(overshoot.toFloat()) else scrollBy(overshoot.toFloat())
     }
 }
 
@@ -3674,14 +3651,14 @@ private fun humanReadableSize(bytes: Long): String = when {
 }
 
 /**
- * History-edge affordance rendered at the logical top of the chat list
- * (= LazyColumn's last item, with `reverseLayout = true`). Absence of
- * the "Load older messages" tap target already conveys "you're at the
- * start" — no separate sentinel is rendered for the start of history.
+ * History-edge affordance rendered at the top of the chat list (= the FIRST
+ * item in the natural top-anchored LazyColumn). Absence of the "Load older
+ * messages" tap target already conveys "you're at the start" — no separate
+ * sentinel is rendered for the start of history.
  */
 /**
- * "Thinking…" row painted at the bottom of the chat list (logical bottom =
- * the FIRST item in the reverse-layout LazyColumn) while the agent is
+ * "Thinking…" row painted at the bottom of the chat list (= the LAST item in
+ * the natural top-anchored LazyColumn) while the agent is
  * Running and hasn't started replying yet. Gives the user immediate
  * feedback that their message landed and the agent is working — without
  * this, there is a silent gap between the user bubble and the first
