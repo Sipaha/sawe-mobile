@@ -755,10 +755,11 @@ data class ResetContextResult(
  *
  * The compact orchestration is asynchronous — the server returns
  * immediately after enqueueing the compact-instructions prompt on the
- * agent's next turn ([queued] `= true`). When a precondition isn't met
- * (session busy / context below 20% / less than 30k tokens of headroom /
- * cold session), [queued] is `false` and [message] carries the
- * human-readable reason for surfacing on the UI.
+ * agent's next turn ([queued] `= true`). A cold (sleeping) session is
+ * woken first, then the prompt is queued. When a precondition isn't met
+ * (session busy / context below 20% / less than 30k tokens of headroom),
+ * [queued] is `false` and [message] carries the human-readable reason for
+ * surfacing on the UI.
  */
 @Serializable
 data class StartCompactResult(
