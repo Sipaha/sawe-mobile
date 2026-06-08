@@ -915,16 +915,39 @@ internal class SessionDetailStore(
      * — this entry point is the single seam.
      */
     fun selectSubagent(id: String?) {
-        if (id != null && _activeSubagents.value.none { it.id == id }) {
+        val target = if (id != null && _activeSubagents.value.none { it.id == id }) {
             android.util.Log.w(
                 "SessionDetailStore",
                 "selectSubagent($id) is not in active set — resetting to Main",
             )
-            _selectedSubagent.value = null
-            return
+            null
+        } else {
+            id
         }
-        _selectedSubagent.value = id
+        val changed = _selectedSubagent.value != target
+        _selectedSubagent.value = target
+        if (changed) {
+            // Server-side per-tab filtering: the held entries are the PREVIOUS
+            // tab's window, so the newly-selected tab's history isn't loaded
+            // yet. Pull a fresh first page filtered to the new tab (a tab
+            // switch is a user action — a fresh count=50 fetch is cheap and
+            // correct, and avoids an empty tab when its entries sit outside
+            // the old window).
+            val sid = openSessionId ?: return
+            val active = context.activeClient() ?: return
+            scope.launch { fetchInitialPage(active, sid) }
+        }
     }
+
+    /**
+     * The `subagent_filter` to send to `get_session` so the SERVER applies the
+     * same per-tab membership rule the desktop uses (single source of truth)
+     * and the windowed page is the SELECTED tab's entries — not a tail of all
+     * entries that, once client-filtered, can leave Main empty when a subagent
+     * dominates the tail. `null` tab (Main) → `"__main__"`; a subagent tab →
+     * its id.
+     */
+    private fun currentSubagentFilter(): String = _selectedSubagent.value ?: "__main__"
 
     override fun onSessionQueueChanged(payload: SessionQueueChangedPayload) {
         val openSid = openSessionId ?: return
@@ -1065,6 +1088,7 @@ internal class SessionDetailStore(
             put("session_id", sessionId)
             put("include_full_content", true)
             put("include_images", true)
+            put("subagent_filter", currentSubagentFilter())
         }
         val result = runCatching { active.call("remote.solution_agent.get_session", params) }
             .mapCatching { resp -> resp.decodeResultOrThrow(GetSessionResult.serializer()) }
@@ -1104,6 +1128,7 @@ internal class SessionDetailStore(
             put("session_id", sessionId)
             put("include_full_content", true)
             put("include_images", true)
+            put("subagent_filter", currentSubagentFilter())
             if (afterIndex != null) {
                 put("after_index", afterIndex)
             } else {
@@ -1132,6 +1157,7 @@ internal class SessionDetailStore(
                             put("session_id", sessionId)
                             put("include_full_content", true)
                             put("include_images", true)
+                            put("subagent_filter", currentSubagentFilter())
                             put("count", SESSION_PAGE_SIZE)
                         }
                         val fullOutcome = runCatching {
@@ -1219,6 +1245,13 @@ internal class SessionDetailStore(
         entries: List<EntrySummary>,
         newTotalCount: Int,
     ) {
+        // The disk cache is rendered instantly on reopen, and a session always
+        // reopens on Main (openSession resets selectedSubagent to null). With
+        // server-side per-tab filtering, caching a subagent tab's window would
+        // flash the wrong transcript on Main (and re-introduce the empty-Main
+        // symptom this fix removes), so only persist while viewing Main.
+        // Subagent tabs re-fetch on selection, so they need no disk cache.
+        if (_selectedSubagent.value != null) return
         val lastIdx = entries.mapNotNull { it.index.takeIf { i -> i >= 0 } }.maxOrNull()
         sessionHistoryRepository.save(
             CachedSessionHistory(
@@ -1245,6 +1278,7 @@ internal class SessionDetailStore(
             put("session_id", sessionId)
             put("include_full_content", true)
             put("include_images", true)
+            put("subagent_filter", currentSubagentFilter())
             put("before_index", oldestIndex)
             put("count", SESSION_PAGE_SIZE)
         }
@@ -1418,6 +1452,7 @@ internal class SessionDetailStore(
             put("session_id", sessionId)
             put("include_full_content", true)
             put("include_images", true)
+            put("subagent_filter", currentSubagentFilter())
         }
         scope.launch {
             val outcome = runCatching { active.call("remote.solution_agent.get_session", params) }
