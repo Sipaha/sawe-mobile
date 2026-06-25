@@ -53,7 +53,7 @@ import ru.sipaha.spkremote.core.RemoteClient
 import ru.sipaha.spkremote.core.ResetContextResult
 import ru.sipaha.spkremote.core.StartCompactResult
 import ru.sipaha.spkremote.core.applyAppendedPlaceholder
-import ru.sipaha.spkremote.core.isContiguousTailWindow
+import ru.sipaha.spkremote.core.isTailAnchoredWindow
 import ru.sipaha.spkremote.core.mergeSessionHistory
 import ru.sipaha.spkremote.core.parseExpiredSendMessage
 import ru.sipaha.spkremote.core.reconcileOptimistic
@@ -1366,12 +1366,17 @@ internal class SessionDetailStore(
                     // `loadOlder` is for. Comparing size to totalCount instead
                     // nuked the loaded-older window and the reading position on
                     // EVERY tail-resync tick of any paginated session (a reset
-                    // ~every 4s while the agent runs). [isContiguousTailWindow]
-                    // holds when the merge is a hole-free window reaching the
-                    // server's newest entry; anything else means the
-                    // `after_index` diff fell short (a gap or missing newer
-                    // entries) → full refetch.
-                    if (!isContiguousTailWindow(merged, result.totalCount)) {
+                    // ~every 4s while the agent runs). [isTailAnchoredWindow]
+                    // holds when the merge still reaches the server's newest
+                    // entry. We deliberately do NOT require dense index
+                    // contiguity: a per-tab (`subagent_filter`) view returns
+                    // SPARSE absolute indices, so interior gaps are expected —
+                    // demanding contiguity here was itself the bug that flung a
+                    // scrolled-up reader to the top every resync tick on any
+                    // filtered session with active subagents. Only a window that
+                    // falls short of the newest means the diff missed newer
+                    // entries → full refetch.
+                    if (!isTailAnchoredWindow(merged, result.totalCount)) {
                         scope.launch { fetchInitialPage(active, sessionId) }
                         return@withLock
                     }

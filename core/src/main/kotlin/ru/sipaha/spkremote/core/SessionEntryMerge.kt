@@ -128,30 +128,37 @@ fun upsertEntryAtIndex(
 }
 
 /**
- * True when [entries] (sorted ascending by index) form a CONTIGUOUS window
- * anchored at the session's newest entry:
- *   - contiguous — no holes between the oldest and newest loaded index;
- *   - tail-anchored — the newest loaded index is the server's newest
- *     (`totalCount - 1`).
+ * True when [entries] (sorted ascending by index) still reach the session's
+ * newest entry — i.e. they form a valid TAIL window that a resume /
+ * `after_index` diff merge may keep instead of destructively refetching.
  *
- * This is the integrity invariant a resume / `after_index` diff merge must
- * preserve. A paginated window legitimately omits OLDER entries, so
- * `entries.size < totalCount` is NOT a problem (that's what `loadOlder` is
- * for) — checking size against totalCount instead wrongly nukes a scrolled-up
- * reader's loaded-older window on every resync tick. A hole, or a window that
- * doesn't reach the newest entry, DOES mean the diff fell short → refetch.
+ * Tail-anchoring is the ONLY invariant checked. Index-contiguity is
+ * deliberately NOT required: a per-tab view (`subagent_filter`, default
+ * `__main__`) returns entries whose `index` is the ABSOLUTE timeline position
+ * with the OTHER tab's entries omitted (see the server's `get_session` —
+ * `EntrySummary.index` is the enumerate position over ALL entries). So a
+ * filtered tab on any session with active subagents legitimately has interior
+ * index GAPS — that is not corruption. Requiring dense contiguity here made
+ * every tail-resync tick (~4s while the agent runs) misfire on such a session:
+ * the integrity check failed, `resumeSession` ran a destructive
+ * `fetchInitialPage`/full-replace, and a scrolled-up reader got flung to the
+ * top of a freshly-reloaded tail page.
  *
- * [totalCount] < 0 (unknown / pre-R-6e) relaxes the tail-anchor requirement to
- * contiguity only. Empty [entries] counts as complete only when the session is
- * itself empty (or totalCount unknown).
+ * [totalCount] is the FILTERED entry count. Because a filtered view's entries
+ * are a subset of `[0..newestIndex]`, that count never exceeds
+ * `newestIndex + 1`, so `newest >= totalCount - 1` holds automatically for any
+ * window that reaches the newest entry, and fails only when the window
+ * genuinely falls short of the newest (the diff missed newer entries) — which
+ * is exactly when a refetch is warranted. A partial scrolled-up window
+ * (`size < totalCount`, older entries not yet loaded) stays valid. [totalCount]
+ * < 0 (unknown / pre-R-6e) treats any non-empty window as a valid tail. Empty
+ * [entries] counts as complete only when the session is itself empty (or
+ * totalCount unknown).
  */
-fun isContiguousTailWindow(entries: List<EntrySummary>, totalCount: Int): Boolean {
+fun isTailAnchoredWindow(entries: List<EntrySummary>, totalCount: Int): Boolean {
     if (entries.isEmpty()) return totalCount <= 0
-    val oldest = entries.first().index
     val newest = entries.last().index
-    val contiguous = entries.size == (newest - oldest + 1)
-    val tailAnchored = totalCount < 0 || newest >= totalCount - 1
-    return contiguous && tailAnchored
+    return totalCount < 0 || newest >= totalCount - 1
 }
 
 /**

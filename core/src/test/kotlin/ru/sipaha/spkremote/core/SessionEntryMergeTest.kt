@@ -281,7 +281,7 @@ class SessionEntryMergeTest {
     }
 
     // -------------------------------------------------------------------------
-    // isContiguousTailWindow (pagination-aware resume integrity check)
+    // isTailAnchoredWindow (pagination-aware resume integrity check)
     // -------------------------------------------------------------------------
 
     @Test
@@ -290,45 +290,53 @@ class SessionEntryMergeTest {
         // session has 929 entries total. size (100) < totalCount (929) is the
         // NORMAL paginated state and must NOT trigger a refetch/reset.
         val window = (829..928).map { entry("assistant", "e$it", index = it) }
-        assertTrue(isContiguousTailWindow(window, totalCount = 929))
+        assertTrue(isTailAnchoredWindow(window, totalCount = 929))
     }
 
     @Test
     fun `full from-zero transcript is a valid tail window`() {
         val all = (0..3).map { entry("assistant", "e$it", index = it) }
-        assertTrue(isContiguousTailWindow(all, totalCount = 4))
+        assertTrue(isTailAnchoredWindow(all, totalCount = 4))
     }
 
     @Test
     fun `window missing the newest entry is not tail-anchored`() {
         // Have 829..900 but the session's newest is 928 — the diff fell short.
         val window = (829..900).map { entry("assistant", "e$it", index = it) }
-        assertFalse(isContiguousTailWindow(window, totalCount = 929))
+        assertFalse(isTailAnchoredWindow(window, totalCount = 929))
     }
 
     @Test
-    fun `window with a hole is not contiguous`() {
-        val holed = listOf(
+    fun `sparse filtered window reaching the newest is a valid tail window`() {
+        // A per-tab (`subagent_filter`) view returns entries whose `index` is
+        // the ABSOLUTE timeline position with the other tab's entries omitted,
+        // so interior gaps are EXPECTED. totalCount is the FILTERED count (3
+        // here), and the window reaches the newest filtered entry (index 928),
+        // so it is a valid tail window — index gaps must NOT force a refetch
+        // (that was the scroll-jumps-to-top bug).
+        val sparse = listOf(
             entry("assistant", "a", index = 0),
             entry("assistant", "b", index = 1),
             entry("assistant", "z", index = 928),
         )
-        assertFalse(isContiguousTailWindow(holed, totalCount = 929))
+        assertTrue(isTailAnchoredWindow(sparse, totalCount = 3))
     }
 
     @Test
-    fun `unknown totalCount relaxes the tail anchor to contiguity only`() {
+    fun `unknown totalCount treats any non-empty window as a valid tail`() {
         val window = (829..928).map { entry("assistant", "e$it", index = it) }
-        assertTrue(isContiguousTailWindow(window, totalCount = -1))
-        val holed = listOf(entry("assistant", "a", index = 0), entry("assistant", "z", index = 5))
-        assertFalse(isContiguousTailWindow(holed, totalCount = -1))
+        assertTrue(isTailAnchoredWindow(window, totalCount = -1))
+        // Sparse/filtered windows are valid under unknown totalCount too — we
+        // can't (and must not) demand contiguity we'd never get from a tab view.
+        val sparse = listOf(entry("assistant", "a", index = 0), entry("assistant", "z", index = 5))
+        assertTrue(isTailAnchoredWindow(sparse, totalCount = -1))
     }
 
     @Test
     fun `empty entries is complete only for an empty or unknown session`() {
-        assertTrue(isContiguousTailWindow(emptyList(), totalCount = 0))
-        assertTrue(isContiguousTailWindow(emptyList(), totalCount = -1))
-        assertFalse(isContiguousTailWindow(emptyList(), totalCount = 5))
+        assertTrue(isTailAnchoredWindow(emptyList(), totalCount = 0))
+        assertTrue(isTailAnchoredWindow(emptyList(), totalCount = -1))
+        assertFalse(isTailAnchoredWindow(emptyList(), totalCount = 5))
     }
 
     // -------------------------------------------------------------------------

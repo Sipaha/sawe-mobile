@@ -432,28 +432,12 @@ fun SessionDetailScreen(
                         }
                     }
                 },
-                // Second row: read-only status indicators. Split off the
-                // title line so a long session title no longer collapses to
-                // an ellipsis to make room for them.
-                statusRow = if (sessionState is UiData.Loaded) {
-                    {
-                        ContextFillMeter(
-                            totalTokens = activeTotalTokens,
-                            maxTokens = activeMaxTokens,
-                        )
-                        // `raw` only matters for [DisplayState.Unknown]; the
-                        // structured DTO carries no payload there, so an
-                        // empty string is fine — the pill renders "?".
-                        StatePill(state = displayState, raw = "")
-                        RunningElapsed(
-                            displayState = displayState,
-                            stateStartedAtMs = activeStateStartedAtMs,
-                        )
-                        LastActivityLabel(lastActivityMs = lastActivityMs)
-                    }
-                } else {
-                    null
-                },
+                // Status indicators (context meter, state pill, elapsed,
+                // last-activity) used to live here as a second header row.
+                // They now sit in a thin strip at the BOTTOM, just above the
+                // compose row — mirroring the desktop status row and freeing
+                // the top bar for the title alone.
+                statusRow = null,
             )
         },
         // No `snackbarHost` slot — Scaffold renders that slot pinned to
@@ -476,6 +460,36 @@ fun SessionDetailScreen(
                         ),
                     ),
             ) {
+                // Thin status strip, mirroring the desktop status row: context
+                // meter + state pill + elapsed + last-activity, sitting just
+                // above the compose row instead of in the top bar. Only when a
+                // session is loaded (matches the old header-row gate).
+                if (sessionState is UiData.Loaded) {
+                    androidx.compose.material3.HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        ContextFillMeter(
+                            totalTokens = activeTotalTokens,
+                            maxTokens = activeMaxTokens,
+                        )
+                        // `raw` only matters for [DisplayState.Unknown]; the
+                        // structured DTO carries no payload there, so an empty
+                        // string is fine — the pill renders "?".
+                        StatePill(state = displayState, raw = "")
+                        RunningElapsed(
+                            displayState = displayState,
+                            stateStartedAtMs = activeStateStartedAtMs,
+                        )
+                        LastActivityLabel(lastActivityMs = lastActivityMs)
+                    }
+                }
                 if (showChipRow) {
                     SubAgentChipRow(
                         parentId = parentId,
@@ -878,7 +892,12 @@ private fun ChatList(
         }
         deduped
     }
-    val combined: List<EntrySummary> = renderServerEntries + visibleOptimisticEntries + syntheticQueueEntries
+    // Queued follow-ups (`syntheticQueueEntries`) are deliberately NOT part of
+    // the scrolling conversation: they render in the non-scrolling footer below
+    // the list (mirrors the desktop pending-section). Keeping them in the
+    // LazyColumn made the agent's streaming appends shove the queued bubble
+    // around — it flickered in and out and "flew" on every tool/message event.
+    val combined: List<EntrySummary> = renderServerEntries + visibleOptimisticEntries
     // Identity of every optimistic entry is referential — they are the
     // same objects the store published — so we can use `===` to flip
     // the per-bubble status icon without touching server entries.
@@ -908,11 +927,6 @@ private fun ChatList(
     // their read position.
     val newestContentLen: Int = combined.lastOrNull()
         ?.let { (it.markdown ?: it.preview).length } ?: 0
-    // The "Thinking…" sentinel renders as the LAST list item (newest end)
-    // when the agent is Running and the latest entry is still the user
-    // message. Lifted here so the auto-scroll keys on the row appearing.
-    val showThinking = sessionDisplayState == DisplayState.Running &&
-        combined.lastOrNull()?.role == ru.sipaha.spkremote.core.EntryRoleDto.User
 
     // Follow-the-newest flag. true = pinned to the bottom, so auto-scroll keeps
     // the newest content in view as it streams; false = the user dragged up to
@@ -949,7 +963,7 @@ private fun ChatList(
     // with no drift and no per-frame compensation. Only the follower pinned at
     // the bottom is moved. This replaces the reverseLayout + drift-compensation
     // design, which jittered the read position on every token.
-    LaunchedEffect(combined.size, newestEntryKey, showThinking, newestContentLen) {
+    LaunchedEffect(combined.size, newestEntryKey, newestContentLen) {
         if (combined.isEmpty() || !stickyBottom.value) return@LaunchedEffect
         val info = lazyState.layoutInfo
         val last = info.visibleItemsInfo.lastOrNull()
@@ -960,9 +974,15 @@ private fun ChatList(
             val overshoot = last.offset + last.size - info.viewportEndOffset
             if (overshoot > 0) lazyState.scrollBy(overshoot.toFloat())
         } else {
-            // Newest item off-screen (a new entry landed, or initial open) —
-            // snap to it.
-            lazyState.scrollToChatBottom()
+            // Newest item off-screen (a new entry landed below the fold). Reach
+            // it with a DOWN-ONLY scroll: a large `scrollBy` clamps to the
+            // bottom. Deliberately NOT `scrollToItem(MAX)` — that top-anchors
+            // the last item, so a streaming reply taller than the viewport
+            // briefly shows its TOP (a visible flick UP) before settling back
+            // to the floor. `scrollBy` can only move down, so the pin is
+            // flicker-free. The user-driven jump-to-bottom FAB keeps the
+            // animated `scrollToChatBottom` for its one-shot ride.
+            lazyState.scrollBy(1_000_000f)
         }
     }
 
@@ -995,7 +1015,8 @@ private fun ChatList(
             }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    Column(modifier = Modifier.fillMaxSize()) {
+      Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
         if (combined.isEmpty()) {
             EmptyChatMessage(
                 title = "No messages yet",
@@ -1108,17 +1129,10 @@ private fun ChatList(
                         }
                     }
                 }
-                // "Thinking…" sentinel at the BOTTOM (newest end) of the chat —
-                // the last list item. Visible only when the agent is Running
-                // AND no assistant entry has appeared yet for the current turn
-                // (the most recent message is still a user bubble). The moment
-                // the first assistant chunk arrives the most-recent message
-                // becomes Assistant and this row hides, leaving the streaming
-                // reply in its place. [showThinking] is lifted to the enclosing
-                // scope so the follow auto-scroll keys on it appearing.
-                if (showThinking) {
-                    item("thinking-row") { ThinkingRow() }
-                }
+                // The "Thinking…" sentinel and queued follow-ups used to live
+                // here as trailing list items; they now render in the
+                // non-scrolling footer below so streaming appends can't shove
+                // them around (see the footer after this Box).
             }
         }
 
@@ -1127,22 +1141,78 @@ private fun ChatList(
         // rather than a live `canScrollForward` sample avoids a flicker each
         // streaming token, where new content briefly sits below the fold
         // before the follow effect consumes it.
-        AnimatedVisibility(
+        JumpToBottomFab(
             visible = !stickyBottom.value && combined.isNotEmpty(),
-            enter = fadeIn() + slideInVertically { it / 2 },
-            exit = fadeOut() + slideOutVertically { it / 2 },
+            onClick = { scope.launch { lazyState.scrollToChatBottom(animate = true) } },
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(16.dp),
+        )
+      }
+      // Non-scrolling footer (mirrors the desktop pending-section + status-row
+      // split): the live "Thinking…" indicator and any queued follow-ups sit
+      // OUT of the LazyColumn, so the agent's streaming tool/message appends can
+      // never push them around — which is what made the queued bubble flicker
+      // and "fly" while the user did nothing. Capped + self-scrolling so a long
+      // queue can't eat the whole screen.
+      if (syntheticQueueEntries.isNotEmpty()) {
+          androidx.compose.material3.HorizontalDivider(
+              color = MaterialTheme.colorScheme.outlineVariant,
+          )
+          Column(
+              modifier = Modifier
+                  .fillMaxWidth()
+                  .heightIn(max = 240.dp)
+                  .verticalScroll(rememberScrollState())
+                  .padding(horizontal = 12.dp, vertical = 6.dp),
+              verticalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+              for (entry in syntheticQueueEntries) {
+                  val status = userBubbleStatusFor(
+                      entry = entry,
+                      isOptimistic = false,
+                      isServerQueued = true,
+                      pendingUploads = pendingUploads,
+                      sessionDisplayState = sessionDisplayState,
+                  )
+                  ChatBubble(
+                      entry = entry,
+                      userStatus = status,
+                      onAuthorizeToolCall = onAuthorizeToolCall,
+                  )
+              }
+          }
+      }
+    }
+}
+
+/**
+ * "Jump to latest" pill, extracted to its own composable so the
+ * [AnimatedVisibility] call resolves unambiguously to the top-level overload.
+ * Inline in `ChatList` the surrounding `Column` brought `ColumnScope`'s
+ * `AnimatedVisibility` into scope alongside the top-level one (there is no
+ * `BoxScope` variant), making the call ambiguous. The caller supplies a
+ * `BoxScope`-aligned [modifier] so the pill still anchors bottom-end.
+ */
+@Composable
+private fun JumpToBottomFab(
+    visible: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn() + slideInVertically { it / 2 },
+        exit = fadeOut() + slideOutVertically { it / 2 },
+        modifier = modifier,
+    ) {
+        FloatingActionButton(
+            onClick = onClick,
+            modifier = Modifier.heightIn(min = 40.dp),
+            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
         ) {
-            FloatingActionButton(
-                onClick = { scope.launch { lazyState.scrollToChatBottom(animate = true) } },
-                modifier = Modifier.heightIn(min = 40.dp),
-                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-            ) {
-                Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Jump to bottom")
-            }
+            Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Jump to bottom")
         }
     }
 }
@@ -3750,42 +3820,6 @@ private fun humanReadableSize(bytes: Long): String = when {
  * messages" tap target already conveys "you're at the start" — no separate
  * sentinel is rendered for the start of history.
  */
-/**
- * "Thinking…" row painted at the bottom of the chat list (= the LAST item in
- * the natural top-anchored LazyColumn) while the agent is
- * Running and hasn't started replying yet. Gives the user immediate
- * feedback that their message landed and the agent is working — without
- * this, there is a silent gap between the user bubble and the first
- * assistant chunk. Disappears the moment any assistant entry shows up
- * (the surface goes from `lastMessage = User` to `lastMessage = Assistant`),
- * so it never overlaps with the streaming reply.
- *
- * Small spinner + label, left-aligned so it visually sits where the
- * incoming assistant bubble will materialize, not centered like the
- * history-edge sentinel.
- */
-@Composable
-private fun ThinkingRow() {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 8.dp, horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        CircularProgressIndicator(
-            modifier = Modifier.size(14.dp),
-            strokeWidth = 2.dp,
-            color = MaterialTheme.colorScheme.primary,
-        )
-        Spacer(Modifier.padding(horizontal = 6.dp))
-        Text(
-            text = "Thinking…",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
 @Composable
 private fun HistoryEdgeRow(
     isLoadingOlder: Boolean,
