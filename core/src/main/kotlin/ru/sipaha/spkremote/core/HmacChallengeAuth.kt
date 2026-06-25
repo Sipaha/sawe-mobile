@@ -63,10 +63,13 @@ class HmacChallengeAuth(secret: ByteArray) {
          * MUST match `crates/remote_control/src/auth.rs::HMAC_DOMAIN_TAG`
          * — change requires synchronous server + client release.
          *
-         * Bytes: `spk-editor-remote-v1\0` (21 bytes).
+         * Bytes: `sawe-remote-v1\0` (15 bytes). Renamed from
+         * `spk-editor-remote-v1` in lockstep with the editor's
+         * spk-editor → sawe rebrand; the tag is a hard handshake invariant,
+         * so it carries no backward-compat alias.
          */
         val HMAC_DOMAIN_TAG: ByteArray =
-            "spk-editor-remote-v1".toByteArray(Charsets.US_ASCII) + byteArrayOf(0)
+            "sawe-remote-v1".toByteArray(Charsets.US_ASCII) + byteArrayOf(0)
     }
 }
 

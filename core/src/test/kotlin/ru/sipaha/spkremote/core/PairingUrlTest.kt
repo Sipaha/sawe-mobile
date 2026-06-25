@@ -34,6 +34,26 @@ class PairingUrlTest {
     }
 
     @Test
+    fun `parses the post-rebrand sawe-remote scheme`() {
+        // After the spk-editor -> sawe rebrand the editor emits `sawe-remote://`
+        // (crates/remote_control_ui/src/qr_popover.rs). The app must pair off it.
+        val uri = "sawe-remote://192.168.1.10:8443?secret=$secretB64&client=phone&server_fp=$fpB64"
+        val parsed = PairingUrl.parse(uri).getOrThrow()
+        assertEquals("192.168.1.10", parsed.host)
+        assertEquals(8443, parsed.port)
+        assertEquals("phone", parsed.client)
+        assertEquals(PairingUrl.SECRET_LEN, parsed.secret.size)
+        assertEquals(PairingUrl.FP_LEN, parsed.fingerprint.size)
+    }
+
+    @Test
+    fun `still accepts the legacy spk-editor-remote scheme`() {
+        // Older QR codes (pre-rebrand) must keep working.
+        val uri = "spk-editor-remote://h:1?secret=$secretB64&client=c&server_fp=$fpB64"
+        assertNotNull(PairingUrl.parse(uri).getOrThrow())
+    }
+
+    @Test
     fun `accepts padded URL-safe base64`() {
         // The server emits NO_PAD; the standard URL-safe decoder must tolerate
         // either flavour so a third-party generator that adds padding still

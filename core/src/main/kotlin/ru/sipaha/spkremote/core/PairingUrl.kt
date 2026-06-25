@@ -4,12 +4,16 @@ import java.net.URI
 import java.util.Base64
 
 /**
- * A parsed `spk-editor-remote://` pairing URL handed out by the editor.
+ * A parsed `sawe-remote://` pairing URL handed out by the editor.
  *
- * Wire form (matches `crates/remote_control_ui/src/qr_popover.rs::build_pairing_url`):
+ * Wire form (matches `crates/remote_control_ui/src/qr_popover.rs::build_url`):
  * ```
- * spk-editor-remote://<host>:<port>?secret=<url-safe-base64>&client=<name>&server_fp=<url-safe-base64>
+ * sawe-remote://<host>:<port>?secret=<url-safe-base64>&client=<name>&server_fp=<url-safe-base64>
  * ```
+ *
+ * The legacy `spk-editor-remote://` scheme (emitted before the
+ * spk-editor → sawe rebrand) is still accepted on parse so older QR
+ * codes keep pairing; new URLs are built with [SCHEME].
  *
  * Both `secret` and `server_fp` are **URL-safe base64 without padding**
  * (`A-Z a-z 0-9 - _`, no `=`). The server emits this variant
@@ -62,14 +66,19 @@ data class PairingUrl(
             "secret=<${secret.size}B>, fingerprint=<${fingerprint.size}B>)"
 
     companion object {
-        const val SCHEME = "spk-editor-remote"
+        /** Canonical scheme for URLs this app *builds* (post-rebrand). */
+        const val SCHEME = "sawe-remote"
+        /** Legacy scheme emitted before the spk-editor → sawe rebrand. */
+        const val LEGACY_SCHEME = "spk-editor-remote"
+        /** Schemes [parse] accepts — new canonical plus legacy. */
+        val ACCEPTED_SCHEMES = setOf(SCHEME, LEGACY_SCHEME)
         const val SECRET_LEN = 32
         const val FP_LEN = 32
 
         fun parse(uri: String): Result<PairingUrl> = runCatching {
             val parsed = URI(uri)
-            require(parsed.scheme == SCHEME) {
-                "expected scheme '$SCHEME', was '${parsed.scheme}'"
+            require(parsed.scheme in ACCEPTED_SCHEMES) {
+                "expected scheme one of $ACCEPTED_SCHEMES, was '${parsed.scheme}'"
             }
             val host = requireNotNull(parsed.host) { "missing host" }
             val port = parsed.port.takeIf { it > 0 }

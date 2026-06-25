@@ -14,7 +14,7 @@ class HmacChallengeAuthTest {
      *
      *   secret = byte[32] all 0x42
      *   nonce  = byte[16] ascending 0x00..0x0f
-     *   expected = HMAC-SHA256(secret, b"spk-editor-remote-v1\x00" || nonce)
+     *   expected = HMAC-SHA256(secret, b"sawe-remote-v1\x00" || nonce)
      *
      * The domain-separation tag MUST match
      * `crates/remote_control/src/auth.rs::HMAC_DOMAIN_TAG`. If this test
@@ -26,7 +26,7 @@ class HmacChallengeAuthTest {
         val secret = ByteArray(32) { 0x42.toByte() }
         val nonce = ByteArray(16) { it.toByte() }
         val expected = hexToBytes(
-            "cc9d11a6d49c366aeb168e1f5f95e67fc615fd721bbf428c1fa51371dde380de"
+            "1a100b642ec27489ce7a2281d7723c6aba4350176fd357ef79db708a04e02149"
         )
         val actual = HmacChallengeAuth(secret).respond(nonce)
         assertContentEquals(expected, actual)
@@ -37,7 +37,7 @@ class HmacChallengeAuthTest {
         val secret = ByteArray(32) { it.toByte() }
         val nonce = ByteArray(16) { (0xff - it).toByte() }
         val expected = hexToBytes(
-            "8c15784083eb400b2f844efa0050a83af1a786a72f9882f46d49a74993de49b4"
+            "47913fd792585282e70154a09688b79d316244dda27011f8c22488b2bf3db938"
         )
         val actual = HmacChallengeAuth(secret).respond(nonce)
         assertContentEquals(expected, actual)
