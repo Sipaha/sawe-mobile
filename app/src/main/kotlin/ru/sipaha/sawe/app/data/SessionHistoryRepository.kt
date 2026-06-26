@@ -89,7 +89,12 @@ class SessionHistoryRepository(
         val key = scopedKey(sessionId) ?: return null
         return runCatching {
             val raw = p.getString(key, null) ?: return@runCatching null
-            JSON.decodeFromString(CachedSessionHistory.serializer(), raw)
+            val cached = JSON.decodeFromString(CachedSessionHistory.serializer(), raw)
+            gateBySchema(cached) ?: run {
+                // Stale schema — evict so the next open does a full fetch.
+                runCatching { p.edit().remove(key).apply() }
+                null
+            }
         }.onFailure {
             Log.w(TAG, "load() failed; ignoring corrupt blob for $sessionId", it)
             // Drop the corrupt blob so the next save doesn't keep re-trying it.
@@ -253,6 +258,16 @@ class SessionHistoryRepository(
          * when the bubble actually renders, so the cache layer never
          * needed the bytes in the first place.
          */
+        /**
+         * Returns [cached] unchanged when its [CachedSessionHistory.schemaVersion] matches
+         * [CachedSessionHistory.CACHE_SCHEMA_VERSION], or `null` for any older schema so
+         * the caller can evict the stale blob and fall through to a full `get_session` fetch.
+         */
+        internal fun gateBySchema(cached: CachedSessionHistory?): CachedSessionHistory? {
+            cached ?: return null
+            return if (cached.schemaVersion == CachedSessionHistory.CACHE_SCHEMA_VERSION) cached else null
+        }
+
         internal fun stripImages(entries: List<EntrySummary>): List<EntrySummary> =
             entries.map { entry ->
                 val images = entry.images ?: return@map entry

@@ -30,5 +30,14 @@ data class CachedSessionHistory(
      * (pre-R-6e server response).
      */
     val totalCountAtLastWrite: Int,
-    val schemaVersion: Int = 1,
-)
+    val schemaVersion: Int = CACHE_SCHEMA_VERSION,
+    /** Phase-5 delta cursor: the session epoch this cache was built against. */
+    val epoch: Long = 0,
+    /** Phase-5 delta cursor: the server `current_seq` at last write — passed as
+     *  `since_seq` on the next get_session_changes poll. */
+    val lastSeq: Long = 0,
+) {
+    companion object {
+        const val CACHE_SCHEMA_VERSION = 2
+    }
+}
