@@ -680,10 +680,9 @@ data class MessageAppendedPayload(
     @SerialName("client_send_ids") val clientSendIds: List<Long> = emptyList(),
     /**
      * Unix-millis creation time for the appended entry. Mirrors
-     * [EntrySummary.createdMs] — carried here so the placeholder
-     * [EntrySummary] built in [applyAppendedPlaceholder] already has the
-     * time before `fetchAndReplaceEntry` returns the full entry. Null for
-     * entries that predate the feature or for old servers.
+     * [EntrySummary.createdMs] — carried on the notification for parity
+     * with the entry the next delta poll materialises. Null for entries
+     * that predate the feature or for old servers.
      */
     @SerialName("created_ms") val createdMs: Long? = null,
 )

@@ -1268,20 +1268,6 @@ internal class SessionDetailStore(
     }
 
     /**
-     * Pop optimistic bubbles whose corresponding server-side "user"
-     * entry has now landed. Delegates to the pure [reconcileOptimistic]
-     * (in `:core`); MUST be called while holding [sessionMutex] —
-     * mutates [_optimisticEntries], [optimisticIds] and
-     * [optimisticClientSendIds] in lock-step.
-     *
-     * Matching is id-first (server echoes `client_send_id` on user
-     * entries that carried `_meta.spk_client_send_id`) with a
-     * content-match fallback for entries that don't carry one (older
-     * server, desktop-originated send, etc.). The id path is what
-     * makes long messages (> 200 chars, server-truncated preview)
-     * dedupe correctly — the regression user-reported on 2026-05-18.
-     */
-    /**
      * Seed [_activeSubagents] from a fresh `GetSessionResult` and snap
      * [_selectedSubagent] back to a valid value if the previously-selected
      * subagent disappeared. MUST be called while holding [sessionMutex] —
@@ -1313,11 +1299,9 @@ internal class SessionDetailStore(
         optimisticClientSendIds.clear()
         optimisticClientSendIds.addAll(keptCsids)
         // Drop disk markers for every csid that just reconciled away (its
-        // server entry landed). Mirrors the per-echo cleanup in
-        // [popOptimisticByClientSendIdLocked] for the bulk refresh path —
-        // otherwise a plain send delivered while the app was backgrounded
-        // (no live echo observed) would leave a stale marker that
-        // rehydrates a phantom bubble on the next open.
+        // server entry landed) — otherwise a plain send delivered while the
+        // app was backgrounded (no live echo observed) would leave a stale
+        // marker that rehydrates a phantom bubble on the next open.
         val droppedCsids = priorCsids.filterNotNull().toSet() - keptCsids.filterNotNull().toSet()
         for (csid in droppedCsids) pendingSendsRepository.remove(csid)
     }
@@ -1862,40 +1846,6 @@ internal class SessionDetailStore(
     }
 
     /**
-     * Notification-driven fast-pop of an optimistic bubble whose
-     * server-side echo just arrived. Called from [onMessageAppended] when
-     * the payload carries a `client_send_id` that matches one of our
-     * stamped bubbles — pops it immediately rather than waiting for the
-     * next `list_sessions`-driven reconcile. This is what closes the
-     * round-trip window that produced the user-visible duplicate
-     * reported 2026-05-18 (long message → server echoes via notification
-     * → next refresh would normally reconcile, but the user already saw
-     * the duplicate in between).
-     *
-     * MUST hold [sessionMutex] before mutating — same discipline as
-     * [reconcileOptimisticLocked] / [removeOptimisticById]. The caller
-     * wraps the call in `sessionMutex.withLock`.
-     */
-    private fun popOptimisticByClientSendIdLocked(clientSendId: Long) {
-        val idx = optimisticClientSendIds.indexOf(clientSendId)
-        if (idx < 0) return
-        optimisticClientSendIds.removeAt(idx)
-        if (idx < optimisticIds.size) {
-            optimisticIds.removeAt(idx)
-        }
-        val list = _optimisticEntries.value.toMutableList()
-        if (idx < list.size) {
-            list.removeAt(idx)
-            _optimisticEntries.value = list
-        }
-        // The server has echoed this csid → drop any disk marker so a
-        // later [openSession] doesn't rehydrate a phantom bubble for an
-        // already-delivered message. Idempotent (no-op if absent / if a
-        // deferred send already cleaned it up).
-        pendingSendsRepository.remove(clientSendId)
-    }
-
-    /**
      * Render a one-line preview of a [blocks] list for the optimistic
      * bubble. Text blocks' first line wins (truncated); image / file
      * blocks contribute a short bracketed annotation so the user
@@ -1907,7 +1857,7 @@ internal class SessionDetailStore(
      * lines) for use as the optimistic bubble's `markdown` payload. Image
      * and file blocks are intentionally skipped — the optimistic carries
      * no inline image bytes, and the rendered preview from the server
-     * eventually slots them in via [fetchAndReplaceEntry].
+     * eventually slots them in via the next delta poll.
      */
     private fun buildBlocksFullText(blocks: List<ContentBlockDto>): String {
         val parts = mutableListOf<String>()

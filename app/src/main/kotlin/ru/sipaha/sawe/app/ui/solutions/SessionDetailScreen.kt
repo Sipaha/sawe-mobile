@@ -1096,9 +1096,9 @@ private fun ChatList(
                                         "queued:${entry.clientSendId ?: "pos$position"}"
                                     entry.clientSendId != null -> "csid:${entry.clientSendId}"
                                     entry.index >= 0 -> "idx:${entry.index}"
-                                    // Un-indexed streaming placeholders (index == -1,
-                                    // from applyAppendedPlaceholder — the notification
-                                    // carries no server index). Two such tool-call
+                                    // Un-indexed entries (index == -1, e.g. optimistic
+                                    // bubbles or legacy entries that carry no server
+                                    // index). Two such tool-call
                                     // placeholders with the same truncated preview used
                                     // to collide on `role#previewHash` and crash the
                                     // LazyColumn ("Key … already used"). The itemsIndexed
@@ -1653,9 +1653,9 @@ private fun ColumnScope.UserBubbleStatusRow(status: UserBubbleStatus) {
         // ceiling whenever a status badge is present, then collapse
         // back to the body's intrinsic width the instant the badge
         // disappears (e.g. the brief window between popping the local
-        // optimistic and `fetchAndReplaceEntry` repopulating the csid
-        // on the server entry → status flips Queued → None → Delivered
-        // and the bubble visibly oscillates wide → narrow → wide).
+        // optimistic and the server entry landing via the next delta
+        // poll → status flips Queued → None → Delivered and the bubble
+        // visibly oscillates wide → narrow → wide).
         // With wrap-content the bubble width is determined by the body
         // alone, which is stable across the send lifecycle.
         modifier = Modifier

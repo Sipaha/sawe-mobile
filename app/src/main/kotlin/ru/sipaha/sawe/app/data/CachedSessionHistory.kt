@@ -25,9 +25,9 @@ data class CachedSessionHistory(
      */
     val lastIndex: Int?,
     /**
-     * Server-reported `totalCount` at the time of last write. Used by
-     * `mergeSessionHistory` for gap detection. `-1` when unknown
-     * (pre-R-6e server response).
+     * Server-reported `totalCount` at the time of last write. Seeds the
+     * delta applier's tail-truncate shrink detection on the next open.
+     * `-1` when unknown (pre-R-6e server response).
      */
     val totalCountAtLastWrite: Int,
     /**
