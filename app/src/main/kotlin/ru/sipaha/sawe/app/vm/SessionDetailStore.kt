@@ -49,6 +49,7 @@ import ru.sipaha.sawe.core.QueueTtlException
 import ru.sipaha.sawe.core.QueuedMessage
 import ru.sipaha.sawe.core.RemoteClient
 import ru.sipaha.sawe.core.ResetContextResult
+import ru.sipaha.sawe.core.SupervisorStateDto
 import ru.sipaha.sawe.core.SessionDeltaState
 import ru.sipaha.sawe.core.StartCompactResult
 import ru.sipaha.sawe.core.applySessionDelta
@@ -2089,6 +2090,80 @@ internal class SessionDetailStore(
                     }
                 }
                 .onFailure { context.emitError("Compact failed: ${it.message ?: "?"}") }
+        }
+    }
+
+    // ---- Supervisor ----
+
+    private val _supervisorState = MutableStateFlow<SupervisorStateDto?>(null)
+    val supervisorState: StateFlow<SupervisorStateDto?> = _supervisorState.asStateFlow()
+
+    /**
+     * Fetch the supervisor state for [sessionId] from the server and
+     * publish it via [supervisorState]. Mirrors the `resetContext` pattern:
+     * a single `runCatching` → `decodeResultOrThrow` → `onSuccess` /
+     * `onFailure` coroutine. The flow is set to `null` on failure so the UI
+     * can surface an error state rather than showing stale data.
+     */
+    fun loadSupervisorState(sessionId: String) {
+        val active = context.activeClient() ?: run {
+            context.emitError(context.notConnectedMessage())
+            return
+        }
+        val params = buildJsonObject { put("session_id", sessionId) }
+        scope.launch {
+            runCatching { active.call("remote.solution_agent.get_supervisor_state", params) }
+                .mapCatching { resp -> resp.decodeResultOrThrow(SupervisorStateDto.serializer()) }
+                .onSuccess { _supervisorState.value = it }
+                .onFailure { context.emitError("Supervisor load failed: ${it.message ?: "?"}") }
+        }
+    }
+
+    /**
+     * Toggle Supervisor enabled/disabled for [sessionId]. Optimistically
+     * updates [supervisorState] then reloads the authoritative state from
+     * the server on success, or rolls back on failure.
+     */
+    fun setSupervisorEnabled(sessionId: String, enabled: Boolean) {
+        val active = context.activeClient() ?: run {
+            context.emitError(context.notConnectedMessage())
+            return
+        }
+        val params = buildJsonObject {
+            put("session_id", sessionId)
+            put("enabled", enabled)
+        }
+        // Optimistic update so the switch feels instant.
+        _supervisorState.value = _supervisorState.value?.copy(enabled = enabled)
+        scope.launch {
+            runCatching { active.call("remote.solution_agent.set_supervisor_enabled", params) }
+                .onSuccess { loadSupervisorState(sessionId) }
+                .onFailure {
+                    // Roll back the optimistic flip.
+                    loadSupervisorState(sessionId)
+                    context.emitError("Supervisor toggle failed: ${it.message ?: "?"}")
+                }
+        }
+    }
+
+    /**
+     * Set a custom Supervisor instruction prompt for [sessionId]. A null or
+     * blank [prompt] clears the custom prompt (the server interprets a null
+     * value as "use the default"). Reloads authoritative state on completion.
+     */
+    fun setSupervisorPrompt(sessionId: String, prompt: String?) {
+        val active = context.activeClient() ?: run {
+            context.emitError(context.notConnectedMessage())
+            return
+        }
+        val params = buildJsonObject {
+            put("session_id", sessionId)
+            if (prompt != null) put("prompt", prompt)
+        }
+        scope.launch {
+            runCatching { active.call("remote.solution_agent.set_supervisor_prompt", params) }
+                .onSuccess { loadSupervisorState(sessionId) }
+                .onFailure { context.emitError("Supervisor prompt update failed: ${it.message ?: "?"}") }
         }
     }
 

@@ -182,6 +182,7 @@ import ru.sipaha.sawe.core.PlanSummary
 import ru.sipaha.sawe.core.SessionStateDto
 import ru.sipaha.sawe.core.SessionSummary
 import ru.sipaha.sawe.core.SubagentDto
+import ru.sipaha.sawe.core.SupervisorStateDto
 import ru.sipaha.sawe.core.filterEntriesBySubagent
 import ru.sipaha.sawe.core.ToolCallStatusDto
 import ru.sipaha.sawe.core.ToolCallSummary
@@ -240,6 +241,7 @@ fun SessionDetailScreen(
     // Background-agent drill-in: id of the agent whose detail sheet is
     // open, or null when no sheet is showing.
     var selectedAgentId by remember { mutableStateOf<String?>(null) }
+    val supervisorState by viewModel.supervisorState.collectAsState()
 
     DisposableEffect(sessionId) {
         viewModel.openSession(sessionId)
@@ -372,6 +374,7 @@ fun SessionDetailScreen(
     var showOverflowMenu by remember { mutableStateOf(false) }
     var showResetConfirm by rememberSaveable { mutableStateOf(false) }
     var showCompactConfirm by rememberSaveable { mutableStateOf(false) }
+    var showSupervisorSheet by rememberSaveable { mutableStateOf(false) }
     val activeTotalTokens: Long? = mirrorSession?.totalTokens ?: activeSummary?.totalTokens
     val activeMaxTokens: Long? = mirrorSession?.maxTokens ?: activeSummary?.maxTokens
     // `state_started_at_ms` now lives inside the structured
@@ -432,6 +435,14 @@ fun SessionDetailScreen(
                                     onClick = {
                                         showOverflowMenu = false
                                         showCompactConfirm = true
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Supervisor") },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        viewModel.loadSupervisorState(sessionId)
+                                        showSupervisorSheet = true
                                     },
                                 )
                             }
@@ -684,6 +695,15 @@ fun SessionDetailScreen(
                 showCompactConfirm = false
                 viewModel.compactContextOnActiveSession()
             },
+        )
+    }
+
+    if (showSupervisorSheet) {
+        SupervisorSettingsSheet(
+            state = supervisorState,
+            onToggleEnabled = { enabled -> viewModel.setSupervisorEnabled(sessionId, enabled) },
+            onSavePrompt = { prompt -> viewModel.setSupervisorPrompt(sessionId, prompt) },
+            onDismiss = { showSupervisorSheet = false },
         )
     }
 
@@ -4464,6 +4484,123 @@ private fun BackgroundAgentPill(agent: BackgroundAgentDto, onClick: () -> Unit) 
  * Unlike the background-shell sheet there is NO network fetch: the DTO
  * already carries everything shown (no separate output_tail to load).
  */
+/**
+ * ModalBottomSheet for Supervisor settings on the currently-open session.
+ *
+ * Shows:
+ *  - An enabled/disabled Switch (calls [onToggleEnabled] immediately on
+ *    toggle so the server is the source of truth; store does optimistic
+ *    update + reload).
+ *  - A multiline [OutlinedTextField] for the custom instruction prompt —
+ *    saved via [onSavePrompt] when the user taps "Save"; a blank value
+ *    passes null, clearing the custom prompt on the server.
+ *  - A read-only stats block: status string, consecutive-continues meter,
+ *    and a compact verdict count row (total · ↻continues ⚙compact ✓done ❗ask).
+ *
+ * [state] is null while the initial RPC is in flight — a loading indicator
+ * is shown instead of the controls so the Switch doesn't flash its default
+ * (false) state before the real value arrives.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SupervisorSettingsSheet(
+    state: SupervisorStateDto?,
+    onToggleEnabled: (Boolean) -> Unit,
+    onSavePrompt: (String?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var promptText by rememberSaveable { mutableStateOf(state?.customPrompt ?: "") }
+    // Sync the local draft when the server state first arrives (i.e. on open).
+    LaunchedEffect(state?.customPrompt) {
+        if (state != null && promptText.isEmpty()) {
+            promptText = state.customPrompt ?: ""
+        }
+    }
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Supervisor",
+                style = MaterialTheme.typography.titleMedium,
+            )
+            if (state == null) {
+                CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
+            } else {
+                // Enabled toggle
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column {
+                        Text("Enabled", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            text = state.status.ifBlank { if (state.enabled) "active" else "off" },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = state.enabled,
+                        onCheckedChange = onToggleEnabled,
+                    )
+                }
+                // Stats block
+                if (state.verdictsTotal > 0 || state.consecutiveContinues > 0) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = "Continues: ${state.consecutiveContinues} / ${state.maxContinues}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            text = buildString {
+                                append("Verdicts: ${state.verdictsTotal}")
+                                if (state.verdictsContinue > 0) append(" · ↻${state.verdictsContinue}")
+                                if (state.verdictsCompact > 0) append(" · ⚙${state.verdictsCompact}")
+                                if (state.verdictsDone > 0) append(" · ✓${state.verdictsDone}")
+                                if (state.verdictsAsk > 0) append(" · ❗${state.verdictsAsk}")
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                // Custom prompt editor
+                Text("Custom instruction", style = MaterialTheme.typography.labelMedium)
+                OutlinedTextField(
+                    value = promptText,
+                    onValueChange = { promptText = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 80.dp),
+                    placeholder = { Text("Leave blank to use the default prompt") },
+                    minLines = 3,
+                    maxLines = 8,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                    TextButton(onClick = {
+                        onSavePrompt(promptText.trim().takeIf { it.isNotEmpty() })
+                        onDismiss()
+                    }) {
+                        Text("Save")
+                    }
+                }
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun BackgroundAgentDetailSheet(

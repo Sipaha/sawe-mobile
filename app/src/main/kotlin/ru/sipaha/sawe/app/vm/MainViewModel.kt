@@ -21,6 +21,7 @@ import ru.sipaha.sawe.app.data.PairedServer
 import ru.sipaha.sawe.app.data.SessionHistoryRepository
 import ru.sipaha.sawe.core.AgentSummary
 import ru.sipaha.sawe.core.ConnectionState
+import ru.sipaha.sawe.core.SupervisorStateDto
 import ru.sipaha.sawe.core.ContentBlockDto
 import ru.sipaha.sawe.core.EntrySummary
 import ru.sipaha.sawe.core.GetSessionResult
@@ -723,6 +724,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
     /** See [UploadManager.awaitTerminal]. */
     suspend fun awaitAttachmentUploadTerminal(localKey: String): String? =
         uploadManager.awaitTerminal(localKey)
+
+    // ---- Supervisor surface ----
+
+    /**
+     * Live Supervisor state for the currently-open session. Populated by
+     * [loadSupervisorState] and updated by [setSupervisorEnabled] /
+     * [setSupervisorPrompt]. Null until the first successful load.
+     */
+    val supervisorState: StateFlow<SupervisorStateDto?> get() = sessionDetail.supervisorState
+
+    /**
+     * Load (or refresh) the Supervisor state for [sessionId] from the
+     * server. Typically called when the Supervisor settings sheet opens.
+     */
+    fun loadSupervisorState(sessionId: String) =
+        sessionDetail.loadSupervisorState(sessionId)
+
+    /** Enable or disable the Supervisor for [sessionId]. */
+    fun setSupervisorEnabled(sessionId: String, enabled: Boolean) =
+        sessionDetail.setSupervisorEnabled(sessionId, enabled)
+
+    /**
+     * Set a custom Supervisor instruction prompt for [sessionId]. Pass
+     * null or blank to clear the custom prompt (server uses its default).
+     */
+    fun setSupervisorPrompt(sessionId: String, prompt: String?) =
+        sessionDetail.setSupervisorPrompt(sessionId, prompt)
 
     // ---- Nav-state surface (no collaborator — this is a tiny two-method
     // hook directly on the coordinator). ----

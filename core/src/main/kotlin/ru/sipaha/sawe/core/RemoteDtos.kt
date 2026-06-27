@@ -1166,6 +1166,30 @@ internal object ToolCallStatusDtoSerializer : KSerializer<ToolCallStatusDto> {
 }
 
 /**
+ * Result envelope for `remote.solution_agent.get_supervisor_state`.
+ *
+ * Carries the current Supervisor mode configuration and runtime statistics
+ * for the requested session. All counter fields default to 0 / null so
+ * pre-Supervisor server builds decode cleanly via the `ignoreUnknownKeys`
+ * strategy.
+ */
+@Serializable
+data class SupervisorStateDto(
+    val enabled: Boolean = false,
+    val status: String = "",
+    @SerialName("consecutive_continues") val consecutiveContinues: Int = 0,
+    @SerialName("max_continues") val maxContinues: Int = 0,
+    @SerialName("custom_prompt") val customPrompt: String? = null,
+    @SerialName("verdicts_total") val verdictsTotal: Int = 0,
+    @SerialName("verdicts_continue") val verdictsContinue: Int = 0,
+    @SerialName("verdicts_compact") val verdictsCompact: Int = 0,
+    @SerialName("verdicts_done") val verdictsDone: Int = 0,
+    @SerialName("verdicts_ask") val verdictsAsk: Int = 0,
+    val audits: Int = 0,
+    @SerialName("total_tokens") val totalTokens: Long = 0L,
+)
+
+/**
  * Drop the upstream `acp_thread` role banner — `## User`, `## User
  * (checkpoint)`, `## Assistant`, `## Plan`, `## Tool`, `## System` —
  * from the start of a markdown/preview string.
