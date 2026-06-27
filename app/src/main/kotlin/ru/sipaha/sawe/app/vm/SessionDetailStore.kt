@@ -1062,8 +1062,12 @@ internal class SessionDetailStore(
             // Tail-anchored guard: if the post-apply window no longer reaches
             // the newest entry, the delta missed newer entries (e.g. a gap
             // the cursor couldn't bridge) — do NOT publish the half-applied
-            // state; full-reload instead.
-            if (!isTailAnchoredWindow(next.entries, next.totalCount)) {
+            // state; full-reload instead. EXCEPT when `delta.hasMore`: then the
+            // short window is the server INTENTIONALLY paginating, not a gap —
+            // apply this page and let the caller keep polling from the advanced
+            // cursor. Without this exception a far-behind catch-up would fall
+            // back to a full "big bang" load, defeating pagination.
+            if (!delta.hasMore && !isTailAnchoredWindow(next.entries, next.totalCount)) {
                 needsFullLoad = true
                 return@withLock
             }
@@ -1219,6 +1223,12 @@ internal class SessionDetailStore(
                 fetchFullSession(active, sessionId)
             } else {
                 applyDeltaLocked(sessionId, delta)
+                // Server paginated — drain the next page from the advanced
+                // cursor (the convergence path loops on its own; this keeps the
+                // plain poke path catching up too).
+                if (delta.hasMore && openSessionId == sessionId) {
+                    scheduleDeltaPoll(sessionId)
+                }
             }
         }
     }
@@ -1244,9 +1254,11 @@ internal class SessionDetailStore(
         deltaPollJob = scope.launch {
             delay(DELTA_POLL_DEBOUNCE_MS)
             var backoffMs = CONVERGENCE_MIN_BACKOFF_MS
-            var attempts = 0
-            while (attempts < CONVERGENCE_MAX_ATTEMPTS) {
-                attempts++
+            // Bounds only CONSECUTIVE failures — a successful page (progress)
+            // resets it, so a far-behind session can drain arbitrarily many
+            // `has_more` pages while a dead link still gives up after the cap.
+            var failures = 0
+            while (failures < CONVERGENCE_MAX_ATTEMPTS) {
                 if (openSessionId != sessionId) return@launch
                 val active = context.activeClient() ?: return@launch
                 val (sinceSeq, knownEpoch) = sessionMutex.withLock {
@@ -1265,6 +1277,7 @@ internal class SessionDetailStore(
                 if (delta == null) {
                     // Poll failed (transport / reconnect window) — back off and
                     // retry rather than stranding the view.
+                    failures++
                     delay(backoffMs)
                     backoffMs = (backoffMs * 2).coerceAtMost(CONVERGENCE_MAX_BACKOFF_MS)
                     continue
@@ -1277,10 +1290,12 @@ internal class SessionDetailStore(
                     return@launch
                 }
                 applyDeltaLocked(sessionId, delta)
-                // Loop: the next iteration re-reads [openSeq] under the lock and
-                // returns once it reaches [targetSeq]. A single successful poll
-                // normally converges (the server was already at >= targetSeq
-                // when it emitted the dirty); the loop exists to survive failures.
+                // Progress: reset the failure budget + backoff. The next
+                // iteration re-reads [openSeq] and returns once it reaches
+                // [targetSeq]; a paginated catch-up (`has_more`) loops here page
+                // by page until the held cursor reaches the target.
+                failures = 0
+                backoffMs = CONVERGENCE_MIN_BACKOFF_MS
             }
         }
     }

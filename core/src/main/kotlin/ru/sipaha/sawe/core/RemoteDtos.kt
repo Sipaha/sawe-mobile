@@ -867,6 +867,12 @@ data class GetSessionChangesResult(
     val reset: Boolean,
     @SerialName("total_count") val totalCount: Int,
     @SerialName("changed_entries") val changedEntries: List<EntrySummary> = emptyList(),
+    /**
+     * True when the server capped this page and more changed entries remain.
+     * The client keeps polling from [currentSeq] until a page returns
+     * `hasMore == false`. Defaults false for servers that don't paginate.
+     */
+    @SerialName("has_more") val hasMore: Boolean = false,
     @SerialName("removed_indices") val removedIndices: List<Int> = emptyList(),
     val state: SessionStateDto? = null,
     @SerialName("pending_bundles") val pendingBundles: List<QueuedBundleSummary>? = null,
