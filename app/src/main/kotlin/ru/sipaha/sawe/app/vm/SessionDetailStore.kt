@@ -114,6 +114,39 @@ private const val CONVERGENCE_MAX_BACKOFF_MS: Long = 2_000L
 // next dirty / tail-resync / reconnect retries.
 private const val CONVERGENCE_MAX_ATTEMPTS: Int = 15
 
+/**
+ * Cadence of the SLOW belt-and-suspenders safety-net poll for the
+ * currently-open session detail. The push path (`agent_session_dirty` →
+ * convergence) plus the short trailing [TAIL_RESYNC_INTERVAL_MS] window cover
+ * the common cases, but a session that has sat Idle for a while (its trailing
+ * budget spent) does NOT poll at all — so if EVERY push for the final turn was
+ * dropped, the open conversation would strand until the user interacts. This
+ * far-apart tick re-polls the OPEN session roughly once a minute so a missed
+ * push self-heals within ~[SAFETY_NET_POLL_INTERVAL_MS] without a user send.
+ *
+ * Deliberately coarse: it only fires when no live/convergence delta poll is
+ * already in flight (it coalesces with the push path rather than fighting it),
+ * and a lightweight `get_session_changes` from the held cursor is cheap when
+ * nothing changed (empty `changed_entries`).
+ */
+private const val SAFETY_NET_POLL_INTERVAL_MS: Long = 60_000L
+
+/**
+ * Pure coalescing decision for the periodic [SAFETY_NET_POLL_INTERVAL_MS]
+ * safety-net tick, extracted so it is unit-testable without standing up the
+ * whole store. A tick should trigger a delta poll ONLY when:
+ *   - the detail for [tickSessionId] is still the open one (`openSessionId`),
+ *     so we never poll a closed / switched-away session, and
+ *   - no live/convergence delta poll is already in flight — if one is, the
+ *     push path is already converging and the tick must be a no-op so it can't
+ *     double-apply or cancel an in-progress convergence loop.
+ */
+internal fun shouldSafetyNetPoll(
+    tickSessionId: String,
+    openSessionId: String?,
+    deltaPollInFlight: Boolean,
+): Boolean = tickSessionId == openSessionId && !deltaPollInFlight
+
 private fun totalBytesFromState(state: UploadManager.State): Long = when (state) {
     is UploadManager.State.Queued -> state.total
     is UploadManager.State.Uploading -> state.total
@@ -443,6 +476,18 @@ internal class SessionDetailStore(
     private var deltaPollJob: Job? = null
 
     /**
+     * Far-apart belt-and-suspenders poll for the OPEN session detail only —
+     * scoped to exactly the same lifecycle as [tailResyncJob] (started in
+     * [openSession], cancelled on switch / [closeSession] / [reset] /
+     * [beforeServerSwitch]). Runs roughly once per [SAFETY_NET_POLL_INTERVAL_MS]
+     * and, when no live/convergence delta poll is already in flight
+     * ([shouldSafetyNetPoll]), triggers one lightweight delta poll so a missed
+     * `agent_session_dirty`/append push self-heals the open conversation without
+     * a user send. Never polls a closed / background session.
+     */
+    private var safetyNetPollJob: Job? = null
+
+    /**
      * Per-open-session delta cursor. Seeded from the disk cache on open,
      * from `get_session`'s `epoch`/`currentSeq` on every full load, and
      * from each applied delta's `epoch`/`currentSeq`. Reset on every
@@ -471,6 +516,8 @@ internal class SessionDetailStore(
         tailResyncJob = null
         deltaPollJob?.cancel()
         deltaPollJob = null
+        safetyNetPollJob?.cancel()
+        safetyNetPollJob = null
         _isLoadingOlder.value = false
         // Detail-state mutations MUST run under `sessionMutex` — otherwise
         // an in-flight `withLock` block that already cleared its stale-write
@@ -511,6 +558,8 @@ internal class SessionDetailStore(
         tailResyncJob = null
         deltaPollJob?.cancel()
         deltaPollJob = null
+        safetyNetPollJob?.cancel()
+        safetyNetPollJob = null
     }
 
     /** Bounce-to-input recovery routed here from ConnectionManager. */
@@ -670,6 +719,7 @@ internal class SessionDetailStore(
         }
         sessionList.ensureNotificationsObserver()
         startTailResync(sessionId)
+        startSafetyNetPoll(sessionId)
         // Opening a session over a silently-dead socket (a zombie left by a
         // Doze window or a server restart the client never detected — state
         // still reads "Connected", no banner) would let the initial
@@ -728,11 +778,38 @@ internal class SessionDetailStore(
         }
     }
 
+    /**
+     * Start (or restart) the far-apart safety-net poll for [sessionId].
+     * Scoped strictly to the open session detail: every tick re-checks
+     * `openSessionId == sessionId` (so a switch/close stops it even before the
+     * job is cancelled) and only triggers a poll when [shouldSafetyNetPoll]
+     * agrees — i.e. no live/convergence delta poll is already in flight. That
+     * coalescing makes the tick a pure no-op whenever the push path is already
+     * converging, so it can never double-apply or cancel an in-progress
+     * convergence loop. The triggered [scheduleDeltaPoll] is the same
+     * lightweight delta-from-cursor the dirty path drives; from a caught-up
+     * cursor it is a cheap empty `get_session_changes`.
+     */
+    private fun startSafetyNetPoll(sessionId: String) {
+        safetyNetPollJob?.cancel()
+        safetyNetPollJob = scope.launch {
+            while (true) {
+                delay(SAFETY_NET_POLL_INTERVAL_MS)
+                if (openSessionId != sessionId) break
+                if (shouldSafetyNetPoll(sessionId, openSessionId, deltaPollJob?.isActive == true)) {
+                    scheduleDeltaPoll(sessionId)
+                }
+            }
+        }
+    }
+
     fun closeSession() {
         tailResyncJob?.cancel()
         tailResyncJob = null
         deltaPollJob?.cancel()
         deltaPollJob = null
+        safetyNetPollJob?.cancel()
+        safetyNetPollJob = null
         scope.launch {
             sessionMutex.withLock {
                 openSessionId = null
