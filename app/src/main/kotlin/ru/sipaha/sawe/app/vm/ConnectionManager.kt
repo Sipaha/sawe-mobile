@@ -161,7 +161,19 @@ internal class ConnectionManager(
      */
     suspend fun probeLivenessNow(): Boolean {
         val live = client ?: return false
-        if (_rawConnectionState.value !is ConnectionState.Connected) return false
+        if (_rawConnectionState.value !is ConnectionState.Connected) {
+            // Not Connected → a reconnect should already be progressing, but
+            // after a Doze / VPN freeze the lifecycle can sit on the 30s
+            // backoff cap. A caller that just opened a chat (or foregrounded)
+            // must not be left on the stale cache placeholder waiting that out,
+            // so kick the backoff now. `wakeReconnect` is a no-op unless we're
+            // actually in Reconnecting, so this can't thrash a healthy wire.
+            // Report not-live: the caller relies on the onReconnected →
+            // resumeSession catch-up (the same path a user send trips via
+            // broken-pipe), which is proven to land.
+            live.wakeReconnect()
+            return false
+        }
         // Mirror the watchdog's cancellation discipline: withTimeoutOrNull
         // cancels the inner call on timeout; don't let a runCatching here
         // swallow CancellationException and disarm structured cancellation.

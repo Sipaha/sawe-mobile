@@ -721,16 +721,26 @@ internal class SessionDetailStore(
         startTailResync(sessionId)
         startSafetyNetPoll(sessionId)
         // Opening a session over a silently-dead socket (a zombie left by a
-        // Doze window or a server restart the client never detected — state
-        // still reads "Connected", no banner) would let the initial
-        // `fetchDeltaOrFull` above time out silently, leaving an empty
-        // transcript and a stale subagent strip. Probe liveness in parallel:
-        // a healthy socket answers in <8s (cheap no-op) and the fetch lands
-        // normally; a dead one is force-reconnected, and `onReconnected`
-        // re-runs the fetch via `resumeSession(openSessionId)`. Without this
-        // the only recovery was the ~30–76s heartbeat watchdog or the user
-        // sending a message (whose write trips broken-pipe detection sooner).
-        scope.launch { context.probeLivenessNow() }
+        // Doze / VPN window or a server restart the client never detected —
+        // state still reads "Connected", no banner) would let the initial
+        // `fetchDeltaOrFull` above time out silently, leaving the stale cache
+        // placeholder (last-seen intermediate step + a hardcoded `Idle`). The
+        // observed symptom: the chat only refreshes once the user SENDS a
+        // message (whose socket write trips broken-pipe → reconnect → catch-up).
+        // Close that gap deterministically on entry:
+        //   - a DEAD wire → `probeLivenessNow` force-reconnects (or, if not
+        //     Connected, kicks the backoff), and `onReconnected` re-runs the
+        //     catch-up via `resumeSession` — the same proven path a send trips;
+        //   - a LIVE wire → still schedule ONE `resumeSession` delta poll: the
+        //     initial `fetchDeltaOrFull` may have failed silently over a
+        //     slow/pinched (not fully dead) socket, and `resumeSession` is
+        //     idempotent + coalesced, so this is a cheap guaranteed reconcile
+        //     rather than sitting on the placeholder until the next send.
+        scope.launch {
+            if (context.probeLivenessNow()) {
+                resumeSession(sessionId)
+            }
+        }
     }
 
     /**
