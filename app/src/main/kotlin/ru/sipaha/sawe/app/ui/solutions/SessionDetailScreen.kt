@@ -1398,7 +1398,23 @@ private fun ChatBubble(
             ),
         ) {
             when (role) {
-                EntryRoleDto.User -> UserBubble(entry = entry, status = userStatus)
+                EntryRoleDto.User ->
+                    // A supervisor nudge is delivered as a user-role entry (so
+                    // the agent acts on it) but is NOT the human's message —
+                    // the `observer_nudge` flag tags it. Render it as the same
+                    // Observer plaque the System/Observer branch below uses, so
+                    // the reader sees at a glance it's the watcher's voice.
+                    if (entry.observerNudge) {
+                        CenteredAnnotatedBubble(
+                            text = entry.markdown ?: entry.preview,
+                            icon = Icons.Filled.Visibility,
+                            bg = MaterialTheme.colorScheme.tertiaryContainer,
+                            fg = MaterialTheme.colorScheme.onTertiaryContainer,
+                            label = "observer",
+                        )
+                    } else {
+                        UserBubble(entry = entry, status = userStatus)
+                    }
                 EntryRoleDto.Assistant -> {
                     // Skip assistant turns that have neither visible body
                     // NOR thinking — the no-chunks tool-call-only case from

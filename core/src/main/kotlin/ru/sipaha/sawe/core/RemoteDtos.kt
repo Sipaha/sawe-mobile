@@ -376,6 +376,16 @@ data class EntrySummary(
      * defaults to null so old transcripts still decode.
      */
     @SerialName("subagent_id") val subagentId: String? = null,
+    /**
+     * True for a `role == "user"` entry that is actually a SUPERVISOR
+     * (observer) nudge, not a message the human typed. A nudge is delivered
+     * into the thread as a user message so the agent acts on it, but carries
+     * the `spk_observer_nudge` `_meta` marker server-side. When set we render
+     * it as an Observer plaque instead of a plain user bubble. Older servers
+     * omit the field — defaults to false so those entries render as normal
+     * user messages.
+     */
+    @SerialName("observer_nudge") val observerNudge: Boolean = false,
 )
 
 /**
