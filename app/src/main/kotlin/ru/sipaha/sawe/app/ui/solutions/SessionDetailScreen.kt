@@ -4266,8 +4266,11 @@ private fun EmptyChatMessage(title: String, body: String) {
  * re-sort, so Main stays leftmost and a freshly-spawned teammate/shell
  * stream appears at the tail regardless of label.
  */
+// `internal` (not `private`) so the per-source-streams render can be verified
+// offscreen by a Roborazzi snapshot test — mirrors how `WorkspaceListContent`
+// is testable. No behavioural change.
 @Composable
-private fun SubagentTabStrip(
+internal fun SubagentTabStrip(
     streams: List<StreamDto>,
     selected: StreamIdDto,
     onSelect: (StreamIdDto) -> Unit,
