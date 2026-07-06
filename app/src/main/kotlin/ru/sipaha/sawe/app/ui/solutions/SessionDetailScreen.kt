@@ -641,7 +641,6 @@ fun SessionDetailScreen(
                             pendingUploads = pendingUploads,
                             serverQueuedBundles = serverQueuedBundles,
                             selectedSubagent = selectedSubagent,
-                            hasActiveSubagents = activeSubagents.isNotEmpty(),
                             sessionDisplayState = displayState,
                             isLoadingOlder = isLoadingOlder,
                             onRequestOlder = { viewModel.loadOlder(sessionId) },
@@ -800,7 +799,6 @@ private fun ChatList(
     pendingUploads: Map<Long, PendingUploadProgress>,
     serverQueuedBundles: List<ru.sipaha.sawe.core.QueuedBundleSummary>,
     selectedSubagent: String?,
-    hasActiveSubagents: Boolean,
     sessionDisplayState: DisplayState,
     isLoadingOlder: Boolean,
     onRequestOlder: () -> Unit,
@@ -813,26 +811,28 @@ private fun ChatList(
     // always carry `subagentId = null` (the user types into Main), so
     // they keep showing only on the Main tab.
     //
-    // Cold-restart bypass: when the strip is hidden (no active subagents),
-    // show every entry regardless of `subagentId`. Otherwise persisted
-    // entries stamped with a now-dead `toolu_xxx` would silently
-    // disappear from Main after the app restarts.
-    val filteredServer = remember(server.entries, selectedSubagent, hasActiveSubagents) {
-        if (server.entries.isEmpty() || !hasActiveSubagents) {
+    // The Main view (selectedSubagent == null) NEVER shows subagent-tagged
+    // entries, even when no subagents are currently active. An earlier
+    // "cold-restart bypass" rendered every entry once the strip was hidden
+    // so a finished subagent's `toolu_xxx`-tagged rows wouldn't vanish — but
+    // that flooded Main with the whole subagent transcript the instant the
+    // Task/Agent completed, which is exactly the leak the tab split exists to
+    // prevent. When the strip is gone the store snaps `selectedSubagent` back
+    // to null, so Main-only filtering is the correct steady state.
+    val filteredServer = remember(server.entries, selectedSubagent) {
+        if (server.entries.isEmpty()) {
             server
         } else {
             server.copy(entries = filterEntriesBySubagent(server.entries, selectedSubagent))
         }
     }
-    val filteredOptimistic = remember(optimistic, selectedSubagent, hasActiveSubagents) {
-        if (!hasActiveSubagents) optimistic
-        else filterEntriesBySubagent(optimistic, selectedSubagent)
+    val filteredOptimistic = remember(optimistic, selectedSubagent) {
+        filterEntriesBySubagent(optimistic, selectedSubagent)
     }
-    val filteredQueuedBundles = remember(serverQueuedBundles, selectedSubagent, hasActiveSubagents) {
+    val filteredQueuedBundles = remember(serverQueuedBundles, selectedSubagent) {
         // Queued bundles always belong to the Main thread — hide them
-        // entirely when a sub-agent tab is active. With no active strip,
-        // selectedSubagent is irrelevant so they're always visible.
-        if (!hasActiveSubagents || selectedSubagent == null) serverQueuedBundles
+        // entirely when a sub-agent tab is active (selectedSubagent != null).
+        if (selectedSubagent == null) serverQueuedBundles
         else emptyList()
     }
     // Re-bind so the rest of the function reads the filtered names.
