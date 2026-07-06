@@ -37,10 +37,12 @@ import kotlinx.serialization.json.put
  * advertises a newer schema in its `editor.capabilities` response — see
  * [isServerTooNew] and the gate site in `ConnectionManager`.
  *
- * Reverse direction (server older / pre-versioned / field absent) is
- * NOT gated: the server's contract is to keep emitting decodable shapes
- * within a major version, and every DTO already defaults forward-compat
- * fields. Only `server > supported` blocks the UI.
+ * As of v3 BOTH directions are gated: `server > supported` blocks with
+ * [isServerTooNew] ("update the app"), and `server < supported` blocks
+ * with [isServerTooOld] ("update the editor"). The per-source-streams
+ * cutover is a hard break — a v2 server still serves the old flat
+ * `entries`+`active_subagents` shape this client no longer decodes, so a
+ * too-old server must be gated rather than silently mis-rendered.
  *
  * **Version history**
  * - v1: initial versioned wire (structured [SessionStateDto]/[EntryRoleDto]/[ToolCallStatusDto])
@@ -49,8 +51,14 @@ import kotlinx.serialization.json.put
  *       `solution_agent.close_session` →
  *       `solution_agent.delete_session` (`workspace.close_session` is
  *       a NEW non-destructive tab-strip-remove tool, not a rename)
+ * - v3: per-source `streams` cutover. `get_session` / `get_session_changes`
+ *       now serve a per-stream model ([StreamDto] list + the SELECTED
+ *       stream's entries with stream-local indices) and the request carries
+ *       a `stream_id` ([StreamIdDto]) instead of `subagent_filter`. The old
+ *       flat `entries` + `active_subagents` + `subagent_filter` shape is
+ *       GONE, so the too-old direction is now gated (see [isServerTooOld]).
  */
-const val SUPPORTED_WIRE_SCHEMA_VERSION: Int = 2
+const val SUPPORTED_WIRE_SCHEMA_VERSION: Int = 3
 
 /**
  * True iff the server advertises a chat-wire schema this client doesn't
@@ -63,6 +71,23 @@ const val SUPPORTED_WIRE_SCHEMA_VERSION: Int = 2
  */
 fun isServerTooNew(serverWire: Int, supported: Int = SUPPORTED_WIRE_SCHEMA_VERSION): Boolean =
     serverWire > supported
+
+/**
+ * True iff the server advertises a chat-wire schema OLDER than this client
+ * supports. As of v3 (per-source-streams cutover) this is a hard break —
+ * a pre-v3 server still serves the old flat `entries`+`active_subagents`
+ * shape this client no longer decodes — so the UI surfaces an "update the
+ * editor" gate on `true` rather than silently mis-rendering.
+ *
+ * A field-absent / pre-versioned server reports `wire_schema_version = 0`
+ * ([CapabilitiesDto] sentinel) which is `< supported`, so it is correctly
+ * classified as too-old and gated.
+ *
+ * The [supported] override is for unit tests so the gate's threshold can be
+ * exercised without rebuilding the constant.
+ */
+fun isServerTooOld(serverWire: Int, supported: Int = SUPPORTED_WIRE_SCHEMA_VERSION): Boolean =
+    serverWire < supported
 
 /**
  * Result envelope for `remote.editor.capabilities`.
@@ -792,6 +817,65 @@ data class StartCompactResult(
     val message: String? = null,
 )
 
+/**
+ * Stable identity of one transcript stream (wire schema v3). Tagged object
+ * discriminated on the default `"type"` field (matches the server's
+ * `#[serde(tag = "type")]`), so it decodes/encodes with the standard
+ * polymorphic serializer — no custom serializer needed (unlike
+ * [SessionStateDto], which uses a non-default `kind` tag).
+ *
+ *   `{"type":"main"}`                          → [Main]
+ *   `{"type":"teammate","toolu":"toolu_abc"}`  → [Teammate]
+ *   `{"type":"shell","id":"sh-1"}`             → [Shell]
+ *
+ * Sent as the `stream_id` request param on `get_session` /
+ * `get_session_changes` (OMITTED ⇒ server defaults to Main) — the v3
+ * replacement for the old `subagent_filter` string.
+ */
+@Serializable
+sealed class StreamIdDto {
+    @Serializable @SerialName("main") data object Main : StreamIdDto()
+    @Serializable @SerialName("teammate") data class Teammate(val toolu: String) : StreamIdDto()
+    @Serializable @SerialName("shell") data class Shell(val id: String) : StreamIdDto()
+}
+
+/** Kind of a [StreamDto] — snake_case enum on the wire. */
+@Serializable
+enum class StreamKindDto {
+    @SerialName("main") MAIN,
+    @SerialName("teammate") TEAMMATE,
+    @SerialName("shell") SHELL,
+}
+
+/**
+ * Liveness of a [StreamDto] — tagged object on the default `"type"` field.
+ *
+ *   `{"type":"live"}`                    → [Live]
+ *   `{"type":"done","reason":"exited"}`  → [Done]
+ */
+@Serializable
+sealed class StreamStateDto {
+    @Serializable @SerialName("live") data object Live : StreamStateDto()
+    @Serializable @SerialName("done") data class Done(val reason: String) : StreamStateDto()
+}
+
+/**
+ * One transcript stream as served by `get_session` / `get_session_changes`
+ * (wire schema v3). The `streams` list carries ALL streams (Main first);
+ * the response's `entries` / `changed_entries` are the SELECTED stream's
+ * entries only, with stream-LOCAL indices. Drives the tab strip on the
+ * detail screen. [seq] seeds the per-stream delta cursor.
+ */
+@Serializable
+data class StreamDto(
+    val id: StreamIdDto,
+    val kind: StreamKindDto,
+    val label: String,
+    val state: StreamStateDto,
+    val seq: Long,
+    @SerialName("total_count") val totalCount: Int,
+)
+
 @Serializable
 data class GetSessionResult(
     val id: String,
@@ -845,12 +929,14 @@ data class GetSessionResult(
      */
     @SerialName("pending_bundles") val pendingBundles: List<QueuedBundleSummary> = emptyList(),
     /**
-     * Cold-start seed for the subagent-tabs strip — mirrors
-     * [SessionSummary.activeSubagents]. Live updates ride
-     * `agent_session_active_subagents_changed`. Defaults to empty for
-     * pre-Etap-5 servers.
+     * All transcript streams for this session (wire schema v3), Main first.
+     * Drives the tab strip. The [entries] above are the SELECTED stream's
+     * entries (the one named by the request's `stream_id`, or Main when
+     * omitted), with stream-local indices; [currentSeq] / [totalCount] are
+     * likewise the selected stream's. Defaults to empty only as a decode
+     * safety net — a live v3 server always sends at least the Main stream.
      */
-    @SerialName("active_subagents") val activeSubagents: List<SubagentDto> = emptyList(),
+    val streams: List<StreamDto> = emptyList(),
 )
 
 /**
@@ -859,14 +945,20 @@ data class GetSessionResult(
  * transcript on every change.
  *
  * **Absent-vs-empty distinction (CRITICAL):**
- * [state], [pendingBundles], and [activeSubagents] default to `null`. A
- * missing JSON key (absent section) decodes to `null` and means "section
- * unchanged — keep the cached value". A present-but-empty JSON array `[]`
- * decodes to an empty `List` (not null) and means "section changed and is
- * now empty — replace the cache with empty". Do NOT change the default for
- * these three fields to `emptyList()` — that would make the absent and
- * present-empty cases indistinguishable and silently reintroduce the
- * redundant re-renders this feature is designed to fix.
+ * [state] and [pendingBundles] default to `null`. A missing JSON key
+ * (absent section) decodes to `null` and means "section unchanged — keep
+ * the cached value". A present-but-empty JSON array `[]` decodes to an
+ * empty `List` (not null) and means "section changed and is now empty —
+ * replace the cache with empty". Do NOT change the default for these two
+ * fields to `emptyList()` — that would make the absent and present-empty
+ * cases indistinguishable and silently reintroduce the redundant
+ * re-renders this feature is designed to fix.
+ *
+ * [streams] is NOT absent-vs-empty: the server sends the FULL stream list
+ * on EVERY poll (wire schema v3), so it is a plain non-nullable list that
+ * unconditionally replaces the client's mirror. [selectedStreamId] names
+ * which stream the [changedEntries] / [currentSeq] / [totalCount] belong
+ * to; the server always sends it (on a `reset` too).
  *
  * [changedEntries] and [removedIndices] use `emptyList()` defaults
  * because the server omits them only when they're actually empty (no
@@ -888,7 +980,20 @@ data class GetSessionChangesResult(
     @SerialName("removed_indices") val removedIndices: List<Int> = emptyList(),
     val state: SessionStateDto? = null,
     @SerialName("pending_bundles") val pendingBundles: List<QueuedBundleSummary>? = null,
-    @SerialName("active_subagents") val activeSubagents: List<SubagentDto>? = null,
+    /**
+     * All transcript streams (wire schema v3), Main first — ALWAYS present
+     * (full list every poll, including on `reset`). Unconditionally replaces
+     * the client's stream mirror. Defaults to empty only as a decode safety
+     * net; a live v3 server always sends at least Main.
+     */
+    val streams: List<StreamDto> = emptyList(),
+    /**
+     * The stream the [changedEntries] / [currentSeq] / [totalCount] in this
+     * delta belong to. Server always sends it (on a `reset` too), so it is
+     * required. Mirrors the request's `stream_id` (Main when the request
+     * omitted it).
+     */
+    @SerialName("selected_stream_id") val selectedStreamId: StreamIdDto,
 )
 
 /**

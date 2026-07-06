@@ -18,7 +18,11 @@ class ApplySessionDeltaTest {
     private fun assistantEntry(index: Int, preview: String = "e$index"): EntrySummary =
         EntrySummary(role = EntryRoleDto.Assistant, preview = preview, index = index)
 
-    /** Construct a minimal delta that touches only the fields under test. */
+    /**
+     * Construct a minimal delta that touches only the fields under test.
+     * `streams` is always present on the wire (v3), so it is a plain list
+     * here too (defaults empty); `selectedStreamId` defaults to Main.
+     */
     private fun delta(
         currentSeq: Long = 10L,
         totalCount: Int = 5,
@@ -26,7 +30,8 @@ class ApplySessionDeltaTest {
         removedIndices: List<Int> = emptyList(),
         state: SessionStateDto? = null,
         pendingBundles: List<QueuedBundleSummary>? = null,
-        activeSubagents: List<SubagentDto>? = null,
+        streams: List<StreamDto> = emptyList(),
+        selectedStreamId: StreamIdDto = StreamIdDto.Main,
     ) = GetSessionChangesResult(
         epoch = 1L,
         currentSeq = currentSeq,
@@ -36,26 +41,34 @@ class ApplySessionDeltaTest {
         removedIndices = removedIndices,
         state = state,
         pendingBundles = pendingBundles,
-        activeSubagents = activeSubagents,
+        streams = streams,
+        selectedStreamId = selectedStreamId,
     )
 
     private fun bundle(preview: String) = QueuedBundleSummary(preview = preview)
 
-    private fun subagent(id: String) = SubagentDto(id = id, label = id, startedAtMs = 0L)
+    private fun stream(id: String) = StreamDto(
+        id = StreamIdDto.Teammate(id),
+        kind = StreamKindDto.TEAMMATE,
+        label = id,
+        state = StreamStateDto.Live,
+        seq = 0L,
+        totalCount = 0,
+    )
 
     private fun baseState(
         entries: List<EntrySummary>,
         totalCount: Int,
         state: SessionStateDto = SessionStateDto.Idle,
         pendingBundles: List<QueuedBundleSummary> = emptyList(),
-        activeSubagents: List<SubagentDto> = emptyList(),
+        streams: List<StreamDto> = emptyList(),
         currentSeq: Long = 5L,
     ) = SessionDeltaState(
         entries = entries,
         totalCount = totalCount,
         state = state,
         pendingBundles = pendingBundles,
-        activeSubagents = activeSubagents,
+        streams = streams,
         currentSeq = currentSeq,
     )
 
@@ -130,59 +143,61 @@ class ApplySessionDeltaTest {
     }
 
     // -------------------------------------------------------------------------
-    // Case 4: Section absent (null) keeps current
+    // Case 4: null state/pendingBundles keep current; streams always replaces
     // -------------------------------------------------------------------------
 
     @Test
-    fun `case 4 - null sections in delta keep all three current values unchanged`() {
+    fun `case 4 - null state and pendingBundles keep current while streams always replaces`() {
         val originalState = SessionStateDto.Running(startedAtMs = 1000L)
         val originalBundles = listOf(bundle("queued-1"))
-        val originalSubagents = listOf(subagent("sa-1"))
+        val originalStreams = listOf(stream("sa-1"))
         val current = baseState(
             entries = emptyList(),
             totalCount = 0,
             state = originalState,
             pendingBundles = originalBundles,
-            activeSubagents = originalSubagents,
+            streams = originalStreams,
         )
+        val newStreams = listOf(stream("sa-2"))
         val result = applySessionDelta(
             current = current,
             delta = delta(
                 totalCount = 0,
                 state = null,
                 pendingBundles = null,
-                activeSubagents = null,
+                streams = newStreams,
             ),
         )
 
         assertEquals(originalState, result.state)
         assertEquals(originalBundles, result.pendingBundles)
-        assertEquals(originalSubagents, result.activeSubagents)
+        // streams is unconditional-replace (no null-vs-empty semantics).
+        assertEquals(newStreams, result.streams)
     }
 
     // -------------------------------------------------------------------------
-    // Case 5: Section present-empty replaces (does NOT keep current)
+    // Case 5: present-empty pendingBundles replaces; streams replaces with empty
     // -------------------------------------------------------------------------
 
     @Test
-    fun `case 5 - present-empty sections replace current values with empty lists`() {
+    fun `case 5 - present-empty pendingBundles replaces and streams replaces with empty`() {
         val current = baseState(
             entries = emptyList(),
             totalCount = 0,
             pendingBundles = listOf(bundle("waiting")),
-            activeSubagents = listOf(subagent("sa-1")),
+            streams = listOf(stream("sa-1")),
         )
         val result = applySessionDelta(
             current = current,
             delta = delta(
                 totalCount = 0,
                 pendingBundles = emptyList(),
-                activeSubagents = emptyList(),
+                streams = emptyList(),
             ),
         )
 
         assertTrue(result.pendingBundles.isEmpty())
-        assertTrue(result.activeSubagents.isEmpty())
+        assertTrue(result.streams.isEmpty())
     }
 
     // -------------------------------------------------------------------------
@@ -190,13 +205,13 @@ class ApplySessionDeltaTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `case 6 - present-nonempty sections replace state pendingBundles and activeSubagents`() {
+    fun `case 6 - present-nonempty sections replace state pendingBundles and streams`() {
         val current = baseState(
             entries = emptyList(),
             totalCount = 0,
             state = SessionStateDto.Idle,
             pendingBundles = emptyList(),
-            activeSubagents = emptyList(),
+            streams = emptyList(),
         )
         val newState = SessionStateDto.Running(startedAtMs = 2000L)
         val newBundles = listOf(bundle("new-bundle"))
@@ -206,14 +221,14 @@ class ApplySessionDeltaTest {
                 totalCount = 0,
                 state = newState,
                 pendingBundles = newBundles,
-                activeSubagents = listOf(subagent("sa-new")),
+                streams = listOf(stream("sa-new")),
             ),
         )
 
         assertEquals(newState, result.state)
         assertEquals(newBundles, result.pendingBundles)
-        assertEquals(1, result.activeSubagents.size)
-        assertEquals("sa-new", result.activeSubagents[0].id)
+        assertEquals(1, result.streams.size)
+        assertEquals(StreamIdDto.Teammate("sa-new"), result.streams[0].id)
     }
 
     // -------------------------------------------------------------------------

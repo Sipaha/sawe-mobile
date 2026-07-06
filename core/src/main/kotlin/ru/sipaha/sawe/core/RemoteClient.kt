@@ -560,15 +560,16 @@ class RemoteClient internal constructor(
      * the server can detect a state reset and return [GetSessionChangesResult.reset]
      * = true, signalling that the client must fall back to a full `get_session`.
      *
-     * [subagentFilter] is sent only when non-null — the server uses
-     * `deny_unknown_fields` + `skip_serializing_if`, so sending JSON null
-     * would fail. Pass null to fetch all subagents' entries.
+     * [streamId] selects which transcript stream to diff (wire schema v3).
+     * It is sent only when non-null — the server uses `deny_unknown_fields`
+     * + `skip_serializing_if`, so sending JSON null would fail. Pass null to
+     * default to the Main stream (server default when `stream_id` is omitted).
      */
     suspend fun getSessionChanges(
         sessionId: String,
         sinceSeq: Long,
         knownEpoch: Long,
-        subagentFilter: String? = null,
+        streamId: StreamIdDto? = null,
         includeImages: Boolean = true,
     ): GetSessionChangesResult {
         val params = buildJsonObject {
@@ -576,7 +577,9 @@ class RemoteClient internal constructor(
             put("since_seq", sinceSeq)
             put("known_epoch", knownEpoch)
             put("include_images", includeImages)
-            if (subagentFilter != null) put("subagent_filter", subagentFilter)
+            if (streamId != null) {
+                put("stream_id", JsonRpc.json.encodeToJsonElement(StreamIdDto.serializer(), streamId))
+            }
         }
         val response = call("remote.solution_agent.get_session_changes", params)
         val err = response.error

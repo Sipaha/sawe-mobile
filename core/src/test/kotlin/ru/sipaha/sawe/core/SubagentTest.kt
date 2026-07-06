@@ -57,24 +57,6 @@ class SubagentTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `GetSessionResult without active_subagents decodes (default empty)`() {
-        val text = """
-            {
-              "id": "ses-1",
-              "solution_id": "sol-1",
-              "agent_id": "claude",
-              "title": "T",
-              "state": {"kind":"idle"},
-              "created_at": 0,
-              "last_activity_at": 0,
-              "entries": []
-            }
-        """.trimIndent()
-        val parsed = JsonRpc.json.decodeFromString(GetSessionResult.serializer(), text)
-        assertTrue(parsed.activeSubagents.isEmpty())
-    }
-
-    @Test
     fun `SessionSummary without active_subagents decodes (default empty)`() {
         val text = """
             {
@@ -105,88 +87,4 @@ class SubagentTest {
         assertEquals("toolu_abc", parsed.subagentId)
     }
 
-    @Test
-    fun `GetSessionResult with active_subagents populated decodes`() {
-        val text = """
-            {
-              "id": "ses-1",
-              "solution_id": "sol-1",
-              "agent_id": "claude",
-              "title": "T",
-              "state": {"kind":"idle"},
-              "created_at": 0,
-              "last_activity_at": 0,
-              "entries": [],
-              "active_subagents": [
-                {"id":"toolu_a","label":"Search","started_at_ms":100}
-              ]
-            }
-        """.trimIndent()
-        val parsed = JsonRpc.json.decodeFromString(GetSessionResult.serializer(), text)
-        assertEquals(1, parsed.activeSubagents.size)
-        assertEquals("toolu_a", parsed.activeSubagents[0].id)
-    }
-
-    // -------------------------------------------------------------------------
-    // Pure filter logic
-    // -------------------------------------------------------------------------
-
-    private fun entry(role: EntryRoleDto, preview: String, subagentId: String? = null) =
-        EntrySummary(role = role, preview = preview, subagentId = subagentId)
-
-    @Test
-    fun `filterEntriesBySubagent with null selected returns only main-thread entries`() {
-        val entries = listOf(
-            entry(EntryRoleDto.User, "u1"),
-            entry(EntryRoleDto.Assistant, "a1", subagentId = "toolu_a"),
-            entry(EntryRoleDto.Assistant, "a2"),
-            entry(EntryRoleDto.Assistant, "a3", subagentId = "toolu_b"),
-        )
-        val filtered = filterEntriesBySubagent(entries, selectedId = null)
-        assertEquals(2, filtered.size)
-        assertEquals("u1", filtered[0].preview)
-        assertEquals("a2", filtered[1].preview)
-    }
-
-    @Test
-    fun `filterEntriesBySubagent with subagent id returns only matching entries`() {
-        val entries = listOf(
-            entry(EntryRoleDto.User, "u1"),
-            entry(EntryRoleDto.Assistant, "a1", subagentId = "toolu_a"),
-            entry(EntryRoleDto.Assistant, "a2"),
-            entry(EntryRoleDto.Assistant, "a3", subagentId = "toolu_b"),
-            entry(EntryRoleDto.Assistant, "a4", subagentId = "toolu_a"),
-        )
-        val filtered = filterEntriesBySubagent(entries, selectedId = "toolu_a")
-        assertEquals(2, filtered.size)
-        assertEquals("a1", filtered[0].preview)
-        assertEquals("a4", filtered[1].preview)
-    }
-
-    @Test
-    fun `filterEntriesBySubagent on empty list returns empty`() {
-        assertTrue(filterEntriesBySubagent(emptyList(), null).isEmpty())
-        assertTrue(filterEntriesBySubagent(emptyList(), "toolu_a").isEmpty())
-    }
-
-    @Test
-    fun `filterEntriesBySubagent with all-null entries and null selected returns all`() {
-        val entries = listOf(
-            entry(EntryRoleDto.User, "u1"),
-            entry(EntryRoleDto.Assistant, "a1"),
-            entry(EntryRoleDto.Assistant, "a2"),
-        )
-        val filtered = filterEntriesBySubagent(entries, selectedId = null)
-        assertEquals(3, filtered.size)
-    }
-
-    @Test
-    fun `filterEntriesBySubagent with unknown subagent id returns empty`() {
-        val entries = listOf(
-            entry(EntryRoleDto.User, "u1"),
-            entry(EntryRoleDto.Assistant, "a1", subagentId = "toolu_a"),
-        )
-        val filtered = filterEntriesBySubagent(entries, selectedId = "toolu_zzz_unknown")
-        assertTrue(filtered.isEmpty())
-    }
 }

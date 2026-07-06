@@ -24,6 +24,7 @@ import ru.sipaha.sawe.core.PairingUrl
 import ru.sipaha.sawe.core.RemoteClient
 import ru.sipaha.sawe.core.SUPPORTED_WIRE_SCHEMA_VERSION
 import ru.sipaha.sawe.core.isServerTooNew
+import ru.sipaha.sawe.core.isServerTooOld
 import java.util.UUID
 
 /**
@@ -397,6 +398,19 @@ internal class ConnectionManager(
                         serverWireSchemaVersion = capabilities.wireSchemaVersion,
                         supportedWireSchemaVersion = SUPPORTED_WIRE_SCHEMA_VERSION,
                         message = "This server needs a newer version of the app. Please update.",
+                    )
+                    return@onSuccess
+                }
+                if (isServerTooOld(capabilities.wireSchemaVersion)) {
+                    // Symmetric hard gate (wire schema v3 cutover): the
+                    // server still serves the old flat entries+subagents
+                    // shape this app no longer decodes. Same teardown as
+                    // the too-new branch — the user must update the editor.
+                    tearDownConnection()
+                    _state.value = UiState.IncompatibleServer(
+                        serverWireSchemaVersion = capabilities.wireSchemaVersion,
+                        supportedWireSchemaVersion = SUPPORTED_WIRE_SCHEMA_VERSION,
+                        message = "This server is too old for this app version. Please update the editor.",
                     )
                     return@onSuccess
                 }

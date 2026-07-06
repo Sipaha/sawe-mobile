@@ -184,9 +184,9 @@ import kotlinx.coroutines.flow.StateFlow
 import ru.sipaha.sawe.core.PlanSummary
 import ru.sipaha.sawe.core.SessionStateDto
 import ru.sipaha.sawe.core.SessionSummary
-import ru.sipaha.sawe.core.SubagentDto
+import ru.sipaha.sawe.core.StreamDto
+import ru.sipaha.sawe.core.StreamIdDto
 import ru.sipaha.sawe.core.SupervisorStateDto
-import ru.sipaha.sawe.core.filterEntriesBySubagent
 import ru.sipaha.sawe.core.ToolCallStatusDto
 import ru.sipaha.sawe.core.ToolCallSummary
 import ru.sipaha.sawe.core.displayState
@@ -225,8 +225,8 @@ fun SessionDetailScreen(
     val optimistic by viewModel.optimisticEntries.collectAsState()
     val pendingUploads by viewModel.pendingUploadProgress.collectAsState()
     val serverQueuedBundles by viewModel.serverQueuedBundles.collectAsState()
-    val activeSubagents by viewModel.activeSubagents.collectAsState()
-    val selectedSubagent by viewModel.selectedSubagent.collectAsState()
+    val streams by viewModel.streams.collectAsState()
+    val selectedStream by viewModel.selectedStream.collectAsState()
     val backgroundShells by viewModel.backgroundShells.collectAsState()
     val backgroundAgents by viewModel.backgroundAgents.collectAsState()
     val cancelInFlight by viewModel.cancelInFlight.collectAsState()
@@ -600,14 +600,13 @@ fun SessionDetailScreen(
                     state = connectionState,
                     lastConnectedMs = lastConnectedMs,
                 )
-                // Sub-agent tabs (Etap 6) — hidden when no Claude Task is
-                // in flight, so a plain conversation looks exactly as
-                // before. "Main" pill is always present when the strip is
-                // visible so the user can pop back to the main thread.
+                // Per-source stream tabs (wire schema v3) — one pill per
+                // stream (Main first). Hidden when only Main exists, so a
+                // plain conversation looks exactly as before.
                 SubagentTabStrip(
-                    active = activeSubagents,
-                    selected = selectedSubagent,
-                    onSelect = viewModel::selectSubagent,
+                    streams = streams,
+                    selected = selectedStream,
+                    onSelect = viewModel::selectStream,
                 )
                 // Background-shell strip — one pill per `run_in_background`
                 // Bash tool use. Hidden when no shell is in flight. Tapping
@@ -640,7 +639,7 @@ fun SessionDetailScreen(
                             optimistic = optimistic,
                             pendingUploads = pendingUploads,
                             serverQueuedBundles = serverQueuedBundles,
-                            selectedSubagent = selectedSubagent,
+                            selectedStream = selectedStream,
                             sessionDisplayState = displayState,
                             isLoadingOlder = isLoadingOlder,
                             onRequestOlder = { viewModel.loadOlder(sessionId) },
@@ -798,47 +797,24 @@ private fun ChatList(
     optimistic: List<EntrySummary>,
     pendingUploads: Map<Long, PendingUploadProgress>,
     serverQueuedBundles: List<ru.sipaha.sawe.core.QueuedBundleSummary>,
-    selectedSubagent: String?,
+    selectedStream: StreamIdDto,
     sessionDisplayState: DisplayState,
     isLoadingOlder: Boolean,
     onRequestOlder: () -> Unit,
     onAuthorizeToolCall: (toolCallId: String, optionId: String) -> Unit = { _, _ -> },
 ) {
-    // Filter the server transcript by the currently-selected sub-agent
-    // tab (null = Main → only entries without a subagent id). The
-    // filter is pure + extracted into `:core` so it can be unit-tested
-    // independently of Compose. Optimistic / synthetic-queue rows
-    // always carry `subagentId = null` (the user types into Main), so
-    // they keep showing only on the Main tab.
-    //
-    // The Main view (selectedSubagent == null) NEVER shows subagent-tagged
-    // entries, even when no subagents are currently active. An earlier
-    // "cold-restart bypass" rendered every entry once the strip was hidden
-    // so a finished subagent's `toolu_xxx`-tagged rows wouldn't vanish — but
-    // that flooded Main with the whole subagent transcript the instant the
-    // Task/Agent completed, which is exactly the leak the tab split exists to
-    // prevent. When the strip is gone the store snaps `selectedSubagent` back
-    // to null, so Main-only filtering is the correct steady state.
-    val filteredServer = remember(server.entries, selectedSubagent) {
-        if (server.entries.isEmpty()) {
-            server
-        } else {
-            server.copy(entries = filterEntriesBySubagent(server.entries, selectedSubagent))
-        }
+    // Per-source-streams cutover: the server already scoped `server.entries`
+    // to the selected stream (stream-local indices), so we render them
+    // directly — no client-side subagent filter. Optimistic bubbles and
+    // queued bundles are Main-thread only (sends target Main), so hide them
+    // on any other stream — otherwise an in-flight local send would flash a
+    // wrong-thread bubble on a teammate/shell tab.
+    @Suppress("NAME_SHADOWING")
+    val optimistic = if (selectedStream == StreamIdDto.Main) optimistic else emptyList()
+    @Suppress("NAME_SHADOWING")
+    val serverQueuedBundles = remember(serverQueuedBundles, selectedStream) {
+        if (selectedStream == StreamIdDto.Main) serverQueuedBundles else emptyList()
     }
-    val filteredOptimistic = remember(optimistic, selectedSubagent) {
-        filterEntriesBySubagent(optimistic, selectedSubagent)
-    }
-    val filteredQueuedBundles = remember(serverQueuedBundles, selectedSubagent) {
-        // Queued bundles always belong to the Main thread — hide them
-        // entirely when a sub-agent tab is active (selectedSubagent != null).
-        if (selectedSubagent == null) serverQueuedBundles
-        else emptyList()
-    }
-    // Re-bind so the rest of the function reads the filtered names.
-    @Suppress("NAME_SHADOWING") val server = filteredServer
-    @Suppress("NAME_SHADOWING") val optimistic = filteredOptimistic
-    @Suppress("NAME_SHADOWING") val serverQueuedBundles = filteredQueuedBundles
     // Server-side `pending_messages` flattened into synthetic
     // EntrySummary rows so they slot into the same LazyColumn pass as
     // server entries. The server is the source of truth for queued
@@ -4282,22 +4258,24 @@ private fun EmptyChatMessage(title: String, body: String) {
 
 /**
  * Horizontally-scrollable strip of pills under the top app bar — one
- * per active Claude Code sub-agent dispatch, with an implicit "Main"
- * pill that maps to the main agent thread. Hidden entirely when no
- * sub-agents are in flight so a plain conversation looks unchanged.
+ * per transcript stream (wire schema v3), with Main first (its own
+ * `kind = main` pill; no separate hardcoded "Main" pill). Hidden entirely
+ * when only Main exists so a plain conversation looks unchanged.
  *
- * Order is the server's `active_subagent_order` Vec — we iterate as-is
- * and never re-sort, so a freshly-spawned Task always appears at the
- * tail of the strip regardless of label/started_at_ms.
+ * Order is the server's `streams` list — we iterate as-is and never
+ * re-sort, so Main stays leftmost and a freshly-spawned teammate/shell
+ * stream appears at the tail regardless of label.
  */
 @Composable
 private fun SubagentTabStrip(
-    active: List<SubagentDto>,
-    selected: String?,
-    onSelect: (String?) -> Unit,
+    streams: List<StreamDto>,
+    selected: StreamIdDto,
+    onSelect: (StreamIdDto) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    if (active.isEmpty()) return
+    // Only Main present → nothing to switch between; hide the strip
+    // (matches the old "no sub-agents in flight" hide).
+    if (streams.size <= 1) return
     val scrollState = rememberScrollState()
     Row(
         modifier = modifier
@@ -4306,12 +4284,11 @@ private fun SubagentTabStrip(
             .padding(horizontal = 8.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        SubagentPill(label = "Main", isActive = selected == null, onClick = { onSelect(null) })
-        for (tab in active) {
+        for (stream in streams) {
             SubagentPill(
-                label = tab.label,
-                isActive = tab.id == selected,
-                onClick = { onSelect(tab.id) },
+                label = stream.label,
+                isActive = stream.id == selected,
+                onClick = { onSelect(stream.id) },
             )
         }
     }

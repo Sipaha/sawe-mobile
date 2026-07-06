@@ -39,7 +39,8 @@ import ru.sipaha.sawe.core.SessionActiveSubagentsChangedPayload
 import ru.sipaha.sawe.core.SessionBackgroundAgentsChangedPayload
 import ru.sipaha.sawe.core.SessionBackgroundShellsChangedPayload
 import ru.sipaha.sawe.core.SessionQueueChangedPayload
-import ru.sipaha.sawe.core.SubagentDto
+import ru.sipaha.sawe.core.StreamDto
+import ru.sipaha.sawe.core.StreamIdDto
 import ru.sipaha.sawe.core.SessionStateDto
 import ru.sipaha.sawe.core.GetSessionChangesResult
 import ru.sipaha.sawe.core.JsonRpc
@@ -213,7 +214,7 @@ data class DeferredUpload(
  *     fetchFullSession, loadOlder) compete for the same flow; without the
  *     mutex a stale snapshot can be re-published on top of a newer one.
  *     After the delta-sync rewrite there is exactly ONE writer of
- *     `_session.entries`/state, `_serverQueuedBundles`, `_activeSubagents`:
+ *     `_session.entries`/state, `_serverQueuedBundles`, `_streams`:
  *     [applyDeltaLocked] + [fetchFullSession]. Push handlers only
  *     [scheduleDeltaPoll].
  *  4. **Optimistic bubbles carry two ids** — a local stable id
@@ -385,24 +386,24 @@ internal class SessionDetailStore(
         _serverQueuedBundles.asStateFlow()
 
     /**
-     * In-flight Claude Code sub-agents (Task/Agent tool uses) for the
-     * open session, in server-side insertion order. Mirrors
-     * [GetSessionResult.activeSubagents] at cold-start, then live-updates
-     * via the `agent_session_active_subagents_changed` notification.
-     * Drives the `SubagentTabStrip` on the detail screen.
+     * All transcript streams for the open session (wire schema v3), Main
+     * first. Mirrors [GetSessionResult.streams] at cold-start, then
+     * unconditionally replaced from each delta's `streams` (the server sends
+     * the full list every poll). Drives the `SubagentTabStrip` on the detail
+     * screen.
      */
-    private val _activeSubagents = MutableStateFlow<List<SubagentDto>>(emptyList())
-    val activeSubagents: StateFlow<List<SubagentDto>> = _activeSubagents.asStateFlow()
+    private val _streams = MutableStateFlow<List<StreamDto>>(emptyList())
+    val streams: StateFlow<List<StreamDto>> = _streams.asStateFlow()
 
     /**
-     * Currently-selected subagent tab id, or `null` for the implicit
-     * "Main" tab. The chat list filters entries by
-     * `entry.subagentId == selectedSubagent` (both null = Main view).
-     * Auto-resets to null on session switch and snaps to the first
-     * remaining subagent (or null) when the selected one disappears.
+     * Currently-selected stream, defaulting to [StreamIdDto.Main]. The
+     * server scopes the fetched entries to this stream (via the `stream_id`
+     * request param), so the chat list renders them as-is. Auto-resets to
+     * Main on session switch and snaps to the first remaining stream (Main
+     * is always present) when the selected one disappears.
      */
-    private val _selectedSubagent = MutableStateFlow<String?>(null)
-    val selectedSubagent: StateFlow<String?> = _selectedSubagent.asStateFlow()
+    private val _selectedStream = MutableStateFlow<StreamIdDto>(StreamIdDto.Main)
+    val selectedStream: StateFlow<StreamIdDto> = _selectedStream.asStateFlow()
 
     /**
      * Background shells (`run_in_background` Bash tool uses) for the open
@@ -535,8 +536,8 @@ internal class SessionDetailStore(
                 optimisticIds.clear()
                 optimisticClientSendIds.clear()
                 _serverQueuedBundles.value = emptyList()
-                _activeSubagents.value = emptyList()
-                _selectedSubagent.value = null
+                _streams.value = emptyList()
+                _selectedStream.value = StreamIdDto.Main
                 _backgroundShells.value = emptyList()
                 _backgroundAgents.value = emptyList()
             }
@@ -596,11 +597,11 @@ internal class SessionDetailStore(
                 // next delta / full load seeds from the new session's
                 // `pendingBundles`.
                 _serverQueuedBundles.value = emptyList()
-                // Drop the previous session's subagent strip — the next
-                // delta / full load seeds from `activeSubagents`. Reset
-                // selection to Main so the new session opens unfiltered.
-                _activeSubagents.value = emptyList()
-                _selectedSubagent.value = null
+                // Drop the previous session's stream strip — the next
+                // delta / full load seeds from `streams`. Reset selection
+                // to Main so the new session opens on the main thread.
+                _streams.value = emptyList()
+                _selectedStream.value = StreamIdDto.Main
                 // Drop the previous session's background-shell strip; the
                 // explicit fetch below (after the mutex) re-seeds it.
                 _backgroundShells.value = emptyList()
@@ -831,8 +832,8 @@ internal class SessionDetailStore(
                 optimisticIds.clear()
                 optimisticClientSendIds.clear()
                 _serverQueuedBundles.value = emptyList()
-                _activeSubagents.value = emptyList()
-                _selectedSubagent.value = null
+                _streams.value = emptyList()
+                _selectedStream.value = StreamIdDto.Main
                 _backgroundShells.value = emptyList()
                 _backgroundAgents.value = emptyList()
             }
@@ -918,9 +919,10 @@ internal class SessionDetailStore(
     override fun onActiveSubagentsChanged(payload: SessionActiveSubagentsChangedPayload) {
         val openSid = openSessionId ?: return
         if (payload.sessionId != openSid) return
-        // The delta's `active_subagents` section is the single writer of
-        // `_activeSubagents` now — just trigger a poll; do NOT apply the
-        // payload list directly (that would make the push a second writer).
+        // Kept as a dirty-poke: the server still emits this notification, but
+        // the delta's `streams` section is the single writer of `_streams`
+        // now — just trigger a poll; do NOT apply the payload list directly
+        // (that would make the push a second writer).
         scheduleDeltaPoll(openSid)
     }
 
@@ -968,51 +970,40 @@ internal class SessionDetailStore(
     }
 
     /**
-     * UI hook for the subagent tab strip. Validates that [id] either
-     * is null (Main) or matches one of the currently-active subagents;
-     * an unknown id is logged and silently rejected to null. Mutating
-     * [_selectedSubagent] directly from outside the store is forbidden
-     * — this entry point is the single seam.
+     * UI hook for the stream tab strip. Validates that [id] matches one of
+     * the currently-known streams (by id); an unknown id is logged and
+     * silently snapped back to [StreamIdDto.Main] (always present). Mutating
+     * [_selectedStream] directly from outside the store is forbidden — this
+     * entry point is the single seam.
      */
-    fun selectSubagent(id: String?) {
-        val target = if (id != null && _activeSubagents.value.none { it.id == id }) {
+    fun selectStream(id: StreamIdDto) {
+        val target = if (id != StreamIdDto.Main && _streams.value.none { it.id == id }) {
             android.util.Log.w(
                 "SessionDetailStore",
-                "selectSubagent($id) is not in active set — resetting to Main",
+                "selectStream($id) is not in the stream set — resetting to Main",
             )
-            null
+            StreamIdDto.Main
         } else {
             id
         }
-        val changed = _selectedSubagent.value != target
-        _selectedSubagent.value = target
+        val changed = _selectedStream.value != target
+        _selectedStream.value = target
         if (changed) {
-            // Cancel any armed delta poll — it carries the old tab filter
-            // and would apply stale entries under the new tab if it fired
-            // after the switch.
+            // Cancel any armed delta poll — it carries the old stream id
+            // and would apply stale entries under the new stream if it
+            // fired after the switch.
             deltaPollJob?.cancel()
             deltaPollJob = null
-            // Server-side per-tab filtering: the held entries are the PREVIOUS
-            // tab's window, so the newly-selected tab's history isn't loaded
-            // yet. Pull a fresh first page filtered to the new tab (a tab
-            // switch is a user action — a fresh count=50 fetch is cheap and
-            // correct, and avoids an empty tab when its entries sit outside
-            // the old window).
+            // Server-side per-stream scoping: the held entries are the
+            // PREVIOUS stream's window, so the newly-selected stream's
+            // history isn't loaded yet. Pull a fresh first page scoped to
+            // the new stream (a tab switch is a user action — a fresh
+            // count=50 fetch is cheap and correct).
             val sid = openSessionId ?: return
             val active = context.activeClient() ?: return
             scope.launch { fetchInitialPage(active, sid) }
         }
     }
-
-    /**
-     * The `subagent_filter` to send to `get_session` so the SERVER applies the
-     * same per-tab membership rule the desktop uses (single source of truth)
-     * and the windowed page is the SELECTED tab's entries — not a tail of all
-     * entries that, once client-filtered, can leave Main empty when a subagent
-     * dominates the tail. `null` tab (Main) → `"__main__"`; a subagent tab →
-     * its id.
-     */
-    private fun currentSubagentFilter(): String = _selectedSubagent.value ?: "__main__"
 
     override fun onSessionQueueChanged(payload: SessionQueueChangedPayload) {
         val openSid = openSessionId ?: return
@@ -1058,7 +1049,7 @@ internal class SessionDetailStore(
                 sessionId = sessionId,
                 sinceSeq = cached.lastSeq,
                 knownEpoch = cached.epoch,
-                subagentFilter = currentSubagentFilter(),
+                streamId = _selectedStream.value,
             )
         }.getOrElse {
             applyFetchFailure(sessionId, it)
@@ -1084,7 +1075,7 @@ internal class SessionDetailStore(
             put("session_id", sessionId)
             put("include_full_content", true)
             put("include_images", true)
-            put("subagent_filter", currentSubagentFilter())
+            put("stream_id", JsonRpc.json.encodeToJsonElement(StreamIdDto.serializer(), _selectedStream.value))
             put("count", SESSION_PAGE_SIZE)
         }
         val result = runCatching { active.call("remote.solution_agent.get_session", params) }
@@ -1098,7 +1089,7 @@ internal class SessionDetailStore(
             if (openSessionId != sessionId) return@withLock
             _session.value = UiData.Loaded(result)
             _serverQueuedBundles.value = result.pendingBundles
-            applyActiveSubagentsLocked(result.activeSubagents)
+            applyStreamsLocked(result.streams)
             _isLoadingOlder.value = false
             reconcileOptimisticLocked(result.entries)
             result.entries.lastOrNull()?.takeIf { it.index >= 0 }?.let { newest ->
@@ -1117,7 +1108,7 @@ internal class SessionDetailStore(
     /**
      * The SINGLE delta-applier publish seam. Together with [fetchFullSession]
      * it is the only writer of `_session.entries`/state,
-     * `_serverQueuedBundles`, and `_activeSubagents`. Holds [sessionMutex] +
+     * `_serverQueuedBundles`, and `_streams`. Holds [sessionMutex] +
      * the `openSessionId == sessionId` stale-write barrier on every publish.
      *
      * Precondition: [delta.reset] is false (caller routes a reset delta to
@@ -1142,7 +1133,7 @@ internal class SessionDetailStore(
                 totalCount = current.value.totalCount,
                 state = current.value.state,
                 pendingBundles = _serverQueuedBundles.value,
-                activeSubagents = _activeSubagents.value,
+                streams = _streams.value,
                 currentSeq = openSeq,
             )
             val next = applySessionDelta(deltaState, delta)
@@ -1158,6 +1149,19 @@ internal class SessionDetailStore(
                 needsFullLoad = true
                 return@withLock
             }
+            // Reconcile the stream mirror BEFORE publishing the merged window.
+            // If the selected stream vanished from the delta's stream list (a
+            // teammate stream auto-closed server-side), applyStreamsLocked
+            // snaps the selection; and if this delta was scoped to a stream we
+            // are no longer on, its entries are for the wrong stream. In either
+            // case the merged window is stale — force a clean full refetch of
+            // the now-selected stream instead of publishing it (deterministic,
+            // vs. relying on the next poll's shrink-to-0 to self-heal).
+            val snapped = applyStreamsLocked(next.streams)
+            if (snapped || delta.selectedStreamId != _selectedStream.value) {
+                needsFullLoad = true
+                return@withLock
+            }
             val updated = current.value.copy(
                 entries = next.entries,
                 totalCount = next.totalCount,
@@ -1167,7 +1171,6 @@ internal class SessionDetailStore(
             )
             _session.value = UiData.Loaded(updated)
             _serverQueuedBundles.value = next.pendingBundles
-            applyActiveSubagentsLocked(next.activeSubagents)
             reconcileOptimisticLocked(next.entries)
             // Bundle-only optimistic handoff: a send that landed in a server
             // bundle (but whose merged user entry hasn't materialised in
@@ -1247,12 +1250,12 @@ internal class SessionDetailStore(
         newTotalCount: Int,
     ) {
         // The disk cache is rendered instantly on reopen, and a session always
-        // reopens on Main (openSession resets selectedSubagent to null). With
-        // server-side per-tab filtering, caching a subagent tab's window would
-        // flash the wrong transcript on Main (and re-introduce the empty-Main
-        // symptom this fix removes), so only persist while viewing Main.
-        // Subagent tabs re-fetch on selection, so they need no disk cache.
-        if (_selectedSubagent.value != null) return
+        // reopens on Main (openSession resets selectedStream to Main). With
+        // server-side per-stream scoping, caching a non-Main stream's window
+        // would flash the wrong transcript on Main, so only persist while
+        // viewing Main. Other streams re-fetch on selection, so they need no
+        // disk cache.
+        if (_selectedStream.value != StreamIdDto.Main) return
         val lastIdx = entries.mapNotNull { it.index.takeIf { i -> i >= 0 } }.maxOrNull()
         sessionHistoryRepository.save(
             CachedSessionHistory(
@@ -1302,7 +1305,7 @@ internal class SessionDetailStore(
                     sessionId = sessionId,
                     sinceSeq = sinceSeq,
                     knownEpoch = knownEpoch,
-                    subagentFilter = currentSubagentFilter(),
+                    streamId = _selectedStream.value,
                 )
             }.getOrNull() ?: return@launch
             if (openSessionId != sessionId) return@launch
@@ -1358,7 +1361,7 @@ internal class SessionDetailStore(
                         sessionId = sessionId,
                         sinceSeq = sinceSeq,
                         knownEpoch = knownEpoch,
-                        subagentFilter = currentSubagentFilter(),
+                        streamId = _selectedStream.value,
                     )
                 }.getOrNull()
                 if (delta == null) {
@@ -1400,7 +1403,7 @@ internal class SessionDetailStore(
             put("session_id", sessionId)
             put("include_full_content", true)
             put("include_images", true)
-            put("subagent_filter", currentSubagentFilter())
+            put("stream_id", JsonRpc.json.encodeToJsonElement(StreamIdDto.serializer(), _selectedStream.value))
             put("before_index", oldestIndex)
             put("count", SESSION_PAGE_SIZE)
         }
@@ -1457,18 +1460,31 @@ internal class SessionDetailStore(
     }
 
     /**
-     * Seed [_activeSubagents] from a fresh `GetSessionResult` and snap
-     * [_selectedSubagent] back to a valid value if the previously-selected
-     * subagent disappeared. MUST be called while holding [sessionMutex] —
-     * mirrors the notification path's auto-snap so cold-start /
-     * full-refresh and live updates converge on the same invariant.
+     * Replace [_streams] from a fresh `GetSessionResult` / delta and snap
+     * [_selectedStream] back to a valid value if the previously-selected
+     * stream disappeared. MUST be called while holding [sessionMutex] — the
+     * delta's `streams` is the single writer, and this keeps cold-start /
+     * full-refresh and live updates converging on the same invariant.
+     *
+     * The snap target is `streams.firstOrNull()?.id ?: Main` — the server
+     * always sends Main first, so this lands on Main whenever the selected
+     * non-Main stream is gone.
+     *
+     * Returns `true` when the selection was SNAPPED (the previously-selected
+     * stream is no longer present — e.g. a teammate stream auto-closed
+     * server-side and dropped out of the descriptor list). The delta caller
+     * uses this to force a clean full refetch of the now-selected stream
+     * instead of publishing the merged (stale-stream) window.
+     * [fetchFullSession] ignores the return — it's already a full load.
      */
-    private fun applyActiveSubagentsLocked(activeSubagents: List<SubagentDto>) {
-        _activeSubagents.value = activeSubagents
-        val current = _selectedSubagent.value
-        if (current != null && activeSubagents.none { it.id == current }) {
-            _selectedSubagent.value = activeSubagents.firstOrNull()?.id
+    private fun applyStreamsLocked(streams: List<StreamDto>): Boolean {
+        _streams.value = streams
+        val current = _selectedStream.value
+        if (streams.none { it.id == current }) {
+            _selectedStream.value = streams.firstOrNull()?.id ?: StreamIdDto.Main
+            return true
         }
+        return false
     }
 
     private fun reconcileOptimisticLocked(serverEntries: List<EntrySummary>) {

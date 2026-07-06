@@ -7,10 +7,21 @@ import kotlin.test.assertTrue
 
 class GetSessionChangesDtoTest {
 
-    // Test 1: reset payload — all optional sections absent (null)
+    // Test 1: reset payload — nullable sections absent, streams + selected present
     @Test
     fun `GetSessionChangesResult decodes reset payload with null optional sections`() {
-        val json = """{"epoch":2,"current_seq":9,"reset":true,"total_count":0}"""
+        val json = """
+            {
+              "epoch": 2,
+              "current_seq": 9,
+              "reset": true,
+              "total_count": 0,
+              "streams": [
+                {"id":{"type":"main"},"kind":"main","label":"Main","state":{"type":"live"},"seq":9,"total_count":0}
+              ],
+              "selected_stream_id": {"type":"main"}
+            }
+        """.trimIndent()
         val result = JsonRpc.json.decodeFromString(GetSessionChangesResult.serializer(), json)
 
         assertEquals(2L, result.epoch)
@@ -19,15 +30,18 @@ class GetSessionChangesDtoTest {
         assertEquals(0, result.totalCount)
         assertTrue(result.changedEntries.isEmpty())
         assertTrue(result.removedIndices.isEmpty())
-        // CRITICAL: absent sections must be null, not emptyList()
+        // CRITICAL: absent nullable sections must be null, not emptyList()
         assertNull(result.state)
         assertNull(result.pendingBundles)
-        assertNull(result.activeSubagents)
+        // streams is ALWAYS present on the wire (full list every poll).
+        assertEquals(1, result.streams.size)
+        assertEquals(StreamIdDto.Main, result.streams[0].id)
+        assertEquals(StreamIdDto.Main, result.selectedStreamId)
     }
 
-    // Test 2: changed entries + state present, queue/subagents ABSENT
+    // Test 2: changed entries + state present, queue ABSENT, streams present
     @Test
-    fun `GetSessionChangesResult decodes changed entries and state while queue and subagents remain null`() {
+    fun `GetSessionChangesResult decodes changed entries and state while queue remains null`() {
         val json = """
             {
               "epoch": 1,
@@ -35,7 +49,11 @@ class GetSessionChangesDtoTest {
               "reset": false,
               "total_count": 5,
               "changed_entries": [{"role": "assistant", "preview": "hi", "index": 4}],
-              "state": {"kind": "idle"}
+              "state": {"kind": "idle"},
+              "streams": [
+                {"id":{"type":"main"},"kind":"main","label":"Main","state":{"type":"live"},"seq":12,"total_count":5}
+              ],
+              "selected_stream_id": {"type":"main"}
             }
         """.trimIndent()
         val result = JsonRpc.json.decodeFromString(GetSessionChangesResult.serializer(), json)
@@ -51,12 +69,14 @@ class GetSessionChangesDtoTest {
         assertEquals(SessionStateDto.Idle, result.state)
         // CRITICAL: absent means null, not empty
         assertNull(result.pendingBundles)
-        assertNull(result.activeSubagents)
+        assertEquals(1, result.streams.size)
+        assertEquals(StreamIdDto.Main, result.selectedStreamId)
     }
 
-    // Test 3: present-but-empty sections — "now empty" case, NOT null
+    // Test 3: present-but-empty pending_bundles — "now empty" case, NOT null;
+    // a non-Main selected stream + multi-stream list round-trip.
     @Test
-    fun `GetSessionChangesResult distinguishes absent (null) from present-empty (emptyList) sections`() {
+    fun `GetSessionChangesResult distinguishes absent (null) from present-empty pending_bundles and carries selected stream`() {
         val json = """
             {
               "epoch": 1,
@@ -64,7 +84,11 @@ class GetSessionChangesDtoTest {
               "reset": false,
               "total_count": 5,
               "pending_bundles": [],
-              "active_subagents": []
+              "streams": [
+                {"id":{"type":"main"},"kind":"main","label":"Main","state":{"type":"live"},"seq":20,"total_count":6},
+                {"id":{"type":"teammate","toolu":"t1"},"kind":"teammate","label":"Search","state":{"type":"live"},"seq":13,"total_count":5}
+              ],
+              "selected_stream_id": {"type":"teammate","toolu":"t1"}
             }
         """.trimIndent()
         val result = JsonRpc.json.decodeFromString(GetSessionChangesResult.serializer(), json)
@@ -73,9 +97,10 @@ class GetSessionChangesDtoTest {
         assertEquals(false, result.reset)
         // CRITICAL: present-but-empty must be emptyList(), NOT null
         assertEquals(emptyList<QueuedBundleSummary>(), result.pendingBundles)
-        assertEquals(emptyList<SubagentDto>(), result.activeSubagents)
         // state was absent (JSON key missing) — must be null
         assertNull(result.state)
+        assertEquals(2, result.streams.size)
+        assertEquals(StreamIdDto.Teammate("t1"), result.selectedStreamId)
     }
 
     // Test 4: GetSessionResult carries epoch/current_seq

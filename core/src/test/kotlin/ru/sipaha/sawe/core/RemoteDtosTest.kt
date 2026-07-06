@@ -12,7 +12,19 @@ class RemoteDtosTest {
     @Test fun gatesOnNewerServerWireSchema() {
         assertTrue(isServerTooNew(serverWire = 2, supported = 1))
         assertFalse(isServerTooNew(serverWire = 1, supported = 1))
-        assertFalse(isServerTooNew(serverWire = 0, supported = 1)) // older server: not gated
+        assertFalse(isServerTooNew(serverWire = 0, supported = 1)) // same major, not too-new
+    }
+
+    @Test fun `SUPPORTED_WIRE_SCHEMA_VERSION is v3 (per-source streams cutover)`() {
+        assertEquals(3, SUPPORTED_WIRE_SCHEMA_VERSION)
+    }
+
+    @Test fun `isServerTooOld gates a pre-v3 server and admits v3 plus newer`() {
+        // Too-old direction is now gated (wire schema v3 cutover).
+        assertTrue(isServerTooOld(serverWire = 2, supported = 3))
+        assertTrue(isServerTooOld(serverWire = 0, supported = 3)) // pre-versioned sentinel
+        assertFalse(isServerTooOld(serverWire = 3, supported = 3)) // exact match: OK
+        assertFalse(isServerTooOld(serverWire = 4, supported = 3)) // newer: not too-old
     }
 
     @Test
@@ -42,9 +54,9 @@ class RemoteDtosTest {
         // Unknown extra keys are tolerated (per JsonRpc.json config).
         val extra = JsonRpc.json.decodeFromString(
             CapabilitiesDto.serializer(),
-            """{"protocol_version":"x","wire_schema_version":3,"build":"abc"}""",
+            """{"protocol_version":"x","wire_schema_version":4,"build":"abc"}""",
         )
-        assertEquals(3, extra.wireSchemaVersion)
+        assertEquals(4, extra.wireSchemaVersion)
         assertTrue(isServerTooNew(extra.wireSchemaVersion))
     }
 
@@ -1438,6 +1450,108 @@ class RemoteDtosTest {
         assertEquals(loaded.agentId, stopping.agentId)
         assertEquals(loaded.createdAt, stopping.createdAt)
         assertEquals(loaded.lastActivityAt, stopping.lastActivityAt)
+    }
+
+    // -------------------------------------------------------------------------
+    // Wire schema v3 — per-source streams
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `StreamIdDto decodes and re-encodes every tagged variant`() {
+        // Load-bearing wire-shape parity check: the server serializes
+        // StreamId with #[serde(tag = "type")], which matches kotlinx's
+        // default classDiscriminator "type" — so the tagged sealed class
+        // decodes/encodes the server shape with no custom serializer.
+        val main = JsonRpc.json.decodeFromString(StreamIdDto.serializer(), """{"type":"main"}""")
+        assertEquals(StreamIdDto.Main, main)
+
+        val teammate = JsonRpc.json.decodeFromString(
+            StreamIdDto.serializer(),
+            """{"type":"teammate","toolu":"t1"}""",
+        )
+        assertEquals(StreamIdDto.Teammate("t1"), teammate)
+
+        val shell = JsonRpc.json.decodeFromString(
+            StreamIdDto.serializer(),
+            """{"type":"shell","id":"s1"}""",
+        )
+        assertEquals(StreamIdDto.Shell("s1"), shell)
+
+        // Re-encode preserves the tagged shape (used to build the request
+        // `stream_id` param).
+        for (id in listOf(StreamIdDto.Main, StreamIdDto.Teammate("t1"), StreamIdDto.Shell("s1"))) {
+            val encoded = JsonRpc.json.encodeToString(StreamIdDto.serializer(), id)
+            val again = JsonRpc.json.decodeFromString(StreamIdDto.serializer(), encoded)
+            assertEquals(id, again)
+        }
+    }
+
+    @Test
+    fun `StreamDto decodes a full descriptor with live and done states`() {
+        val live = JsonRpc.json.decodeFromString(
+            StreamDto.serializer(),
+            """{"id":{"type":"main"},"kind":"main","label":"Main","state":{"type":"live"},"seq":7,"total_count":3}""",
+        )
+        assertEquals(StreamIdDto.Main, live.id)
+        assertEquals(StreamKindDto.MAIN, live.kind)
+        assertEquals("Main", live.label)
+        assertEquals(StreamStateDto.Live, live.state)
+        assertEquals(7L, live.seq)
+        assertEquals(3, live.totalCount)
+
+        val done = JsonRpc.json.decodeFromString(
+            StreamDto.serializer(),
+            """{"id":{"type":"teammate","toolu":"t1"},"kind":"teammate","label":"Search","state":{"type":"done","reason":"exited"},"seq":12,"total_count":9}""",
+        )
+        assertEquals(StreamIdDto.Teammate("t1"), done.id)
+        assertEquals(StreamKindDto.TEAMMATE, done.kind)
+        assertEquals(StreamStateDto.Done("exited"), done.state)
+    }
+
+    @Test
+    fun `GetSessionResult decodes the v3 streams list and omits active_subagents`() {
+        val text = """
+            {
+              "id": "ses-1",
+              "solution_id": "sol-1",
+              "agent_id": "claude",
+              "title": "T",
+              "state": {"kind":"idle"},
+              "created_at": 0,
+              "last_activity_at": 0,
+              "entries": [{"role":"user","preview":"hi","index":0}],
+              "current_seq": 5,
+              "total_count": 1,
+              "streams": [
+                {"id":{"type":"main"},"kind":"main","label":"Main","state":{"type":"live"},"seq":5,"total_count":1},
+                {"id":{"type":"teammate","toolu":"t1"},"kind":"teammate","label":"Search","state":{"type":"live"},"seq":2,"total_count":4}
+              ]
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(GetSessionResult.serializer(), text)
+        assertEquals(2, parsed.streams.size)
+        assertEquals(StreamIdDto.Main, parsed.streams[0].id)
+        assertEquals(StreamIdDto.Teammate("t1"), parsed.streams[1].id)
+        assertEquals(1, parsed.entries.size)
+        assertEquals(0, parsed.entries[0].index)
+    }
+
+    @Test
+    fun `GetSessionResult without streams decodes to an empty list (decode safety net)`() {
+        val text = """
+            {
+              "id": "ses-1",
+              "solution_id": "sol-1",
+              "agent_id": "claude",
+              "title": "T",
+              "state": {"kind":"idle"},
+              "created_at": 0,
+              "last_activity_at": 0,
+              "entries": []
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(GetSessionResult.serializer(), text)
+        assertTrue(parsed.streams.isEmpty())
     }
 
 }

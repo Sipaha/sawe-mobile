@@ -588,9 +588,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
         get() = sessionDetail.pendingUploadProgress
     val serverQueuedBundles: StateFlow<List<ru.sipaha.sawe.core.QueuedBundleSummary>>
         get() = sessionDetail.serverQueuedBundles
-    val activeSubagents: StateFlow<List<ru.sipaha.sawe.core.SubagentDto>>
-        get() = sessionDetail.activeSubagents
-    val selectedSubagent: StateFlow<String?> get() = sessionDetail.selectedSubagent
+    val streams: StateFlow<List<ru.sipaha.sawe.core.StreamDto>>
+        get() = sessionDetail.streams
+    val selectedStream: StateFlow<ru.sipaha.sawe.core.StreamIdDto> get() = sessionDetail.selectedStream
     val backgroundShells: StateFlow<List<ru.sipaha.sawe.core.BackgroundShellDto>>
         get() = sessionDetail.backgroundShells
     val backgroundAgents: StateFlow<List<ru.sipaha.sawe.core.BackgroundAgentDto>>
@@ -619,7 +619,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
     fun sendMessageBlocks(blocks: List<ContentBlockDto>) =
         sessionDetail.sendMessageBlocks(blocks)
     fun forceFlushQueue() = sessionDetail.forceFlushQueue()
-    fun selectSubagent(id: String?) = sessionDetail.selectSubagent(id)
+    fun selectStream(id: ru.sipaha.sawe.core.StreamIdDto) = sessionDetail.selectStream(id)
     /**
      * Fetch the stdout tail for one background shell of the open session
      * (drill-in sheet). Suspends; returns null when the shell is gone or

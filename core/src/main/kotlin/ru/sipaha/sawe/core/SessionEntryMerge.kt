@@ -116,16 +116,17 @@ fun dedupeEntriesByIndex(entries: List<EntrySummary>): List<EntrySummary> {
 
 /**
  * Immutable snapshot that [applySessionDelta] transforms. [entries] is sorted
- * ascending by absolute [EntrySummary.index]. [state]/[pendingBundles]/
- * [activeSubagents] are always concrete (the held current values).
- * [totalCount] is the FILTERED count last reported by the server (-1 = unknown).
+ * ascending by the SELECTED stream's stream-local [EntrySummary.index].
+ * [state]/[pendingBundles] are always concrete (the held current values);
+ * [streams] is the held full stream list. [totalCount] is the SELECTED
+ * stream's entry count last reported by the server (-1 = unknown).
  */
 data class SessionDeltaState(
     val entries: List<EntrySummary>,
     val totalCount: Int,
     val state: SessionStateDto,
     val pendingBundles: List<QueuedBundleSummary>,
-    val activeSubagents: List<SubagentDto>,
+    val streams: List<StreamDto>,
     val currentSeq: Long,
 )
 
@@ -149,8 +150,10 @@ data class SessionDeltaState(
  *    This drop-by-count model is load-bearing for filtered (per-subagent-tab)
  *    views, where held indices are ABSOLUTE and sparse — dropping by
  *    `index >= totalCount` would incorrectly remove most of the window.
- * 4. Keep or replace each section: a `null` section means "unchanged"; a
- *    present list (even empty) replaces the current value.
+ * 4. Keep or replace each section: for [state]/[pendingBundles] a `null`
+ *    section means "unchanged" and a present list (even empty) replaces the
+ *    current value; [streams] is ALWAYS present (a plain list, not nullable)
+ *    and unconditionally replaces the held stream mirror.
  * 5. Advance [currentSeq] and [totalCount] to delta's values.
  */
 fun applySessionDelta(current: SessionDeltaState, delta: GetSessionChangesResult): SessionDeltaState {
@@ -176,10 +179,11 @@ fun applySessionDelta(current: SessionDeltaState, delta: GetSessionChangesResult
         entries = entries.dropLast(shrink)
     }
 
-    // Step 4: adopt sections only when the delta carries them.
+    // Step 4: adopt nullable sections only when the delta carries them;
+    // `streams` is always present, so replace unconditionally.
     val newState = delta.state ?: current.state
     val newPendingBundles = delta.pendingBundles ?: current.pendingBundles
-    val newActiveSubagents = delta.activeSubagents ?: current.activeSubagents
+    val newStreams = delta.streams
 
     // Step 5: advance cursors.
     return SessionDeltaState(
@@ -187,7 +191,7 @@ fun applySessionDelta(current: SessionDeltaState, delta: GetSessionChangesResult
         totalCount = delta.totalCount,
         state = newState,
         pendingBundles = newPendingBundles,
-        activeSubagents = newActiveSubagents,
+        streams = newStreams,
         currentSeq = delta.currentSeq,
     )
 }
