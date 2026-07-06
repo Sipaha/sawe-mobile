@@ -77,4 +77,43 @@ class StreamTabStripSnapshotTest {
             }
         }
     }
+
+    @Test
+    fun main_teammate_shell() {
+        // v4 (wire schema): background shells + async agents fold onto
+        // `session.streams` — a shell rides as `kind:shell`. It flows through
+        // the same generic [SubagentTabStrip] as any other stream (no kind
+        // filter), rendering as one more pill alongside Main + teammates.
+        val streams = listOf(
+            stream(StreamIdDto.Main, StreamKindDto.MAIN, "Main", 42L),
+            stream(StreamIdDto.Teammate("toolu_a1"), StreamKindDto.TEAMMATE, "Refactor renderer", 51L),
+            stream(StreamIdDto.Shell("sh-1"), StreamKindDto.SHELL, "bash: cargo test", 61L),
+        )
+
+        captureRoboImage(
+            filePath = "src/test/snapshots/roborazzi/StreamTabStrip_main_teammate_shell.png",
+            // Compare against the committed golden (flip to Record to re-baseline),
+            // matching WorkspaceScreenSnapshotTest.
+            roborazziOptions = RoborazziOptions(taskType = RoborazziTaskType.Compare),
+        ) {
+            MaterialTheme {
+                Surface {
+                    Column {
+                        SubagentTabStrip(
+                            streams = streams,
+                            selected = StreamIdDto.Main,
+                            onSelect = {},
+                        )
+                        // Shell tab selected: the shell pill is highlighted,
+                        // proving the shell stream is selectable like any other.
+                        SubagentTabStrip(
+                            streams = streams,
+                            selected = StreamIdDto.Shell("sh-1"),
+                            onSelect = {},
+                        )
+                    }
+                }
+            }
+        }
+    }
 }

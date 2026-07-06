@@ -14,8 +14,6 @@ import ru.sipaha.sawe.app.data.ListCacheRepository
 import ru.sipaha.sawe.app.data.SessionHistoryRepository
 import ru.sipaha.sawe.core.AgentSummary
 import ru.sipaha.sawe.core.CreateSessionResult
-import ru.sipaha.sawe.core.GetSessionBackgroundAgentsResult
-import ru.sipaha.sawe.core.GetSessionBackgroundShellsResult
 import ru.sipaha.sawe.core.GetSessionChildrenResult
 import ru.sipaha.sawe.core.JsonRpc
 import ru.sipaha.sawe.core.ListAgentsResult
@@ -26,8 +24,6 @@ import ru.sipaha.sawe.core.MessageAppendedPayload
 import ru.sipaha.sawe.core.RemoteClient
 import ru.sipaha.sawe.core.AgentSessionContextResetPayload
 import ru.sipaha.sawe.core.SessionActiveSubagentsChangedPayload
-import ru.sipaha.sawe.core.SessionBackgroundAgentsChangedPayload
-import ru.sipaha.sawe.core.SessionBackgroundShellsChangedPayload
 import ru.sipaha.sawe.core.SessionCreatedPayload
 import ru.sipaha.sawe.core.SessionDirtyPayload
 import ru.sipaha.sawe.core.SessionQueueChangedPayload
@@ -322,18 +318,6 @@ internal class SessionListStore(
             // the tab strip; without this the strip only refreshes
             // via cold-start seed.
             "agent_session_active_subagents_changed",
-            // Background-shell set changed (a `run_in_background` Bash
-            // tool launched / exited / was killed) — routes to
-            // SessionDetailStore.onBackgroundShellsChanged which updates
-            // the background-shell pill strip; without this the strip
-            // only refreshes via cold-start seed.
-            "agent_session_background_shells_changed",
-            // Background-agent set changed (a managed background agent
-            // launched / stopped) — routes to
-            // SessionDetailStore.onBackgroundAgentsChanged which updates
-            // the background-agent pill strip; without this the strip
-            // only refreshes via cold-start seed.
-            "agent_session_background_agents_changed",
             // Server wiped this session's transcript in-place (`/clear`
             // reset_context or `/compact` rotate_context). Without this
             // kind, the chat surface keeps showing stale entries until
@@ -574,28 +558,6 @@ internal class SessionListStore(
                 } ?: return
                 router.onActiveSubagentsChanged(payload)
             }
-            "agent_session_background_shells_changed" -> {
-                val payload = data?.let {
-                    runCatching {
-                        JsonRpc.json.decodeFromJsonElement(
-                            SessionBackgroundShellsChangedPayload.serializer(),
-                            it,
-                        )
-                    }.getOrNull()
-                } ?: return
-                router.onBackgroundShellsChanged(payload)
-            }
-            "agent_session_background_agents_changed" -> {
-                val payload = data?.let {
-                    runCatching {
-                        JsonRpc.json.decodeFromJsonElement(
-                            SessionBackgroundAgentsChangedPayload.serializer(),
-                            it,
-                        )
-                    }.getOrNull()
-                } ?: return
-                router.onBackgroundAgentsChanged(payload)
-            }
             "agent_session_context_reset" -> {
                 val payload = data?.decodeOrNull(AgentSessionContextResetPayload.serializer()) ?: return
                 router.onSessionContextReset(payload)
@@ -620,59 +582,6 @@ internal class SessionListStore(
                     _sessionChildren.value = _sessionChildren.value + (sessionId to result.children)
                 }
         }
-    }
-
-    /**
-     * Fetch the background shells (`run_in_background` Bash tool uses) for
-     * [sessionId] via `remote.solution_agent.get_session_background_shells`.
-     * Mirrors [loadChildren]'s call shape but is suspending + returns the
-     * result so [SessionDetailStore] can use it for BOTH the cold-start
-     * lite strip ([includeOutput] = false) and the drill-in stdout view
-     * ([includeOutput] = true). Returns an empty result on failure or when
-     * no client is connected — callers treat "no shells" and "couldn't
-     * fetch" identically (the strip just stays hidden).
-     */
-    suspend fun loadBackgroundShells(
-        sessionId: String,
-        includeOutput: Boolean,
-    ): GetSessionBackgroundShellsResult {
-        val active = context.activeClient() ?: return GetSessionBackgroundShellsResult()
-        val params = buildJsonObject {
-            put("session_id", sessionId)
-            put("include_output", includeOutput)
-        }
-        return runCatching {
-            active.call("remote.solution_agent.get_session_background_shells", params)
-        }
-            .mapCatching { resp ->
-                resp.decodeResultOrThrow(GetSessionBackgroundShellsResult.serializer())
-            }
-            .getOrDefault(GetSessionBackgroundShellsResult())
-    }
-
-    /**
-     * Fetch the managed background agents for [sessionId] via
-     * `remote.solution_agent.get_session_background_agents`. Unlike
-     * [loadBackgroundShells] there is NO include flag — the DTO carries
-     * everything (label / mtime / stop_reason), so a single shape serves
-     * both the strip seed and the minimal drill-in. Returns an empty
-     * result on failure or when no client is connected — callers treat
-     * "no agents" and "couldn't fetch" identically (strip stays hidden).
-     */
-    suspend fun loadBackgroundAgents(
-        sessionId: String,
-    ): GetSessionBackgroundAgentsResult {
-        val active = context.activeClient() ?: return GetSessionBackgroundAgentsResult()
-        val params = buildJsonObject {
-            put("session_id", sessionId)
-        }
-        return runCatching {
-            active.call("remote.solution_agent.get_session_background_agents", params)
-        }
-            .mapCatching { resp ->
-                resp.decodeResultOrThrow(GetSessionBackgroundAgentsResult.serializer())
-            }
-            .getOrDefault(GetSessionBackgroundAgentsResult())
     }
 
     fun loadAgents() {
@@ -908,22 +817,6 @@ internal interface DetailNotificationRouter {
      * server-side `active_subagent_order` Vec — render as-is.
      */
     fun onActiveSubagentsChanged(payload: SessionActiveSubagentsChangedPayload)
-
-    /**
-     * The background-shell set (in-flight `run_in_background` Bash tool
-     * uses) changed for [payload.sessionId]. The payload always carries
-     * the FULL new set of lite DTOs (empty = no shells); insertion order
-     * matches the server-side ordering — render as-is.
-     */
-    fun onBackgroundShellsChanged(payload: SessionBackgroundShellsChangedPayload)
-
-    /**
-     * The managed background-agent set changed for [payload.sessionId].
-     * The payload always carries the FULL new set of DTOs (empty = no
-     * agents); insertion order matches the server-side ordering — render
-     * as-is.
-     */
-    fun onBackgroundAgentsChanged(payload: SessionBackgroundAgentsChangedPayload)
 
     /**
      * The server wiped this session's transcript in-place via /clear or

@@ -15,16 +15,16 @@ class RemoteDtosTest {
         assertFalse(isServerTooNew(serverWire = 0, supported = 1)) // same major, not too-new
     }
 
-    @Test fun `SUPPORTED_WIRE_SCHEMA_VERSION is v3 (per-source streams cutover)`() {
-        assertEquals(3, SUPPORTED_WIRE_SCHEMA_VERSION)
+    @Test fun `SUPPORTED_WIRE_SCHEMA_VERSION is v4 (shells + agents folded onto streams)`() {
+        assertEquals(4, SUPPORTED_WIRE_SCHEMA_VERSION)
     }
 
-    @Test fun `isServerTooOld gates a pre-v3 server and admits v3 plus newer`() {
-        // Too-old direction is now gated (wire schema v3 cutover).
-        assertTrue(isServerTooOld(serverWire = 2, supported = 3))
-        assertTrue(isServerTooOld(serverWire = 0, supported = 3)) // pre-versioned sentinel
-        assertFalse(isServerTooOld(serverWire = 3, supported = 3)) // exact match: OK
-        assertFalse(isServerTooOld(serverWire = 4, supported = 3)) // newer: not too-old
+    @Test fun `isServerTooOld gates a pre-v4 server and admits v4 plus newer`() {
+        // Too-old direction is now gated (wire schema v4 cutover).
+        assertTrue(isServerTooOld(serverWire = 3, supported = 4)) // pre-cutover v3: too old
+        assertTrue(isServerTooOld(serverWire = 0, supported = 4)) // pre-versioned sentinel
+        assertFalse(isServerTooOld(serverWire = 4, supported = 4)) // exact match: OK
+        assertFalse(isServerTooOld(serverWire = 5, supported = 4)) // newer: not too-old
     }
 
     @Test
@@ -54,9 +54,9 @@ class RemoteDtosTest {
         // Unknown extra keys are tolerated (per JsonRpc.json config).
         val extra = JsonRpc.json.decodeFromString(
             CapabilitiesDto.serializer(),
-            """{"protocol_version":"x","wire_schema_version":4,"build":"abc"}""",
+            """{"protocol_version":"x","wire_schema_version":5,"build":"abc"}""",
         )
-        assertEquals(4, extra.wireSchemaVersion)
+        assertEquals(5, extra.wireSchemaVersion)
         assertTrue(isServerTooNew(extra.wireSchemaVersion))
     }
 
@@ -1506,6 +1506,18 @@ class RemoteDtosTest {
         assertEquals(StreamIdDto.Teammate("t1"), done.id)
         assertEquals(StreamKindDto.TEAMMATE, done.kind)
         assertEquals(StreamStateDto.Done("exited"), done.state)
+
+        // v4: a background shell rides `session.streams` as `kind:shell`
+        // with a `StreamIdDto.Shell` id — decodes through the generic
+        // stream shape with no special-casing.
+        val shell = JsonRpc.json.decodeFromString(
+            StreamDto.serializer(),
+            """{"id":{"type":"shell","id":"sh-1"},"kind":"shell","label":"bash: cargo test","state":{"type":"live"},"seq":3,"total_count":1}""",
+        )
+        assertEquals(StreamIdDto.Shell("sh-1"), shell.id)
+        assertEquals(StreamKindDto.SHELL, shell.kind)
+        assertEquals("bash: cargo test", shell.label)
+        assertEquals(StreamStateDto.Live, shell.state)
     }
 
     @Test

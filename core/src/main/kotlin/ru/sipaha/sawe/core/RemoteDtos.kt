@@ -57,8 +57,11 @@ import kotlinx.serialization.json.put
  *       a `stream_id` ([StreamIdDto]) instead of `subagent_filter`. The old
  *       flat `entries` + `active_subagents` + `subagent_filter` shape is
  *       GONE, so the too-old direction is now gated (see [isServerTooOld]).
+ * - v4: shells + background-agents folded onto `streams` (shells ride as
+ *       `kind:shell`, async agents as `kind:teammate`); the separate
+ *       background-shell/agent RPCs + notifications are gone. HARD CUTOVER.
  */
-const val SUPPORTED_WIRE_SCHEMA_VERSION: Int = 3
+const val SUPPORTED_WIRE_SCHEMA_VERSION: Int = 4
 
 /**
  * True iff the server advertises a chat-wire schema this client doesn't
@@ -575,104 +578,6 @@ data class SubagentDto(
 data class SessionActiveSubagentsChangedPayload(
     @SerialName("session_id") val sessionId: String,
     @SerialName("active_subagents") val activeSubagents: List<SubagentDto>,
-)
-
-/**
- * One background shell (`run_in_background` Bash tool use) the agent
- * launched for the open session. Mirrors `BackgroundShellDto` on the
- * desktop side. [id] is the stable shell id; [command] is the launched
- * command line; [state] is a free-form classifier string —
- * `"running"`, `"exited:N"` (N = exit code), `"exited"` (no code
- * captured), or `"killed"`. It is deliberately decoded as a raw String
- * (NOT a structured enum) so a future / unrecognised state value still
- * decodes cleanly; the UI maps anything it doesn't recognise to a
- * neutral pill.
- *
- * [mtimeMs] is wall-clock unix-millis of the shell's last output write
- * (null when the server hasn't captured one). [outputTail] is the
- * trailing slice of the shell's stdout — populated ONLY when the
- * request set `include_output=true` (the lite DTOs carried on the
- * `agent_session_background_shells_changed` notification omit it).
- */
-@Serializable
-data class BackgroundShellDto(
-    val id: String,
-    val command: String,
-    val state: String,
-    @SerialName("mtime_ms") val mtimeMs: Long? = null,
-    @SerialName("output_tail") val outputTail: String? = null,
-)
-
-/**
- * Result envelope for
- * `remote.solution_agent.get_session_background_shells`. Empty list is a
- * normal response for sessions that never launched a background shell.
- * Defaulted to empty so a pre-feature server response decodes cleanly.
- */
-@Serializable
-data class GetSessionBackgroundShellsResult(
-    @SerialName("background_shells") val backgroundShells: List<BackgroundShellDto> = emptyList(),
-)
-
-/**
- * Decoded `params.payload` of an `agent_session_background_shells_changed`
- * notification. Server emits this whenever the background-shell set for
- * [sessionId] mutates; [backgroundShells] is the FULL post-change list of
- * lite DTOs (no `output_tail`). Mobile mirrors the list verbatim into the
- * detail store's pill strip — the strip never needs `output_tail`, so no
- * refetch is triggered by the notification.
- */
-@Serializable
-data class SessionBackgroundShellsChangedPayload(
-    @SerialName("session_id") val sessionId: String,
-    @SerialName("background_shells") val backgroundShells: List<BackgroundShellDto> = emptyList(),
-)
-
-/**
- * One managed background agent the agent launched for the open session.
- * Mirrors `BackgroundAgentDto` on the desktop side. [id] is the stable
- * agent id; [label] is a human-readable name. Unlike the background-shell
- * DTO there is no `command`, no free-form `state` string, and no
- * `output_tail`: the run/done state is DERIVED client-side from
- * [stopReason] ([stopReason] == null → running, else → done with that
- * reason), and the minimal drill-in sheet needs no separate output fetch
- * since this DTO already carries everything it shows.
- *
- * [mtimeMs] is wall-clock unix-millis of the agent's last activity (null
- * when the server hasn't captured one). [stopReason] is null while the
- * agent is still running, else the reason string it stopped with.
- */
-@Serializable
-data class BackgroundAgentDto(
-    val id: String,
-    val label: String,
-    @SerialName("mtime_ms") val mtimeMs: Long? = null,
-    @SerialName("stop_reason") val stopReason: String? = null,
-)
-
-/**
- * Result envelope for
- * `remote.solution_agent.get_session_background_agents`. Empty list is a
- * normal response for sessions that never launched a background agent.
- * Defaulted to empty so a pre-feature server response decodes cleanly.
- */
-@Serializable
-data class GetSessionBackgroundAgentsResult(
-    @SerialName("background_agents") val backgroundAgents: List<BackgroundAgentDto> = emptyList(),
-)
-
-/**
- * Decoded `params.payload` of an `agent_session_background_agents_changed`
- * notification. Server emits this whenever the background-agent set for
- * [sessionId] mutates; [backgroundAgents] is the FULL post-change list of
- * DTOs. Mobile mirrors the list verbatim into the detail store's pill
- * strip — the DTO already carries everything the strip + drill-in show,
- * so no refetch is triggered by the notification.
- */
-@Serializable
-data class SessionBackgroundAgentsChangedPayload(
-    @SerialName("session_id") val sessionId: String,
-    @SerialName("background_agents") val backgroundAgents: List<BackgroundAgentDto> = emptyList(),
 )
 
 /**
