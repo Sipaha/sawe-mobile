@@ -60,8 +60,11 @@ import kotlinx.serialization.json.put
  * - v4: shells + background-agents folded onto `streams` (shells ride as
  *       `kind:shell`, async agents as `kind:teammate`); the separate
  *       background-shell/agent RPCs + notifications are gone. HARD CUTOVER.
+ * - v5: teammate labels ride `StreamDto.label`; `SessionSummary.active_subagents`
+ *       removed; `agent_session_active_subagents_changed` is now a bare
+ *       `{session_id}` dirty-poke. HARD CUTOVER.
  */
-const val SUPPORTED_WIRE_SCHEMA_VERSION: Int = 4
+const val SUPPORTED_WIRE_SCHEMA_VERSION: Int = 5
 
 /**
  * True iff the server advertises a chat-wire schema this client doesn't
@@ -256,16 +259,6 @@ data class SessionSummary(
      * Drives the sub-agent chip row on `SessionDetailScreen` (F-phone).
      */
     @SerialName("parent_session_id") val parentSessionId: String? = null,
-    /**
-     * In-flight Claude Code sub-agents (Task/Agent tool-uses) for this
-     * session, in server-side insertion order. Drives the subagent-tabs
-     * strip on the detail screen — each entry is one pill alongside the
-     * implicit "Main" tab. Live updates ride the
-     * `agent_session_active_subagents_changed` notification; this field
-     * is the cold-start seed. Defaults to empty so pre-Etap-5 server
-     * responses decode cleanly.
-     */
-    @SerialName("active_subagents") val activeSubagents: List<SubagentDto> = emptyList(),
 )
 
 /**
@@ -552,32 +545,14 @@ data class SessionQueueChangedPayload(
 )
 
 /**
- * One in-flight Claude Code sub-agent (Task/Agent tool use) as the server
- * sees it. Mirrors `SubagentDto` on the desktop side. `id` is the parent
- * `toolu_xxx` tool-use id — the same value mobile filters entries by via
- * [EntrySummary.subagentId]. `label` is a human-friendly tab title chosen
- * by the server (Task description → subagent_type#short → "Agent <short>").
- * `startedAtMs` is wall-clock unix-millis captured when the sub-agent
- * dispatch first entered the active set.
- */
-@Serializable
-data class SubagentDto(
-    val id: String,
-    val label: String,
-    @SerialName("started_at_ms") val startedAtMs: Long,
-)
-
-/**
  * Decoded `params.payload` of an `agent_session_active_subagents_changed`
- * notification. Server emits this whenever a sub-agent enters or leaves
- * the active set for [sessionId]; `activeSubagents` is the FULL post-change
- * list in server-side insertion order (empty when nothing is in flight).
- * Mobile mirrors the list verbatim into the detail store's tab strip.
+ * notification. As of v5 this is a bare dirty-poke: the server no longer
+ * sends the sub-agent list (the `streams` delta is the single writer of the
+ * tab strip), so the handler just schedules a delta poll for [sessionId].
  */
 @Serializable
 data class SessionActiveSubagentsChangedPayload(
     @SerialName("session_id") val sessionId: String,
-    @SerialName("active_subagents") val activeSubagents: List<SubagentDto>,
 )
 
 /**

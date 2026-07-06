@@ -15,16 +15,16 @@ class RemoteDtosTest {
         assertFalse(isServerTooNew(serverWire = 0, supported = 1)) // same major, not too-new
     }
 
-    @Test fun `SUPPORTED_WIRE_SCHEMA_VERSION is v4 (shells + agents folded onto streams)`() {
-        assertEquals(4, SUPPORTED_WIRE_SCHEMA_VERSION)
+    @Test fun `SUPPORTED_WIRE_SCHEMA_VERSION is v5 (active_subagents removed, labels on streams)`() {
+        assertEquals(5, SUPPORTED_WIRE_SCHEMA_VERSION)
     }
 
-    @Test fun `isServerTooOld gates a pre-v4 server and admits v4 plus newer`() {
-        // Too-old direction is now gated (wire schema v4 cutover).
-        assertTrue(isServerTooOld(serverWire = 3, supported = 4)) // pre-cutover v3: too old
-        assertTrue(isServerTooOld(serverWire = 0, supported = 4)) // pre-versioned sentinel
-        assertFalse(isServerTooOld(serverWire = 4, supported = 4)) // exact match: OK
-        assertFalse(isServerTooOld(serverWire = 5, supported = 4)) // newer: not too-old
+    @Test fun `isServerTooOld gates a pre-v5 server and admits v5 plus newer`() {
+        // Too-old direction is now gated (wire schema v5 cutover).
+        assertTrue(isServerTooOld(serverWire = 4, supported = 5)) // pre-cutover v4: too old
+        assertTrue(isServerTooOld(serverWire = 0, supported = 5)) // pre-versioned sentinel
+        assertFalse(isServerTooOld(serverWire = 5, supported = 5)) // exact match: OK
+        assertFalse(isServerTooOld(serverWire = 6, supported = 5)) // newer: not too-old
     }
 
     @Test
@@ -54,9 +54,9 @@ class RemoteDtosTest {
         // Unknown extra keys are tolerated (per JsonRpc.json config).
         val extra = JsonRpc.json.decodeFromString(
             CapabilitiesDto.serializer(),
-            """{"protocol_version":"x","wire_schema_version":5,"build":"abc"}""",
+            """{"protocol_version":"x","wire_schema_version":6,"build":"abc"}""",
         )
-        assertEquals(5, extra.wireSchemaVersion)
+        assertEquals(6, extra.wireSchemaVersion)
         assertTrue(isServerTooNew(extra.wireSchemaVersion))
     }
 

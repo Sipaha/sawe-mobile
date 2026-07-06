@@ -3,7 +3,6 @@ package ru.sipaha.sawe.core
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
-import kotlin.test.assertTrue
 
 class SubagentTest {
 
@@ -12,52 +11,35 @@ class SubagentTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun `SubagentDto decodes server payload`() {
-        val text = """{"id":"toolu_abc","label":"Read README","started_at_ms":1700000000000}"""
-        val parsed = JsonRpc.json.decodeFromString(SubagentDto.serializer(), text)
-        assertEquals("toolu_abc", parsed.id)
-        assertEquals("Read README", parsed.label)
-        assertEquals(1700000000000L, parsed.startedAtMs)
-    }
-
-    @Test
-    fun `SessionActiveSubagentsChangedPayload decodes server payload`() {
-        val text = """
-            {
-              "session_id": "ses-1",
-              "active_subagents": [
-                {"id": "toolu_a", "label": "Search", "started_at_ms": 100},
-                {"id": "toolu_b", "label": "Build",  "started_at_ms": 200}
-              ]
-            }
-        """.trimIndent()
+    fun `SessionActiveSubagentsChangedPayload decodes bare dirty-poke`() {
+        // As of v5 the server sends only session_id — the streams delta is the
+        // single writer of the tab strip.
+        val text = """{"session_id":"ses-1"}"""
         val parsed = JsonRpc.json.decodeFromString(
             SessionActiveSubagentsChangedPayload.serializer(),
             text,
         )
         assertEquals("ses-1", parsed.sessionId)
-        assertEquals(2, parsed.activeSubagents.size)
-        assertEquals("toolu_a", parsed.activeSubagents[0].id)
-        assertEquals("Build", parsed.activeSubagents[1].label)
     }
 
     @Test
-    fun `SessionActiveSubagentsChangedPayload decodes empty list (queue drained)`() {
-        val text = """{"session_id":"ses-1","active_subagents":[]}"""
+    fun `SessionActiveSubagentsChangedPayload ignores a stray legacy list`() {
+        // ignoreUnknownKeys means a rolling-back server that still emits the old
+        // active_subagents list decodes cleanly into the slimmed dirty-poke.
+        val text = """{"session_id":"ses-1","active_subagents":[{"id":"toolu_a"}]}"""
         val parsed = JsonRpc.json.decodeFromString(
             SessionActiveSubagentsChangedPayload.serializer(),
             text,
         )
         assertEquals("ses-1", parsed.sessionId)
-        assertTrue(parsed.activeSubagents.isEmpty())
     }
 
     // -------------------------------------------------------------------------
-    // Forward-compat: pre-Etap-5 servers omit the new fields
+    // SessionSummary no longer carries active_subagents (removed in v5)
     // -------------------------------------------------------------------------
 
     @Test
-    fun `SessionSummary without active_subagents decodes (default empty)`() {
+    fun `SessionSummary decodes without an active_subagents key`() {
         val text = """
             {
               "id": "ses-1",
@@ -70,7 +52,7 @@ class SubagentTest {
             }
         """.trimIndent()
         val parsed = JsonRpc.json.decodeFromString(SessionSummary.serializer(), text)
-        assertTrue(parsed.activeSubagents.isEmpty())
+        assertEquals("ses-1", parsed.id)
     }
 
     @Test
