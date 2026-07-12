@@ -43,13 +43,9 @@ import ru.sipaha.sawe.core.AgentSummary
 import ru.sipaha.sawe.core.SolutionMember
 
 /**
- * "New session" dialog used by the create-session flow.
- *
- * Currently unwired post-G1: the legacy SolutionDetailScreen that launched
- * this dialog from its FAB is gone, and the workspace screen's
- * `onCreateNewSessionFor` callback is a no-op placeholder pending the
- * F-phase workspace-owned creation flow. Kept around because that future
- * flow will reuse the agent-picker + initial-message UI verbatim.
+ * "New session" dialog used by the create-session flow. Launched from the
+ * workspace screen's per-solution "new session" affordance
+ * (`onCreateNewSessionFor`).
  *
  * Flow:
  *  1. On mount, [MainViewModel.loadAgents] runs once and populates the
@@ -94,22 +90,16 @@ fun NewSessionDialog(
     var selectedCwd by rememberSaveable { mutableStateOf<String?>(null) }
     val loadedSolution = (solutionDetailsState as? UiData.Loaded)?.value?.solution
     val members: List<SolutionMember> = loadedSolution?.members.orEmpty()
-    val solutionRoot: String? = loadedSolution?.root
-    // Working-directory choices: the solution root (sees all member
-    // projects) followed by each member project. The root is offered first
-    // so an agent can be started across the whole solution, not just inside
-    // one project.
-    val cwdOptions: List<CwdOption> = remember(solutionRoot, members) {
-        buildList {
-            if (solutionRoot != null) add(CwdOption("Solution root", solutionRoot))
-            members.forEach { add(CwdOption(it.catalogId, it.localPath)) }
-        }
-    }
-    // Default cwd: the first member if any (focused on a project), else the
-    // solution root. The picker UI is hidden when there's only one choice.
-    LaunchedEffect(members, solutionRoot) {
-        if (selectedCwd == null) {
-            selectedCwd = members.firstOrNull()?.localPath ?: solutionRoot
+    // Working-directory choices: member projects only. The solution root is
+    // deliberately NOT offered — a session on mobile always runs inside one
+    // project worktree. A solution with no members sends no `cwd` at all and
+    // lets the server pick.
+    val cwdOptions: List<CwdOption> = remember(members) { cwdOptionsFor(members) }
+    // Default cwd: the first member project. The picker UI is hidden when
+    // there's fewer than two choices.
+    LaunchedEffect(members) {
+        if (cwdOptions.none { it.path == selectedCwd }) {
+            selectedCwd = members.firstOrNull()?.localPath
         }
     }
 
@@ -317,11 +307,22 @@ private fun AgentPicker(
 }
 
 /** One working-directory choice: a human [label] and the [path] sent as `cwd`. */
-private data class CwdOption(val label: String, val path: String)
+internal data class CwdOption(val label: String, val path: String)
+
+/**
+ * Working-directory choices offered when creating a session: one per member
+ * project, labelled by catalog id.
+ *
+ * The solution root is **not** a choice — a session started on mobile always
+ * runs inside a single project worktree. A member-less solution yields an
+ * empty list, and the dialog then sends no `cwd` at all (server decides).
+ */
+internal fun cwdOptionsFor(members: List<SolutionMember>): List<CwdOption> =
+    members.map { CwdOption(label = it.catalogId, path = it.localPath) }
 
 /**
  * Dropdown for selecting the new session's working directory. Options are
- * the solution root ("Solution root") plus each member project; only
+ * the solution's member projects — the solution root is not selectable; only
  * rendered when there's more than one choice.
  *
  * Implementation note: I tried OutlinedTextField(readOnly=true) with a
@@ -334,7 +335,7 @@ private data class CwdOption(val label: String, val path: String)
  * meaningless on the phone and only the label identifies the choice.
  */
 @Composable
-private fun CwdPicker(
+internal fun CwdPicker(
     options: List<CwdOption>,
     selectedPath: String?,
     enabled: Boolean,
