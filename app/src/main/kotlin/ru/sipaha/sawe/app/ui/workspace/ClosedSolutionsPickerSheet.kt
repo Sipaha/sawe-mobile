@@ -76,8 +76,8 @@ fun ClosedSolutionsPickerSheet(
 @Composable
 internal fun ClosedSolutionsPickerSheetContent(
     state: UiData<List<ClosedSolutionRow>>,
-    onOpen: (String) -> Unit,
-    onDelete: (String) -> Unit,
+    onOpen: (Long) -> Unit,
+    onDelete: (Long) -> Unit,
 ) {
     Column(modifier = Modifier.padding(16.dp)) {
         Text("Open a closed solution", style = MaterialTheme.typography.titleLarge)
@@ -116,8 +116,8 @@ internal fun ClosedSolutionsPickerSheetContent(
 @Composable
 internal fun ClosedSolutionsPickerSheetContent(
     rows: List<ClosedSolutionRow>,
-    onOpen: (String) -> Unit,
-    onDelete: (String) -> Unit,
+    onOpen: (Long) -> Unit,
+    onDelete: (Long) -> Unit,
 ) = ClosedSolutionsPickerSheetContent(
     state = UiData.Loaded(rows),
     onOpen = onOpen,

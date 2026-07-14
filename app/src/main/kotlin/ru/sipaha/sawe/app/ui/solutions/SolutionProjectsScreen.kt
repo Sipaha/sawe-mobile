@@ -59,7 +59,7 @@ import ru.sipaha.sawe.core.SolutionMember
 @Composable
 fun SolutionProjectsScreen(
     viewModel: MainViewModel,
-    solutionId: String,
+    solutionId: Long,
     onBack: () -> Unit,
 ) {
     val detailsState by viewModel.solutionDetails.collectAsState()
@@ -82,7 +82,7 @@ fun SolutionProjectsScreen(
     }
 
     fun displayName(m: SolutionMember): String =
-        catalog.firstOrNull { it.catalogId == m.catalogId }?.name ?: m.catalogId
+        catalog.firstOrNull { it.catalogId == m.catalogId }?.name ?: m.catalogId.toString()
 
     Scaffold(
         topBar = {
@@ -138,7 +138,7 @@ fun SolutionProjectsScreen(
                                     add = add,
                                     displayName = catalog.firstOrNull {
                                         it.catalogId == add.catalogId
-                                    }?.name ?: add.catalogId,
+                                    }?.name ?: add.catalogId.toString(),
                                 )
                             }
                             HorizontalDivider()

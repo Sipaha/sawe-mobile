@@ -59,14 +59,14 @@ import ru.sipaha.sawe.core.CatalogProjectInfo
 @Composable
 fun ProjectPicker(
     catalog: List<CatalogProjectInfo>,
-    selected: Set<String>,
-    onToggle: (catalogId: String) -> Unit,
+    selected: Set<Long>,
+    onToggle: (catalogId: Long) -> Unit,
     onCreateEmpty: (String) -> Unit,
     modifier: Modifier = Modifier,
     // When non-null, each registry row gets a trash affordance that
     // removes the project from the catalog (after confirmation). The
     // server refuses while a solution still uses it.
-    onRemoveCatalog: ((catalogId: String) -> Unit)? = null,
+    onRemoveCatalog: ((catalogId: Long) -> Unit)? = null,
 ) {
     var pendingRemove by remember { mutableStateOf<CatalogProjectInfo?>(null) }
     Column(modifier = modifier.fillMaxWidth()) {
@@ -245,11 +245,11 @@ fun MemberAddGhostRow(add: MemberAddProgress, displayName: String) {
 @Composable
 fun AddProjectDialog(
     catalog: List<CatalogProjectInfo>,
-    onAdd: (catalogIds: List<String>, emptyNames: List<String>) -> Unit,
+    onAdd: (catalogIds: List<Long>, emptyNames: List<String>) -> Unit,
     onDismiss: () -> Unit,
-    onRemoveCatalog: ((catalogId: String) -> Unit)? = null,
+    onRemoveCatalog: ((catalogId: Long) -> Unit)? = null,
 ) {
-    var selected by remember { mutableStateOf(emptySet<String>()) }
+    var selected by remember { mutableStateOf(emptySet<Long>()) }
     var emptyNames by remember { mutableStateOf(emptyList<String>()) }
     val hasSelection = selected.isNotEmpty() || emptyNames.isNotEmpty()
 

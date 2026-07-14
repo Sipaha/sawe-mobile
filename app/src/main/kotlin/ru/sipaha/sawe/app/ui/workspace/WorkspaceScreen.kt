@@ -37,7 +37,7 @@ import ru.sipaha.sawe.core.displayState
 fun WorkspaceScreen(
     viewModel: MainViewModel,
     onOpenSession: (sessionId: String) -> Unit,
-    onOpenProjects: (solutionId: String) -> Unit,
+    onOpenProjects: (solutionId: Long) -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     val state by viewModel.workspaceState.collectAsState()
@@ -51,7 +51,7 @@ fun WorkspaceScreen(
     // workspace. Both pieces of state survive config-change so a rotation
     // doesn't dismiss an in-progress dialog.
     var showCreateSolution by rememberSaveable { mutableStateOf(false) }
-    var newSessionForSolution by rememberSaveable { mutableStateOf<String?>(null) }
+    var newSessionForSolution by rememberSaveable { mutableStateOf<Long?>(null) }
 
     Scaffold(
         topBar = {
@@ -143,12 +143,12 @@ fun WorkspaceScreen(
 internal fun WorkspaceListContent(
     solutions: List<OpenSolutionVM>,
     onOpenSession: (String) -> Unit = {},
-    onOpenProjects: (String) -> Unit = {},
-    onCloseSolution: (String) -> Unit = {},
-    onDeleteSolution: (String) -> Unit = {},
+    onOpenProjects: (Long) -> Unit = {},
+    onCloseSolution: (Long) -> Unit = {},
+    onDeleteSolution: (Long) -> Unit = {},
     onCloseSession: (String) -> Unit = {},
     onDeleteSession: (String) -> Unit = {},
-    onCreateNewSessionFor: (String) -> Unit = {},
+    onCreateNewSessionFor: (Long) -> Unit = {},
 ) {
     LazyColumn(modifier = Modifier.fillMaxSize()) {
         solutions.forEach { sol ->

@@ -611,7 +611,7 @@ class RemoteClient internal constructor(
      * immediately; clone progress arrives via `solution_member_add_*`
      * notifications.
      */
-    suspend fun addMember(solutionId: String, catalogId: String): AddMemberResult {
+    suspend fun addMember(solutionId: Long, catalogId: Long): AddMemberResult {
         val params = buildJsonObject {
             put("solution_id", solutionId)
             put("catalog_id", catalogId)
@@ -629,7 +629,7 @@ class RemoteClient internal constructor(
      * [solutionId]. Synchronous server-side — the returned `catalog_id`
      * is the slug the server assigned the new member.
      */
-    suspend fun addEmptyMember(solutionId: String, name: String): AddEmptyMemberResult {
+    suspend fun addEmptyMember(solutionId: Long, name: String): AddEmptyMemberResult {
         val params = buildJsonObject {
             put("solution_id", solutionId)
             put("name", name)
@@ -646,7 +646,7 @@ class RemoteClient internal constructor(
      * Remove a member from [solutionId]. Config-only on the server — the
      * on-disk worktree directory is left untouched.
      */
-    suspend fun removeMember(solutionId: String, catalogId: String) {
+    suspend fun removeMember(solutionId: Long, catalogId: Long) {
         val params = buildJsonObject {
             put("solution_id", solutionId)
             put("catalog_id", catalogId)
@@ -662,7 +662,7 @@ class RemoteClient internal constructor(
      * it as a member, so cached clones of in-use projects are never
      * orphaned. The tool-level rejection surfaces via [JsonRpcResponse.toolError].
      */
-    suspend fun catalogRemove(catalogId: String) {
+    suspend fun catalogRemove(catalogId: Long) {
         val params = buildJsonObject { put("catalog_id", catalogId) }
         val response = call("remote.catalog.remove_project", params)
         val err = response.error

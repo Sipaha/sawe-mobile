@@ -21,10 +21,10 @@ class WorkspaceDtosTest {
             {
               "seq": 42,
               "solutions": [{
-                "id": "s1", "name": "alpha", "root": "/x",
+                "id": 1, "name": "alpha", "root": "/x",
                 "member_count": 1, "open": true,
                 "sessions": [{
-                  "id": "se1", "solution_id": "s1", "agent_id": "claude",
+                  "id": "se1", "solution_id": 1, "agent_id": "claude",
                   "title": "t", "state": {"kind": "idle"},
                   "created_at": 1, "last_activity_at": 1
                 }]
@@ -39,10 +39,10 @@ class WorkspaceDtosTest {
 
     @Test
     fun solution_opened_payload_carries_seq_and_optional_solution() {
-        val raw = """{"seq":3,"solution":{"id":"s1","name":"a","root":"/x","member_count":0,"open":true},"sessions":[]}"""
+        val raw = """{"seq":3,"solution":{"id":1,"name":"a","root":"/x","member_count":0,"open":true},"sessions":[]}"""
         val p = json.decodeFromString<WorkspaceSolutionOpenedPayload>(raw)
         assertEquals(3L, p.seq)
-        assertEquals("s1", p.solution?.id)
+        assertEquals(1L, p.solution?.id)
     }
 
     @Test

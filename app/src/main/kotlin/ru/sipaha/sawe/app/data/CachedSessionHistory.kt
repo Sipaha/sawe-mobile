@@ -14,7 +14,7 @@ import ru.sipaha.sawe.core.EntrySummary
 @Serializable
 data class CachedSessionHistory(
     val sessionId: String,
-    val solutionId: String,
+    val solutionId: Long,
     val agentId: String,
     val entries: List<EntrySummary>,
     /**
@@ -36,8 +36,11 @@ data class CachedSessionHistory(
      * any `schemaVersion` key, so it must decode back to `1` and be rejected by
      * [SessionHistoryRepository.gateBySchema]. Every NEW write is stamped with
      * [CACHE_SCHEMA_VERSION] in `SessionHistoryRepository.writeNow` before
-     * encoding, so `2 != 1` (the default) forces the key to be persisted and the
-     * blob decodes back to `2`, passing the gate.
+     * encoding, so `3 != 1` (the default) forces the key to be persisted and the
+     * blob decodes back to `3`, passing the gate. Bumped 2→3 for the numeric
+     * Solution/catalog-id wire migration — a pre-migration blob has
+     * [solutionId] as a JSON string and must be invalidated rather than
+     * fail to decode.
      */
     val schemaVersion: Int = 1,
     /** Phase-5 delta cursor: the session epoch this cache was built against. */
@@ -47,6 +50,6 @@ data class CachedSessionHistory(
     val lastSeq: Long = 0,
 ) {
     companion object {
-        const val CACHE_SCHEMA_VERSION = 2
+        const val CACHE_SCHEMA_VERSION = 3
     }
 }

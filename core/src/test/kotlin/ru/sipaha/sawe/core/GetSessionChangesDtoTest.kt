@@ -109,7 +109,7 @@ class GetSessionChangesDtoTest {
         val json = """
             {
               "id": "ses-1",
-              "solution_id": "sol-1",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "Test",
               "state": {"kind": "idle"},
@@ -131,7 +131,7 @@ class GetSessionChangesDtoTest {
         val json = """
             {
               "id": "ses-2",
-              "solution_id": "sol-1",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "Pre-phase5",
               "state": {"kind": "idle"},

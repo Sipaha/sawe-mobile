@@ -13,7 +13,7 @@ import ru.sipaha.sawe.core.SolutionMember
  */
 class CwdOptionsTest {
 
-    private fun member(id: String) = SolutionMember(
+    private fun member(id: Long) = SolutionMember(
         catalogId = id,
         localPath = "/home/u/.spk/sol/$id",
         status = "ready",
@@ -21,12 +21,12 @@ class CwdOptionsTest {
 
     @Test
     fun `options are exactly the member projects`() {
-        val options = cwdOptionsFor(listOf(member("sawe"), member("spk-editor-mobile")))
+        val options = cwdOptionsFor(listOf(member(1L), member(2L)))
 
         assertEquals(
             listOf(
-                CwdOption("sawe", "/home/u/.spk/sol/sawe"),
-                CwdOption("spk-editor-mobile", "/home/u/.spk/sol/spk-editor-mobile"),
+                CwdOption("1", "/home/u/.spk/sol/1"),
+                CwdOption("2", "/home/u/.spk/sol/2"),
             ),
             options,
         )
@@ -34,11 +34,11 @@ class CwdOptionsTest {
 
     @Test
     fun `solution root is never offered`() {
-        val options = cwdOptionsFor(listOf(member("sawe")))
+        val options = cwdOptionsFor(listOf(member(1L)))
 
         assertTrue(options.none { it.label.contains("root", ignoreCase = true) })
         // The member's own path is the deepest thing offered — no parent dir.
-        assertTrue(options.all { it.path.endsWith("/sawe") })
+        assertTrue(options.all { it.path.endsWith("/1") })
     }
 
     @Test

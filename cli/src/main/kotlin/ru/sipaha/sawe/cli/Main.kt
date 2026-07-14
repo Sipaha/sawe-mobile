@@ -195,8 +195,8 @@ private fun parseArgs(args: List<String>): CliArgs? {
  * Subcommands:
  *   snapshot                                → workspace.snapshot            {}
  *   list-solutions [--open|--closed|--all]  → workspace.list_solutions      {"open": true|false|null}
- *   open-solution  <SOLUTION_ID>            → workspace.open_solution       {"solution_id": "..."}
- *   close-solution <SOLUTION_ID>            → workspace.close_solution      {"solution_id": "..."}
+ *   open-solution  <SOLUTION_ID>            → workspace.open_solution       {"solution_id": <number>}
+ *   close-solution <SOLUTION_ID>            → workspace.close_solution      {"solution_id": <number>}
  *   open-session   <SESSION_ID>             → workspace.open_session        {"session_id": "..."}
  *   close-session  <SESSION_ID>             → workspace.close_session       {"session_id": "..."}
  */
@@ -223,19 +223,19 @@ private fun parseWorkspaceSubcommand(pairing: String, sub: List<String>): CliArg
         }
 
         "open-solution" -> {
-            val id = sub.getOrNull(1) ?: run {
-                System.err.println("error: open-solution requires <SOLUTION_ID>")
+            val id = sub.getOrNull(1)?.toLongOrNull() ?: run {
+                System.err.println("error: open-solution requires a numeric <SOLUTION_ID>")
                 return null
             }
-            CliArgs(pairing, "workspace.open_solution", """{"solution_id":"$id"}""")
+            CliArgs(pairing, "workspace.open_solution", """{"solution_id":$id}""")
         }
 
         "close-solution" -> {
-            val id = sub.getOrNull(1) ?: run {
-                System.err.println("error: close-solution requires <SOLUTION_ID>")
+            val id = sub.getOrNull(1)?.toLongOrNull() ?: run {
+                System.err.println("error: close-solution requires a numeric <SOLUTION_ID>")
                 return null
             }
-            CliArgs(pairing, "workspace.close_solution", """{"solution_id":"$id"}""")
+            CliArgs(pairing, "workspace.close_solution", """{"solution_id":$id}""")
         }
 
         "open-session" -> {

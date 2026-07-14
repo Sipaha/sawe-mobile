@@ -67,7 +67,7 @@ import ru.sipaha.sawe.core.SolutionMember
 @Composable
 fun NewSessionDialog(
     viewModel: MainViewModel,
-    solutionId: String,
+    solutionId: Long,
     onDismiss: () -> Unit,
     onCreated: (String) -> Unit,
 ) {
@@ -318,7 +318,7 @@ internal data class CwdOption(val label: String, val path: String)
  * empty list, and the dialog then sends no `cwd` at all (server decides).
  */
 internal fun cwdOptionsFor(members: List<SolutionMember>): List<CwdOption> =
-    members.map { CwdOption(label = it.catalogId, path = it.localPath) }
+    members.map { CwdOption(label = it.catalogId.toString(), path = it.localPath) }
 
 /**
  * Dropdown for selecting the new session's working directory. Options are

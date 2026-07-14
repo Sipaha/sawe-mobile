@@ -236,7 +236,7 @@ fun AppNav(viewModel: MainViewModel, initialRoute: String? = null) {
                 route = "workspace/solutions/{solutionId}/projects",
                 arguments = listOf(navArgument("solutionId") { type = NavType.StringType }),
             ) { entry ->
-                val solutionId = entry.arguments?.getString("solutionId").orEmpty()
+                val solutionId = entry.arguments?.getString("solutionId").orEmpty().toLongOrNull() ?: 0L
                 SolutionProjectsScreen(
                     viewModel = viewModel,
                     solutionId = solutionId,

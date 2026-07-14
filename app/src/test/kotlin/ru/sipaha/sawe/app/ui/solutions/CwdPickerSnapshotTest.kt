@@ -32,8 +32,8 @@ class CwdPickerSnapshotTest {
     fun member_projects_only() {
         val options = cwdOptionsFor(
             listOf(
-                SolutionMember("sawe", "/home/u/.spk/sol/sawe", "ready"),
-                SolutionMember("spk-editor-mobile", "/home/u/.spk/sol/spk-editor-mobile", "ready"),
+                SolutionMember(1L, "/home/u/.spk/sol/sawe", "ready"),
+                SolutionMember(2L, "/home/u/.spk/sol/spk-editor-mobile", "ready"),
             ),
         )
 

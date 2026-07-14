@@ -63,8 +63,13 @@ import kotlinx.serialization.json.put
  * - v5: teammate labels ride `StreamDto.label`; `SessionSummary.active_subagents`
  *       removed; `agent_session_active_subagents_changed` is now a bare
  *       `{session_id}` dirty-poke. HARD CUTOVER.
+ * - v6: Solution / member / catalog ids are numeric (`i64`) on the wire
+ *       instead of strings. Session, agent, operation, and tool-call ids
+ *       are unaffected — they stay strings. HARD CUTOVER (a v6 server's
+ *       bare-integer `id`/`solution_id`/`catalog_id` fields fail to decode
+ *       against a pre-v6 client's `String`-typed DTOs).
  */
-const val SUPPORTED_WIRE_SCHEMA_VERSION: Int = 5
+const val SUPPORTED_WIRE_SCHEMA_VERSION: Int = 6
 
 /**
  * True iff the server advertises a chat-wire schema this client doesn't
@@ -118,7 +123,7 @@ data class CapabilitiesDto(
 
 @Serializable
 data class SolutionSummary(
-    val id: String,
+    val id: Long,
     val name: String,
     val root: String,
     @SerialName("member_count") val memberCount: Int,
@@ -137,14 +142,14 @@ data class ListSolutionsResult(val solutions: List<SolutionSummary>)
  */
 @Serializable
 data class SolutionMember(
-    @SerialName("catalog_id") val catalogId: String,
+    @SerialName("catalog_id") val catalogId: Long,
     @SerialName("local_path") val localPath: String,
     val status: String,
 )
 
 @Serializable
 data class SolutionDetails(
-    val id: String,
+    val id: Long,
     val name: String,
     val root: String,
     val members: List<SolutionMember> = emptyList(),
@@ -169,7 +174,7 @@ data class GetSolutionResult(
  */
 @Serializable
 data class CatalogProjectInfo(
-    @SerialName("id") val catalogId: String,
+    @SerialName("id") val catalogId: Long,
     val name: String,
 )
 
@@ -182,7 +187,7 @@ data class CatalogListResult(val projects: List<CatalogProjectInfo> = emptyList(
  * fire follow-up `add_member` / `add_empty_member` calls and to navigate.
  */
 @Serializable
-data class CreateSolutionResult(@SerialName("solution_id") val solutionId: String)
+data class CreateSolutionResult(@SerialName("solution_id") val solutionId: Long)
 
 /**
  * Result envelope for `solutions.add_member`. The clone runs in the
@@ -194,7 +199,7 @@ data class AddMemberResult(@SerialName("operation_id") val operationId: String)
 
 /** Result envelope for `solutions.add_empty_member` — synchronous create. */
 @Serializable
-data class AddEmptyMemberResult(@SerialName("catalog_id") val catalogId: String)
+data class AddEmptyMemberResult(@SerialName("catalog_id") val catalogId: Long)
 
 /**
  * Decoded payload of a `solution_member_add_progress` notification.
@@ -205,8 +210,8 @@ data class AddEmptyMemberResult(@SerialName("catalog_id") val catalogId: String)
  */
 @Serializable
 data class MemberAddProgressPayload(
-    @SerialName("solution_id") val solutionId: String,
-    @SerialName("catalog_id") val catalogId: String,
+    @SerialName("solution_id") val solutionId: Long,
+    @SerialName("catalog_id") val catalogId: Long,
     val percent: Int? = null,
     val stage: String? = null,
 )
@@ -218,15 +223,15 @@ data class MemberAddProgressPayload(
  */
 @Serializable
 data class MemberAddCompletedPayload(
-    @SerialName("solution_id") val solutionId: String,
-    @SerialName("catalog_id") val catalogId: String,
+    @SerialName("solution_id") val solutionId: Long,
+    @SerialName("catalog_id") val catalogId: Long,
     val error: String? = null,
 )
 
 @Serializable
 data class SessionSummary(
     val id: String,
-    @SerialName("solution_id") val solutionId: String,
+    @SerialName("solution_id") val solutionId: Long,
     @SerialName("agent_id") val agentId: String,
     val title: String,
     /**
@@ -759,7 +764,7 @@ data class StreamDto(
 @Serializable
 data class GetSessionResult(
     val id: String,
-    @SerialName("solution_id") val solutionId: String,
+    @SerialName("solution_id") val solutionId: Long,
     @SerialName("agent_id") val agentId: String,
     val title: String,
     /** Structured session state — see [SessionSummary.state]. */
@@ -895,7 +900,7 @@ enum class EntryRole { User, Assistant, ToolCall, Plan, System, Unknown }
 
 @Serializable
 data class WorkspaceSolution(
-    val id: String,
+    val id: Long,
     val name: String,
     val root: String,
     @SerialName("member_count") val memberCount: Int,
@@ -931,40 +936,40 @@ data class WorkspaceSolutionOpenedPayload(
 @Serializable
 data class WorkspaceSolutionClosedPayload(
     val seq: Long,
-    @SerialName("solution_id") val solutionId: String,
+    @SerialName("solution_id") val solutionId: Long,
 )
 
 @Serializable
 data class WorkspaceSolutionDeletedPayload(
     val seq: Long,
-    @SerialName("solution_id") val solutionId: String,
+    @SerialName("solution_id") val solutionId: Long,
 )
 
 @Serializable
 data class WorkspaceSessionOpenedPayload(
     val seq: Long,
-    @SerialName("solution_id") val solutionId: String,
+    @SerialName("solution_id") val solutionId: Long,
     val session: SessionSummary,
 )
 
 @Serializable
 data class WorkspaceSessionClosedPayload(
     val seq: Long,
-    @SerialName("solution_id") val solutionId: String,
+    @SerialName("solution_id") val solutionId: Long,
     @SerialName("session_id") val sessionId: String,
 )
 
 @Serializable
 data class WorkspaceSessionDeletedPayload(
     val seq: Long,
-    @SerialName("solution_id") val solutionId: String,
+    @SerialName("solution_id") val solutionId: Long,
     @SerialName("session_id") val sessionId: String,
 )
 
 @Serializable
 data class WorkspaceSessionStateChangedPayload(
     val seq: Long,
-    @SerialName("solution_id") val solutionId: String,
+    @SerialName("solution_id") val solutionId: Long,
     @SerialName("session_id") val sessionId: String,
     val state: SessionStateDto,
 )

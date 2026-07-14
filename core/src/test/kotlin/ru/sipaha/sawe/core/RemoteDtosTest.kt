@@ -15,8 +15,8 @@ class RemoteDtosTest {
         assertFalse(isServerTooNew(serverWire = 0, supported = 1)) // same major, not too-new
     }
 
-    @Test fun `SUPPORTED_WIRE_SCHEMA_VERSION is v5 (active_subagents removed, labels on streams)`() {
-        assertEquals(5, SUPPORTED_WIRE_SCHEMA_VERSION)
+    @Test fun `SUPPORTED_WIRE_SCHEMA_VERSION is v6 (numeric solution and catalog ids)`() {
+        assertEquals(6, SUPPORTED_WIRE_SCHEMA_VERSION)
     }
 
     @Test fun `isServerTooOld gates a pre-v5 server and admits v5 plus newer`() {
@@ -54,9 +54,9 @@ class RemoteDtosTest {
         // Unknown extra keys are tolerated (per JsonRpc.json config).
         val extra = JsonRpc.json.decodeFromString(
             CapabilitiesDto.serializer(),
-            """{"protocol_version":"x","wire_schema_version":6,"build":"abc"}""",
+            """{"protocol_version":"x","wire_schema_version":7,"build":"abc"}""",
         )
-        assertEquals(6, extra.wireSchemaVersion)
+        assertEquals(7, extra.wireSchemaVersion)
         assertTrue(isServerTooNew(extra.wireSchemaVersion))
     }
 
@@ -97,7 +97,7 @@ class RemoteDtosTest {
         val text = """
             {
               "id": "ses-tolerant",
-              "solution_id": "sol-1",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "Mixed",
               "state": {"kind":"future_state"},
@@ -135,7 +135,7 @@ class RemoteDtosTest {
     fun `SolutionSummary round-trips with all optional fields present`() {
         val text = """
             {
-              "id": "sol-1",
+              "id": 1,
               "name": "Spk Editor",
               "root": "/home/spk/.spk/spk-editor",
               "member_count": 4,
@@ -145,7 +145,7 @@ class RemoteDtosTest {
             }
         """.trimIndent()
         val parsed = JsonRpc.json.decodeFromString(SolutionSummary.serializer(), text)
-        assertEquals("sol-1", parsed.id)
+        assertEquals(1L, parsed.id)
         assertEquals("Spk Editor", parsed.name)
         assertEquals("/home/spk/.spk/spk-editor", parsed.root)
         assertEquals(4, parsed.memberCount)
@@ -162,7 +162,7 @@ class RemoteDtosTest {
     fun `SolutionSummary tolerates missing optional fields`() {
         val text = """
             {
-              "id": "sol-2",
+              "id": 2,
               "name": "Other",
               "root": "/tmp/x",
               "member_count": 0,
@@ -182,14 +182,14 @@ class RemoteDtosTest {
             {
               "solutions": [
                 {
-                  "id": "sol-a",
+                  "id": 10,
                   "name": "A",
                   "root": "/a",
                   "member_count": 1,
                   "open": true
                 },
                 {
-                  "id": "sol-b",
+                  "id": 20,
                   "name": "B",
                   "root": "/b",
                   "member_count": 2,
@@ -202,7 +202,7 @@ class RemoteDtosTest {
         """.trimIndent()
         val parsed = JsonRpc.json.decodeFromString(ListSolutionsResult.serializer(), text)
         assertEquals(2, parsed.solutions.size)
-        assertEquals("sol-a", parsed.solutions[0].id)
+        assertEquals(10L, parsed.solutions[0].id)
         assertEquals("win-2", parsed.solutions[1].mainWindowId)
     }
 
@@ -211,7 +211,7 @@ class RemoteDtosTest {
         val text = """
             {
               "id": "ses-1",
-              "solution_id": "sol-1",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "Refactor auth",
               "state": {"kind":"idle"},
@@ -221,7 +221,7 @@ class RemoteDtosTest {
         """.trimIndent()
         val parsed = JsonRpc.json.decodeFromString(SessionSummary.serializer(), text)
         assertEquals("ses-1", parsed.id)
-        assertEquals("sol-1", parsed.solutionId)
+        assertEquals(1L, parsed.solutionId)
         assertEquals("claude", parsed.agentId)
         assertEquals(SessionStateDto.Idle, parsed.state)
         assertEquals(1715800000000L, parsed.createdAt)
@@ -236,7 +236,7 @@ class RemoteDtosTest {
         // string. Assert it survives a decode + re-encode + decode cycle.
         val seed = SessionSummary(
             id = "ses-2",
-            solutionId = "sol-1",
+            solutionId = 1L,
             agentId = "claude",
             title = "Long-running",
             state = SessionStateDto.Running(1715900201500L),
@@ -257,7 +257,7 @@ class RemoteDtosTest {
               "sessions": [
                 {
                   "id": "s1",
-                  "solution_id": "sol",
+                  "solution_id": 1,
                   "agent_id": "claude",
                   "title": "T",
                   "state": {"kind":"awaiting_input"},
@@ -279,7 +279,7 @@ class RemoteDtosTest {
         val text = """
             {
               "id": "s",
-              "solution_id": "sol",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "T",
               "state": {"kind":"idle"},
@@ -313,7 +313,7 @@ class RemoteDtosTest {
         val text = """
             {
               "id": "ses-empty",
-              "solution_id": "sol-1",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "Just opened",
               "state": {"kind":"idle"},
@@ -324,7 +324,7 @@ class RemoteDtosTest {
         """.trimIndent()
         val parsed = JsonRpc.json.decodeFromString(GetSessionResult.serializer(), text)
         assertEquals("ses-empty", parsed.id)
-        assertEquals("sol-1", parsed.solutionId)
+        assertEquals(1L, parsed.solutionId)
         assertTrue(parsed.entries.isEmpty())
         assertEquals(DisplayState.Idle, parsed.state.displayState())
     }
@@ -334,7 +334,7 @@ class RemoteDtosTest {
         val text = """
             {
               "id": "ses-running",
-              "solution_id": "sol-1",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "Mid-turn",
               "state": {"kind":"running","started_at_ms":1715900201500},
@@ -793,7 +793,7 @@ class RemoteDtosTest {
         val text = """
             {
               "id": "ses-page",
-              "solution_id": "sol-1",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "Paginated",
               "state": {"kind":"idle"},
@@ -827,7 +827,7 @@ class RemoteDtosTest {
         val text = """
             {
               "id": "ses-legacy",
-              "solution_id": "sol-1",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "Legacy",
               "state": {"kind":"idle"},
@@ -852,7 +852,7 @@ class RemoteDtosTest {
         val withCount = """
             {
               "sessions": [
-                {"id":"s1","solution_id":"sol","agent_id":"claude","title":"T","state":{"kind":"idle"},"created_at":0,"last_activity_at":0}
+                {"id":"s1","solution_id":1,"agent_id":"claude","title":"T","state":{"kind":"idle"},"created_at":0,"last_activity_at":0}
               ],
               "total_count": 5
             }
@@ -861,7 +861,7 @@ class RemoteDtosTest {
         assertEquals(5, parsedWith.totalCount)
 
         val without = """
-            {"sessions": [{"id":"s2","solution_id":"sol","agent_id":"c","title":"T","state":{"kind":"idle"},"created_at":0,"last_activity_at":0}]}
+            {"sessions": [{"id":"s2","solution_id":1,"agent_id":"c","title":"T","state":{"kind":"idle"},"created_at":0,"last_activity_at":0}]}
         """.trimIndent()
         val parsedWithout = JsonRpc.json.decodeFromString(ListSessionsResult.serializer(), without)
         assertEquals(-1, parsedWithout.totalCount)
@@ -875,7 +875,7 @@ class RemoteDtosTest {
         val text = """
             {
               "id": "ses-child",
-              "solution_id": "sol-1",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "Sub-agent dispatch",
               "state": {"kind":"running","started_at_ms":1715900201500},
@@ -908,7 +908,7 @@ class RemoteDtosTest {
         val text = """
             {
               "id": "ses-meter",
-              "solution_id": "sol-1",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "Big context",
               "state": {"kind":"running","started_at_ms":1715900201500},
@@ -937,7 +937,7 @@ class RemoteDtosTest {
         val text = """
             {
               "id": "ses-pre-meter",
-              "solution_id": "sol-1",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "Pre-meter",
               "state": {"kind":"idle"},
@@ -961,7 +961,7 @@ class RemoteDtosTest {
         val running = """
             {
               "id": "ses-running",
-              "solution_id": "sol-1",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "In flight",
               "state": {"kind":"running","started_at_ms":1715900201500},
@@ -975,7 +975,7 @@ class RemoteDtosTest {
         val idle = """
             {
               "id": "ses-idle",
-              "solution_id": "sol-1",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "Quiet",
               "state": {"kind":"idle"},
@@ -995,7 +995,7 @@ class RemoteDtosTest {
         val text = """
             {
               "id": "ses-old",
-              "solution_id": "sol-1",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "Pre-F",
               "state": {"kind":"idle"},
@@ -1024,7 +1024,7 @@ class RemoteDtosTest {
               "children": [
                 {
                   "id": "ses-c1",
-                  "solution_id": "sol-1",
+                  "solution_id": 1,
                   "agent_id": "claude",
                   "title": "First child",
                   "state": {"kind":"idle"},
@@ -1035,7 +1035,7 @@ class RemoteDtosTest {
                 },
                 {
                   "id": "ses-c2",
-                  "solution_id": "sol-1",
+                  "solution_id": 1,
                   "agent_id": "claude",
                   "title": "Second child",
                   "state": {"kind":"running","started_at_ms":300},
@@ -1104,13 +1104,13 @@ class RemoteDtosTest {
         // the client side yet) so any value must round-trip verbatim.
         val text = """
             {
-              "catalog_id": "cat-123",
+              "catalog_id": 123,
               "local_path": "/home/user/projects/foo",
               "status": "active"
             }
         """.trimIndent()
         val parsed = JsonRpc.json.decodeFromString(SolutionMember.serializer(), text)
-        assertEquals("cat-123", parsed.catalogId)
+        assertEquals(123L, parsed.catalogId)
         assertEquals("/home/user/projects/foo", parsed.localPath)
         assertEquals("active", parsed.status)
 
@@ -1123,22 +1123,22 @@ class RemoteDtosTest {
     fun `SolutionDetails round-trips with members and last_opened_at`() {
         val text = """
             {
-              "id": "sol-deep",
+              "id": 100,
               "name": "Spk Editor",
               "root": "/home/spk/.spk/spk-editor",
               "members": [
-                {"catalog_id": "c1", "local_path": "/p/one", "status": "active"},
-                {"catalog_id": "c2", "local_path": "/p/two", "status": "missing"}
+                {"catalog_id": 1, "local_path": "/p/one", "status": "active"},
+                {"catalog_id": 2, "local_path": "/p/two", "status": "missing"}
               ],
               "last_opened_at": "2026-05-16T08:00:00Z"
             }
         """.trimIndent()
         val parsed = JsonRpc.json.decodeFromString(SolutionDetails.serializer(), text)
-        assertEquals("sol-deep", parsed.id)
+        assertEquals(100L, parsed.id)
         assertEquals("Spk Editor", parsed.name)
         assertEquals("/home/spk/.spk/spk-editor", parsed.root)
         assertEquals(2, parsed.members.size)
-        assertEquals("c1", parsed.members[0].catalogId)
+        assertEquals(1L, parsed.members[0].catalogId)
         assertEquals("missing", parsed.members[1].status)
         assertEquals("2026-05-16T08:00:00Z", parsed.lastOpenedAt)
 
@@ -1151,13 +1151,13 @@ class RemoteDtosTest {
     fun `SolutionDetails tolerates empty members list and missing last_opened_at`() {
         val text = """
             {
-              "id": "sol-fresh",
+              "id": 101,
               "name": "Just made",
               "root": "/tmp/x"
             }
         """.trimIndent()
         val parsed = JsonRpc.json.decodeFromString(SolutionDetails.serializer(), text)
-        assertEquals("sol-fresh", parsed.id)
+        assertEquals(101L, parsed.id)
         assertTrue(parsed.members.isEmpty())
         assertNull(parsed.lastOpenedAt)
     }
@@ -1167,18 +1167,18 @@ class RemoteDtosTest {
         val text = """
             {
               "solution": {
-                "id": "sol-x",
+                "id": 102,
                 "name": "X",
                 "root": "/x",
                 "members": [
-                  {"catalog_id": "c", "local_path": "/x/m", "status": "active"}
+                  {"catalog_id": 3, "local_path": "/x/m", "status": "active"}
                 ],
                 "last_opened_at": "2026-05-17T12:00:00Z"
               }
             }
         """.trimIndent()
         val parsed = JsonRpc.json.decodeFromString(GetSolutionResult.serializer(), text)
-        assertEquals("sol-x", parsed.solution.id)
+        assertEquals(102L, parsed.solution.id)
         assertEquals(1, parsed.solution.members.size)
 
         val reencoded = JsonRpc.json.encodeToString(GetSolutionResult.serializer(), parsed)
@@ -1195,7 +1195,7 @@ class RemoteDtosTest {
         val text = """
             {
               "solution": {
-                "id": "sol-closed",
+                "id": 103,
                 "name": "Closed",
                 "root": "/closed"
               },
@@ -1203,7 +1203,7 @@ class RemoteDtosTest {
             }
         """.trimIndent()
         val parsed = JsonRpc.json.decodeFromString(GetSolutionResult.serializer(), text)
-        assertEquals("sol-closed", parsed.solution.id)
+        assertEquals(103L, parsed.solution.id)
     }
 
     @Test
@@ -1316,7 +1316,7 @@ class RemoteDtosTest {
             {
               "projects": [
                 {
-                  "id": "frontend",
+                  "id": 201,
                   "name": "Frontend",
                   "remote_url": "git@example.com:org/frontend.git",
                   "default_branch": "main",
@@ -1324,7 +1324,7 @@ class RemoteDtosTest {
                   "cache_last_fetched": "2026-05-19T00:00:00Z"
                 },
                 {
-                  "id": "backend",
+                  "id": 202,
                   "name": "Backend",
                   "remote_url": "git@example.com:org/backend.git",
                   "cache_status": "absent"
@@ -1334,9 +1334,9 @@ class RemoteDtosTest {
         """.trimIndent()
         val parsed = JsonRpc.json.decodeFromString(CatalogListResult.serializer(), text)
         assertEquals(2, parsed.projects.size)
-        assertEquals("frontend", parsed.projects[0].catalogId)
+        assertEquals(201L, parsed.projects[0].catalogId)
         assertEquals("Frontend", parsed.projects[0].name)
-        assertEquals("backend", parsed.projects[1].catalogId)
+        assertEquals(202L, parsed.projects[1].catalogId)
         assertEquals("Backend", parsed.projects[1].name)
     }
 
@@ -1350,18 +1350,18 @@ class RemoteDtosTest {
     fun `AddEmptyMemberResult maps snake_case catalog_id`() {
         val parsed = JsonRpc.json.decodeFromString(
             AddEmptyMemberResult.serializer(),
-            """{"catalog_id": "frontend-2"}""",
+            """{"catalog_id": 203}""",
         )
-        assertEquals("frontend-2", parsed.catalogId)
+        assertEquals(203L, parsed.catalogId)
     }
 
     @Test
     fun `CreateSolutionResult maps snake_case solution_id`() {
         val parsed = JsonRpc.json.decodeFromString(
             CreateSolutionResult.serializer(),
-            """{"solution_id": "sol-new-9"}""",
+            """{"solution_id": 9}""",
         )
-        assertEquals("sol-new-9", parsed.solutionId)
+        assertEquals(9L, parsed.solutionId)
     }
 
     @Test
@@ -1377,15 +1377,15 @@ class RemoteDtosTest {
     fun `MemberAddProgressPayload round-trips with percent and stage present`() {
         val text = """
             {
-              "solution_id": "sol-1",
-              "catalog_id": "frontend",
+              "solution_id": 1,
+              "catalog_id": 201,
               "percent": 60,
               "stage": "Receiving objects"
             }
         """.trimIndent()
         val parsed = JsonRpc.json.decodeFromString(MemberAddProgressPayload.serializer(), text)
-        assertEquals("sol-1", parsed.solutionId)
-        assertEquals("frontend", parsed.catalogId)
+        assertEquals(1L, parsed.solutionId)
+        assertEquals(201L, parsed.catalogId)
         assertEquals(60, parsed.percent)
         assertEquals("Receiving objects", parsed.stage)
     }
@@ -1397,8 +1397,8 @@ class RemoteDtosTest {
         // may omit the stage entirely.
         val text = """
             {
-              "solution_id": "sol-1",
-              "catalog_id": "frontend",
+              "solution_id": 1,
+              "catalog_id": 201,
               "percent": null
             }
         """.trimIndent()
@@ -1411,14 +1411,14 @@ class RemoteDtosTest {
     fun `MemberAddCompletedPayload round-trips success and error`() {
         val ok = JsonRpc.json.decodeFromString(
             MemberAddCompletedPayload.serializer(),
-            """{"solution_id": "sol-1", "catalog_id": "frontend", "error": null}""",
+            """{"solution_id": 1, "catalog_id": 201, "error": null}""",
         )
-        assertEquals("frontend", ok.catalogId)
+        assertEquals(201L, ok.catalogId)
         assertNull(ok.error)
 
         val failed = JsonRpc.json.decodeFromString(
             MemberAddCompletedPayload.serializer(),
-            """{"solution_id": "sol-1", "catalog_id": "frontend", "error": "clone failed: timeout"}""",
+            """{"solution_id": 1, "catalog_id": 201, "error": "clone failed: timeout"}""",
         )
         assertEquals("clone failed: timeout", failed.error)
     }
@@ -1427,7 +1427,7 @@ class RemoteDtosTest {
     fun optimisticStoppingOverridesStateButKeepsEntries() {
         val loaded = GetSessionResult(
             id = "ses-opt",
-            solutionId = "sol-1",
+            solutionId = 1L,
             agentId = "claude",
             title = "Mixed",
             state = SessionStateDto.Running(1779L),
@@ -1525,7 +1525,7 @@ class RemoteDtosTest {
         val text = """
             {
               "id": "ses-1",
-              "solution_id": "sol-1",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "T",
               "state": {"kind":"idle"},
@@ -1553,7 +1553,7 @@ class RemoteDtosTest {
         val text = """
             {
               "id": "ses-1",
-              "solution_id": "sol-1",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "T",
               "state": {"kind":"idle"},
@@ -1564,6 +1564,39 @@ class RemoteDtosTest {
         """.trimIndent()
         val parsed = JsonRpc.json.decodeFromString(GetSessionResult.serializer(), text)
         assertTrue(parsed.streams.isEmpty())
+    }
+
+    @Test
+    fun workspace_solution_decodes_numeric_ids() {
+        // Wire schema v6: Solution / member / catalog ids are bare numbers on
+        // the wire, not quoted strings. This is the exact shape that crashed
+        // decoding before the numeric-id migration
+        // ("String literal for value of key 'id' should be quoted").
+        val text = """
+            {
+              "id": 42,
+              "name": "Spk Editor",
+              "root": "/home/spk/.spk/spk-editor",
+              "member_count": 2,
+              "open": true,
+              "sessions": [
+                {
+                  "id": "ses-1",
+                  "solution_id": 42,
+                  "agent_id": "claude",
+                  "title": "T",
+                  "state": {"kind":"idle"},
+                  "created_at": 0,
+                  "last_activity_at": 0
+                }
+              ]
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(WorkspaceSolution.serializer(), text)
+        assertEquals(42L, parsed.id)
+        assertEquals(1, parsed.sessions.size)
+        assertEquals(42L, parsed.sessions[0].solutionId)
+        assertEquals("ses-1", parsed.sessions[0].id)
     }
 
 }

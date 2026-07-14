@@ -495,16 +495,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
 
     val catalog: StateFlow<List<ru.sipaha.sawe.core.CatalogProjectInfo>>
         get() = catalogStore.catalog
-    val memberAdds: StateFlow<Map<Pair<String, String>, MemberAddProgress>>
+    val memberAdds: StateFlow<Map<Pair<Long, Long>, MemberAddProgress>>
         get() = catalogStore.memberAdds
 
-    fun loadSolutionDetails(solutionId: String) = catalogStore.loadSolutionDetails(solutionId)
+    fun loadSolutionDetails(solutionId: Long) = catalogStore.loadSolutionDetails(solutionId)
     /**
      * Delete the solution [solutionId] on the server. The workspace
      * mirror picks up the removal via the `workspace.solution_deleted`
      * notification, so no manual list-refresh is needed.
      */
-    fun deleteSolution(solutionId: String) {
+    fun deleteSolution(solutionId: Long) {
         // Optimistic drop from the closed-solutions picker so the row vanishes
         // immediately. The server confirms via workspace.solution_deleted which
         // re-runs the same drop inside WorkspaceStore.applyDelta (idempotent
@@ -520,13 +520,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
      */
     fun createSolution(name: String) = catalogStore.createSolution(name)
     fun refreshCatalog() = catalogStore.refreshCatalog()
-    fun addMemberFromCatalog(solutionId: String, catalogId: String) =
+    fun addMemberFromCatalog(solutionId: Long, catalogId: Long) =
         catalogStore.addMemberFromCatalog(solutionId, catalogId)
-    fun createEmptyMember(solutionId: String, name: String) =
+    fun createEmptyMember(solutionId: Long, name: String) =
         catalogStore.createEmptyMember(solutionId, name)
-    fun removeMember(solutionId: String, catalogId: String) =
+    fun removeMember(solutionId: Long, catalogId: Long) =
         catalogStore.removeMember(solutionId, catalogId)
-    fun removeCatalogProject(catalogId: String) =
+    fun removeCatalogProject(catalogId: Long) =
         catalogStore.removeCatalogProject(catalogId)
 
     // ---- Workspace (open-set) surface ----
@@ -565,10 +565,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
     // [deleteSession] above, which targets
     // `solution_agent.delete_session`.
 
-    fun openSolution(id: String) = viewModelScope.launch {
+    fun openSolution(id: Long) = viewModelScope.launch {
         workspaceStore.openSolutionOptimistic(id)
     }
-    fun closeSolution(id: String) = viewModelScope.launch {
+    fun closeSolution(id: Long) = viewModelScope.launch {
         workspaceStore.closeSolutionOptimistic(id)
     }
     fun openSessionTab(id: String) = viewModelScope.launch {
@@ -597,8 +597,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
     val createSessionInFlight: StateFlow<Boolean> get() = sessionList.createSessionInFlight
     val lastCreateAutoOpened: StateFlow<Boolean> get() = sessionList.lastCreateAutoOpened
 
-    fun refreshSessions(solutionId: String) = sessionList.refreshSessions(solutionId)
-    fun startObservingSessions(solutionId: String) = sessionList.startObservingSessions(solutionId)
+    fun refreshSessions(solutionId: Long) = sessionList.refreshSessions(solutionId)
+    fun startObservingSessions(solutionId: Long) = sessionList.startObservingSessions(solutionId)
     fun stopObservingSessions() = sessionList.stopObservingSessions()
     fun clearSessions() = sessionList.clearSessions()
     fun openSession(sessionId: String) = sessionDetail.openSession(sessionId)
@@ -669,7 +669,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
     val resetSwitch: Flow<String> get() = sessionDetail.resetSwitch
     fun loadAgents() = sessionList.loadAgents()
     fun createSession(
-        solutionId: String,
+        solutionId: Long,
         agentId: String,
         initialMessage: String?,
         title: String?,

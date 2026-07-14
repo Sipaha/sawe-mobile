@@ -52,10 +52,10 @@ internal class WorkspaceClientImpl(
         }
     }
 
-    override suspend fun openSolution(id: String): Long =
+    override suspend fun openSolution(id: Long): Long =
         lifecycleCall("remote.workspace.open_solution", "solution_id", id)
 
-    override suspend fun closeSolution(id: String): Long =
+    override suspend fun closeSolution(id: Long): Long =
         lifecycleCall("remote.workspace.close_solution", "solution_id", id)
 
     override suspend fun openSession(id: String): Long =
@@ -64,6 +64,18 @@ internal class WorkspaceClientImpl(
     override suspend fun closeSession(id: String): Long =
         lifecycleCall("remote.workspace.close_session", "session_id", id)
 
+    /** Solution-id lifecycle calls — emitted as a bare integer on the wire. */
+    private suspend fun lifecycleCall(
+        toolName: String,
+        paramKey: String,
+        value: Long,
+    ): Long {
+        val client = getClient() ?: error("Not connected")
+        val resp = client.call(toolName, buildJsonObject { put(paramKey, value) })
+        return resp.decodeResultOrThrow(WorkspaceSeqAck.serializer()).seq
+    }
+
+    /** Session-id lifecycle calls — emitted as a quoted string on the wire. */
     private suspend fun lifecycleCall(
         toolName: String,
         paramKey: String,

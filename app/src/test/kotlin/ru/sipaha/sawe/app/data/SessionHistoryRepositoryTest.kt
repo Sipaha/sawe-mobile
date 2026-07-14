@@ -40,7 +40,7 @@ class SessionHistoryRepositoryTest {
         lastSeq: Long = 0,
     ) = CachedSessionHistory(
         sessionId = sessionId,
-        solutionId = "sol1",
+        solutionId = 1L,
         agentId = "agent1",
         entries = emptyList(),
         lastIndex = null,
@@ -79,7 +79,7 @@ class SessionHistoryRepositoryTest {
     fun `default schemaVersion is the legacy sentinel 1`() {
         val history = CachedSessionHistory(
             sessionId = "s2",
-            solutionId = "sol1",
+            solutionId = 1L,
             agentId = "agent1",
             entries = emptyList(),
             lastIndex = null,
@@ -123,7 +123,7 @@ class SessionHistoryRepositoryTest {
         val legacyJson = """
             {
               "sessionId": "s1",
-              "solutionId": "sol1",
+              "solutionId": 1,
               "agentId": "agent1",
               "entries": [],
               "lastIndex": null,
@@ -139,15 +139,15 @@ class SessionHistoryRepositoryTest {
         assertNull(SessionHistoryRepository.gateBySchema(decoded))
     }
 
-    // A v2-stamped blob (what writeNow produces) DOES carry the schemaVersion key, decodes back to
-    // 2, and passes the gate with its cursor intact.
+    // A CACHE_SCHEMA_VERSION-stamped blob (what writeNow produces) DOES carry the schemaVersion
+    // key, decodes back to CACHE_SCHEMA_VERSION, and passes the gate with its cursor intact.
     @Test
-    fun `v2-stamped blob carries schemaVersion key, decodes to 2, and passes gate`() {
+    fun `current-schema blob carries schemaVersion key, decodes to CACHE_SCHEMA_VERSION, and passes gate`() {
         val history = minimalHistory(schemaVersion = CACHE_SCHEMA_VERSION, epoch = 5, lastSeq = 42)
 
         val encoded = json.encodeToString(CachedSessionHistory.serializer(), history)
         assertTrue(
-            encoded.contains("\"schemaVersion\":2"),
+            encoded.contains("\"schemaVersion\":$CACHE_SCHEMA_VERSION"),
             "a CACHE_SCHEMA_VERSION blob must persist the key; got: $encoded",
         )
 

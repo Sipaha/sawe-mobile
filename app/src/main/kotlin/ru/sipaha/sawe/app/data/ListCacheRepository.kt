@@ -76,7 +76,7 @@ class ListCacheRepository(
         }.onFailure { Log.w(TAG, "saveSolutions() failed", it) }
     }
 
-    fun loadSessions(solutionId: String): List<SessionSummary>? {
+    fun loadSessions(solutionId: Long): List<SessionSummary>? {
         val p = prefs ?: return null
         val key = sessionsKey(solutionId) ?: return null
         return runCatching {
@@ -86,7 +86,7 @@ class ListCacheRepository(
             .getOrNull()
     }
 
-    fun saveSessions(solutionId: String, list: List<SessionSummary>) {
+    fun saveSessions(solutionId: Long, list: List<SessionSummary>) {
         val p = prefs ?: return
         val key = sessionsKey(solutionId) ?: return
         runCatching {
@@ -140,7 +140,7 @@ class ListCacheRepository(
         return "solutions:$serverId"
     }
 
-    private fun sessionsKey(solutionId: String): String? {
+    private fun sessionsKey(solutionId: Long): String? {
         val serverId = activeServerProvider() ?: return null
         return "sessions:$serverId:$solutionId"
     }

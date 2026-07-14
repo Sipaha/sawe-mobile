@@ -31,7 +31,7 @@ data class WorkspaceSnapshotVM(
 )
 
 data class OpenSolutionVM(
-    val id: String,
+    val id: Long,
     val name: String,
     val memberCount: Int,
     val sessions: List<OpenSessionVM>,
@@ -47,7 +47,7 @@ data class OpenSessionVM(
 )
 
 data class ClosedSolutionRow(
-    val id: String,
+    val id: Long,
     val name: String,
     val memberCount: Int,
     val lastOpenedAt: String?,
@@ -66,8 +66,8 @@ data class ClosedSolutionRow(
 interface WorkspaceClient {
     suspend fun fetchSnapshot(): WorkspaceSnapshotVM
     suspend fun fetchClosedSolutions(): List<ClosedSolutionRow>
-    suspend fun openSolution(id: String): Long
-    suspend fun closeSolution(id: String): Long
+    suspend fun openSolution(id: Long): Long
+    suspend fun closeSolution(id: Long): Long
     suspend fun openSession(id: String): Long
     suspend fun closeSession(id: String): Long
 }
@@ -135,13 +135,13 @@ class WorkspaceStore(
     // the data needed to materialise a new row (sessions, member count,
     // titles). They rely on the server delta to surface the new row.
 
-    suspend fun openSolutionOptimistic(id: String) {
+    suspend fun openSolutionOptimistic(id: Long) {
         // Opens are best applied via delta, not optimistic — we have no
         // local OpenSolutionVM data to splice in. Just fire the call.
         runCatching { client.openSolution(id) }
     }
 
-    suspend fun closeSolutionOptimistic(id: String) {
+    suspend fun closeSolutionOptimistic(id: Long) {
         val rollback = applyOptimistic { snap ->
             snap.copy(solutions = snap.solutions.filterNot { it.id == id })
         }
@@ -202,28 +202,28 @@ class WorkspaceStore(
         applyOrBufferSequenced(SequencedDelta.SolutionOpened(seq, solution, sessions))
     }
 
-    fun onSolutionClosed(seq: Long, solutionId: String) {
+    fun onSolutionClosed(seq: Long, solutionId: Long) {
         applyOrBufferSequenced(SequencedDelta.SolutionClosed(seq, solutionId))
     }
 
-    fun onSolutionDeleted(seq: Long, solutionId: String) {
+    fun onSolutionDeleted(seq: Long, solutionId: Long) {
         applyOrBufferSequenced(SequencedDelta.SolutionDeleted(seq, solutionId))
     }
 
-    fun onSessionOpened(seq: Long, solutionId: String, session: SessionSummary) {
+    fun onSessionOpened(seq: Long, solutionId: Long, session: SessionSummary) {
         applyOrBufferSequenced(SequencedDelta.SessionOpened(seq, solutionId, session))
     }
 
-    fun onSessionClosed(seq: Long, solutionId: String, sessionId: String) {
+    fun onSessionClosed(seq: Long, solutionId: Long, sessionId: String) {
         applyOrBufferSequenced(SequencedDelta.SessionClosed(seq, solutionId, sessionId))
     }
 
-    fun onSessionDeleted(seq: Long, solutionId: String, sessionId: String) {
+    fun onSessionDeleted(seq: Long, solutionId: Long, sessionId: String) {
         applyOrBufferSequenced(SequencedDelta.SessionDeleted(seq, solutionId, sessionId))
     }
 
     fun onSessionStateChanged(
-        seq: Long, solutionId: String, sessionId: String, state: SessionStateDto,
+        seq: Long, solutionId: Long, sessionId: String, state: SessionStateDto,
     ) {
         applyOrBufferSequenced(SequencedDelta.SessionStateChanged(seq, solutionId, sessionId, state))
     }
@@ -336,7 +336,7 @@ class WorkspaceStore(
      * through this path inside [applyDelta]). Idempotent on a row that's
      * already gone, so the duplicate from the delta is harmless.
      */
-    fun dropClosedSolutionRow(solutionId: String) {
+    fun dropClosedSolutionRow(solutionId: Long) {
         val current = _closedSolutions.value as? UiData.Loaded ?: return
         val pruned = current.value.filterNot { it.id == solutionId }
         if (pruned.size != current.value.size) {
@@ -445,12 +445,12 @@ class WorkspaceStore(
     private sealed interface SequencedDelta {
         val seq: Long
         data class SolutionOpened(override val seq: Long, val solution: SolutionSummary?, val sessions: List<SessionSummary>) : SequencedDelta
-        data class SolutionClosed(override val seq: Long, val solutionId: String) : SequencedDelta
-        data class SolutionDeleted(override val seq: Long, val solutionId: String) : SequencedDelta
-        data class SessionOpened(override val seq: Long, val solutionId: String, val session: SessionSummary) : SequencedDelta
-        data class SessionClosed(override val seq: Long, val solutionId: String, val sessionId: String) : SequencedDelta
-        data class SessionDeleted(override val seq: Long, val solutionId: String, val sessionId: String) : SequencedDelta
-        data class SessionStateChanged(override val seq: Long, val solutionId: String, val sessionId: String, val state: SessionStateDto) : SequencedDelta
+        data class SolutionClosed(override val seq: Long, val solutionId: Long) : SequencedDelta
+        data class SolutionDeleted(override val seq: Long, val solutionId: Long) : SequencedDelta
+        data class SessionOpened(override val seq: Long, val solutionId: Long, val session: SessionSummary) : SequencedDelta
+        data class SessionClosed(override val seq: Long, val solutionId: Long, val sessionId: String) : SequencedDelta
+        data class SessionDeleted(override val seq: Long, val solutionId: Long, val sessionId: String) : SequencedDelta
+        data class SessionStateChanged(override val seq: Long, val solutionId: Long, val sessionId: String, val state: SessionStateDto) : SequencedDelta
     }
 
     private fun applyDelta(snap: WorkspaceSnapshotVM, d: SequencedDelta): WorkspaceSnapshotVM {

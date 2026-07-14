@@ -60,8 +60,8 @@ internal class CatalogStore(
      * through here — they just refresh the open solution detail.
      */
     private val _memberAdds =
-        MutableStateFlow<Map<Pair<String, String>, MemberAddProgress>>(emptyMap())
-    val memberAdds: StateFlow<Map<Pair<String, String>, MemberAddProgress>> =
+        MutableStateFlow<Map<Pair<Long, Long>, MemberAddProgress>>(emptyMap())
+    val memberAdds: StateFlow<Map<Pair<Long, Long>, MemberAddProgress>> =
         _memberAdds.asStateFlow()
 
     /** Reset on tear-down (server switch / disconnect). */
@@ -104,7 +104,7 @@ internal class CatalogStore(
      * removal via the `workspace.solution_deleted` notification — no
      * explicit list refresh needed.
      */
-    fun deleteSolution(solutionId: String) {
+    fun deleteSolution(solutionId: Long) {
         val active = context.activeClient()
         if (active == null) {
             context.emitError(context.notConnectedMessage())
@@ -123,7 +123,7 @@ internal class CatalogStore(
         }
     }
 
-    fun loadSolutionDetails(solutionId: String) {
+    fun loadSolutionDetails(solutionId: Long) {
         val active = context.activeClient()
         if (active == null) {
             _solutionDetails.value = UiData.Error(context.notConnectedMessage())
@@ -151,7 +151,7 @@ internal class CatalogStore(
      * a member *after* the clone completes, so a landed catalog id always
      * means its ghost is stale.
      */
-    private fun reconcileMemberAdds(solutionId: String, landedCatalogIds: List<String>) {
+    private fun reconcileMemberAdds(solutionId: Long, landedCatalogIds: List<Long>) {
         if (landedCatalogIds.isEmpty()) return
         val landed = landedCatalogIds.toSet()
         val current = _memberAdds.value
@@ -185,7 +185,7 @@ internal class CatalogStore(
      * any solution still uses it — that rejection is surfaced via the
      * shared error channel (listing the referencing solutions).
      */
-    fun removeCatalogProject(catalogId: String) {
+    fun removeCatalogProject(catalogId: Long) {
         val active = context.activeClient()
         if (active == null) {
             context.emitError(context.notConnectedMessage())
@@ -205,7 +205,7 @@ internal class CatalogStore(
      * notification handlers below. On RPC failure the ghost row is marked
      * with the error rather than silently dropped.
      */
-    fun addMemberFromCatalog(solutionId: String, catalogId: String) {
+    fun addMemberFromCatalog(solutionId: Long, catalogId: Long) {
         val active = context.activeClient()
         if (active == null) {
             context.emitError(context.notConnectedMessage())
@@ -228,7 +228,7 @@ internal class CatalogStore(
      * [solutionId]. Synchronous server-side — on success we re-fetch the
      * open solution so the new member appears immediately.
      */
-    fun createEmptyMember(solutionId: String, name: String) {
+    fun createEmptyMember(solutionId: Long, name: String) {
         val active = context.activeClient()
         if (active == null) {
             context.emitError(context.notConnectedMessage())
@@ -252,7 +252,7 @@ internal class CatalogStore(
      * detail so the member count and rows update; the workspace mirror
      * picks up the change via the `solution_changed` notification.
      */
-    fun removeMember(solutionId: String, catalogId: String) {
+    fun removeMember(solutionId: Long, catalogId: Long) {
         val active = context.activeClient()
         if (active == null) {
             context.emitError(context.notConnectedMessage())
@@ -271,7 +271,7 @@ internal class CatalogStore(
      * — the solution still exists and can be opened from the desktop — so we
      * surface them quietly rather than as a user-facing error.
      */
-    private fun openOnDesktop(solutionId: String) {
+    private fun openOnDesktop(solutionId: Long) {
         val active = context.activeClient() ?: return
         val params = buildJsonObject {
             put("solution_id", solutionId)
@@ -335,8 +335,8 @@ internal class CatalogStore(
  * progress tick; [error] is non-null only on a failed add.
  */
 data class MemberAddProgress(
-    val solutionId: String,
-    val catalogId: String,
+    val solutionId: Long,
+    val catalogId: Long,
     val percent: Int? = null,
     val stage: String? = null,
     val error: String? = null,

@@ -40,7 +40,7 @@ class WorkspaceScreenSnapshotTest {
     fun populated_two_solutions_with_sessions() {
         val solutions = listOf(
             OpenSolutionVM(
-                id = "voxelcraft",
+                id = 1L,
                 name = "voxelcraft",
                 memberCount = 3,
                 sessions = listOf(
@@ -63,7 +63,7 @@ class WorkspaceScreenSnapshotTest {
                 ),
             ),
             OpenSolutionVM(
-                id = "spk",
+                id = 2L,
                 name = "SPK Solutions",
                 memberCount = 5,
                 sessions = listOf(
@@ -109,13 +109,13 @@ class WorkspaceScreenSnapshotTest {
     fun picker_sheet_populated() {
         val rows = listOf(
             ClosedSolutionRow(
-                id = "c1",
+                id = 1L,
                 name = "ML experiments",
                 memberCount = 4,
                 lastOpenedAt = "2 days ago",
             ),
             ClosedSolutionRow(
-                id = "c2",
+                id = 2L,
                 name = "Old prototype",
                 memberCount = 1,
                 lastOpenedAt = "6 months ago",

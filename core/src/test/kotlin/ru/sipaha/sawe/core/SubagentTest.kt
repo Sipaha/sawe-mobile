@@ -43,7 +43,7 @@ class SubagentTest {
         val text = """
             {
               "id": "ses-1",
-              "solution_id": "sol-1",
+              "solution_id": 1,
               "agent_id": "claude",
               "title": "T",
               "state": {"kind":"idle"},

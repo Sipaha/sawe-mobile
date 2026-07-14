@@ -128,7 +128,7 @@ internal class SessionListStore(
      * an `agent_session_*` event arrives.
      */
     @Volatile
-    private var observingSolutionId: String? = null
+    private var observingSolutionId: Long? = null
 
     /**
      * Read-only accessor for the coordinator's foreground-refresh hook.
@@ -136,7 +136,7 @@ internal class SessionListStore(
      * observed (i.e. a session-list surface is mounted), or null when
      * no list surface is visible.
      */
-    fun currentObservingSolutionId(): String? = observingSolutionId
+    fun currentObservingSolutionId(): Long? = observingSolutionId
 
     private var refreshSessionsJob: Job? = null
 
@@ -158,7 +158,7 @@ internal class SessionListStore(
         _createSessionInFlight.value = false
     }
 
-    fun refreshSessions(solutionId: String) {
+    fun refreshSessions(solutionId: Long) {
         val active = context.activeClient()
         if (active == null) {
             val cached = listCacheRepository.loadSessions(solutionId)
@@ -202,7 +202,7 @@ internal class SessionListStore(
         )
     }
 
-    fun startObservingSessions(solutionId: String) {
+    fun startObservingSessions(solutionId: Long) {
         if (context.activeClient() == null) return
         observingSolutionId = solutionId
         ensureNotificationsObserver()
@@ -605,7 +605,7 @@ internal class SessionListStore(
     }
 
     fun createSession(
-        solutionId: String,
+        solutionId: Long,
         agentId: String,
         initialMessage: String?,
         title: String?,
@@ -660,7 +660,7 @@ internal class SessionListStore(
 
     private suspend fun attemptCreateSession(
         active: RemoteClient,
-        solutionId: String,
+        solutionId: Long,
         agentId: String,
         initialMessage: String?,
         title: String?,
@@ -760,7 +760,7 @@ internal class SessionListStore(
 
     private suspend fun attemptOpenSolution(
         active: RemoteClient,
-        solutionId: String,
+        solutionId: Long,
     ): Result<Unit> {
         val params = buildJsonObject { put("solution_id", solutionId) }
         return runCatching {
