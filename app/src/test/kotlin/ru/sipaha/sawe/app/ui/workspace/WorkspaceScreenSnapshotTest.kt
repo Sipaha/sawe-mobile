@@ -23,9 +23,10 @@ import ru.sipaha.sawe.core.SessionStateDto
  *   - populated: two solutions with sessions in Running/Idle/Errored states
  *   - empty: the EmptyState shown when there are no open solutions
  *
- * No Roborazzi Gradle plugin is applied (incompatible with AGP 9), so we
- * call [captureRoboImage] directly with an explicit [RoborazziOptions]. To
- * (re-)record goldens, flip [taskType] back to [RoborazziTaskType.Record].
+ * No Roborazzi Gradle plugin is applied (incompatible with AGP 9), so there
+ * is no `verifyRoborazzi` task and we call [captureRoboImage] directly with
+ * an explicit [RoborazziOptions]. To (re-)record goldens, flip [taskType] to
+ * [RoborazziTaskType.Record].
  * See [ru.sipaha.sawe.app.ui.RoborazziSanityTest] for the rig template.
  */
 @OptIn(ExperimentalRoborazziApi::class)
@@ -34,7 +35,14 @@ import ru.sipaha.sawe.core.SessionStateDto
 @Config(sdk = [33], qualifiers = "w360dp-h640dp-xhdpi")
 class WorkspaceScreenSnapshotTest {
 
-    private val taskType = RoborazziTaskType.Compare
+    // VERIFYING mode: every capture below is checked against its committed
+    // golden and the test FAILS on a mismatch. This used to be
+    // [RoborazziTaskType.Compare], which merely writes *_compare.png /
+    // *_actual.png into build/outputs/roborazzi/ and returns normally — with
+    // no Roborazzi Gradle plugin there is no verify task either, so nothing
+    // ever asserted and the goldens were decorative. Verify still writes the
+    // same diff artifacts, it just throws afterwards.
+    private val taskType = RoborazziTaskType.Verify
 
     @Test
     fun populated_two_solutions_with_sessions() {
@@ -100,6 +108,25 @@ class WorkspaceScreenSnapshotTest {
             MaterialTheme {
                 Surface {
                     EmptyState()
+                }
+            }
+        }
+    }
+
+    /**
+     * The state a workspace snapshot failure lands in. Carries a Retry button
+     * now — without one the screen is a dead end until the user backgrounds
+     * and resumes the app (N-12).
+     */
+    @Test
+    fun error_state_with_retry() {
+        captureRoboImage(
+            filePath = "src/test/snapshots/roborazzi/WorkspaceScreen_error_with_retry.png",
+            roborazziOptions = RoborazziOptions(taskType = taskType),
+        ) {
+            MaterialTheme {
+                Surface {
+                    ErrorState(msg = "Request timed out after 30s")
                 }
             }
         }

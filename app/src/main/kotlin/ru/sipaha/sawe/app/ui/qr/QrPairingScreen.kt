@@ -1,7 +1,12 @@
 package ru.sipaha.sawe.app.ui.qr
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -22,12 +27,14 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -37,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
@@ -63,6 +71,15 @@ fun QrPairingScreen(
 
     var showManual by remember { mutableStateOf(false) }
     var pendingScan by remember { mutableStateOf(false) }
+    // Incremented on every pairing submission — see the error effect below.
+    var pairAttempt by remember { mutableIntStateOf(0) }
+
+    /** Submit [raw] for pairing, counting the attempt so its verdict is shown. */
+    fun submitPair(raw: String) {
+        pairAttempt++
+        snackbarHostState.currentSnackbarData?.dismiss()
+        onPair(raw)
+    }
 
     val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         val raw = result.contents
@@ -70,7 +87,7 @@ fun QrPairingScreen(
             // User cancelled or back-pressed: stay on this screen silently.
             return@rememberLauncherForActivityResult
         }
-        onPair(raw)
+        submitPair(raw)
     }
 
     fun launchScanner() {
@@ -95,9 +112,24 @@ fun QrPairingScreen(
         } else {
             pendingScan = false
             scope.launch {
-                snackbarHostState.showSnackbar(
-                    "Camera access is required to scan the pairing QR.",
+                // A denial the system will never prompt for again (the user
+                // ticked "don't ask again", or Android decided for them) is a
+                // dead end unless we hand them the one place it can be undone,
+                // so offer an action that opens the app's settings page.
+                val activity = context as? Activity
+                val permanentlyDenied = activity != null &&
+                    !ActivityCompat.shouldShowRequestPermissionRationale(
+                        activity,
+                        Manifest.permission.CAMERA,
+                    )
+                val result = snackbarHostState.showSnackbar(
+                    message = "Camera access is required to scan the pairing QR.",
+                    actionLabel = if (permanentlyDenied) "Settings" else null,
+                    withDismissAction = !permanentlyDenied,
                 )
+                if (result == SnackbarResult.ActionPerformed) {
+                    runCatching { context.startActivity(appSettingsIntent(context)) }
+                }
             }
         }
     }
@@ -115,7 +147,13 @@ fun QrPairingScreen(
         }
     }
 
-    LaunchedEffect(error) {
+    // Keyed on the attempt counter as well as the message. `error` reaches us
+    // through a StateFlow that conflates equal values, so a second attempt
+    // that fails for the exact same reason produces no recomposition and,
+    // keyed on the string alone, no snackbar — the user pressed Connect and
+    // got total silence (N-60). Bumping the counter on every submit
+    // guarantees one visible verdict per attempt.
+    LaunchedEffect(error, pairAttempt) {
         if (!error.isNullOrBlank()) {
             snackbarHostState.showSnackbar(error)
         }
@@ -160,7 +198,7 @@ fun QrPairingScreen(
             }
             if (showManual) {
                 HorizontalDivider()
-                ManualEntry(initialUrl = initialUrl, onConnect = onPair)
+                ManualEntry(initialUrl = initialUrl, onConnect = ::submitPair)
             }
         }
     }
@@ -185,3 +223,12 @@ private fun ManualEntry(initialUrl: String, onConnect: (String) -> Unit) {
         Text("Connect")
     }
 }
+
+/**
+ * Intent for this app's "App info" page, where a permanently-denied runtime
+ * permission can be re-granted. Nothing else in the app can undo that denial.
+ */
+private fun appSettingsIntent(context: Context): Intent = Intent(
+    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+    Uri.fromParts("package", context.packageName, null),
+)

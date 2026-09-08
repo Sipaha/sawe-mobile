@@ -85,8 +85,11 @@ fun NewSessionDialog(
     }
 
     var selectedAgentId by rememberSaveable { mutableStateOf<String?>(null) }
-    var initialMessage by rememberSaveable { mutableStateOf("") }
-    var sessionTitle by rememberSaveable { mutableStateOf("") }
+    // [DraftTextSaver] rather than the default `autoSaver`: both fields accept
+    // an unbounded paste and the raw String would travel through the
+    // saved-instance-state Binder transaction on backgrounding (N-58).
+    var initialMessage by rememberSaveable(stateSaver = DraftTextSaver) { mutableStateOf("") }
+    var sessionTitle by rememberSaveable(stateSaver = DraftTextSaver) { mutableStateOf("") }
     var selectedCwd by rememberSaveable { mutableStateOf<String?>(null) }
     val loadedSolution = (solutionDetailsState as? UiData.Loaded)?.value?.solution
     val members: List<SolutionMember> = loadedSolution?.members.orEmpty()
@@ -311,14 +314,31 @@ internal data class CwdOption(val label: String, val path: String)
 
 /**
  * Working-directory choices offered when creating a session: one per member
- * project, labelled by catalog id.
+ * project, labelled by the project's directory name (the last segment of
+ * [SolutionMember.localPath]).
+ *
+ * The label used to be `catalogId`, which was a String holding the project
+ * name; once catalog ids migrated to Long it started rendering as "1", "2".
+ * The full server-side path is not shown either — it is long, meaningless on
+ * a phone screen, and would not fit the field. The directory name is the one
+ * part of the path the user recognises. Identity stays on [CwdOption.path]:
+ * that is what goes on the wire as `cwd` and what selection is matched by,
+ * so labels may safely collide.
  *
  * The solution root is **not** a choice — a session started on mobile always
  * runs inside a single project worktree. A member-less solution yields an
  * empty list, and the dialog then sends no `cwd` at all (server decides).
  */
 internal fun cwdOptionsFor(members: List<SolutionMember>): List<CwdOption> =
-    members.map { CwdOption(label = it.catalogId.toString(), path = it.localPath) }
+    members.map { CwdOption(label = projectDirLabel(it.localPath), path = it.localPath) }
+
+/**
+ * Last path segment of [localPath], tolerating a trailing separator. Falls
+ * back to the whole path when there is no separator or nothing is left after
+ * trimming (e.g. "/"), so the label is never empty.
+ */
+private fun projectDirLabel(localPath: String): String =
+    localPath.trimEnd('/').substringAfterLast('/').ifEmpty { localPath }
 
 /**
  * Dropdown for selecting the new session's working directory. Options are
@@ -332,7 +352,8 @@ internal fun cwdOptionsFor(members: List<SolutionMember>): List<CwdOption> =
  * approach (and matches what M3 ExposedDropdownMenuBox builds under the
  * hood, without dragging in its trigger-anchor machinery for a
  * single-screen dialog). The full server-side path is never shown — it's
- * meaningless on the phone and only the label identifies the choice.
+ * meaningless on the phone; the label is the project's directory name, while
+ * the path behind it is what identifies the choice on selection.
  */
 @Composable
 internal fun CwdPicker(

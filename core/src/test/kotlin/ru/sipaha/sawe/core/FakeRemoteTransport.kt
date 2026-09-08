@@ -33,6 +33,11 @@ internal open class FakeRemoteTransport(
     val sentBinary: ConcurrentLinkedQueue<ByteArray> = ConcurrentLinkedQueue()
     @Volatile var closed: Boolean = false
         private set
+    /** True once [cancel] was used instead of a graceful [close]. */
+    @Volatile var cancelled: Boolean = false
+        private set
+    /** What [queuedBytes] reports; tests set it to fake writer backlog. */
+    @Volatile var queuedBytesValue: Long = 0L
     @Volatile private var clientResponseReceived = false
 
     override fun send(text: String): Boolean {
@@ -53,6 +58,14 @@ internal open class FakeRemoteTransport(
         closed = true
         listener.onClosed(code, reason)
     }
+
+    override fun cancel() {
+        cancelled = true
+        // A real cancel aborts without a close handshake — no onClosed.
+        closed = true
+    }
+
+    override fun queuedBytes(): Long = queuedBytesValue
 
     /**
      * Walk the listener through the full text/JSON handshake — same
@@ -115,6 +128,18 @@ internal open class FakeRemoteTransport(
         listener.onFailure(cause)
     }
 
+    /**
+     * Report a failure to the listener while leaving the socket open.
+     *
+     * Models the events that arrive for a socket that is fine at the TCP
+     * level: OkHttp's pong timeout, and the heartbeat watchdog's synthetic
+     * teardown. Two of them can be in the client's event queue at once,
+     * which is exactly the case the lifecycle has to disambiguate.
+     */
+    fun signalFailureKeepingOpen(cause: Throwable) {
+        listener.onFailure(cause)
+    }
+
     private fun expectedHmac(secret: ByteArray, nonce: ByteArray): ByteArray {
         // Mirror HmacChallengeAuth.respond: prepend the domain-separation
         // tag before HMAC-ing the nonce. The real server side
@@ -143,6 +168,14 @@ internal class FakeRemoteTransportFactory : RemoteTransportFactory {
     val transports = ConcurrentLinkedQueue<FakeRemoteTransport>()
     val pendingHooks = ArrayDeque<(PairingUrl, RemoteTransportListener) -> FakeRemoteTransport>()
 
+    /**
+     * Whether `connect` immediately reports the WebSocket as open. Set to
+     * false to simulate a connect that hangs before the HTTP 101 (black-holed
+     * TLS handshake), which the client times out on a different budget than
+     * a peer that opens and then goes quiet.
+     */
+    var autoOpen: Boolean = true
+
     override fun connect(
         url: PairingUrl,
         listener: RemoteTransportListener,
@@ -150,7 +183,7 @@ internal class FakeRemoteTransportFactory : RemoteTransportFactory {
         val hook = if (pendingHooks.isNotEmpty()) pendingHooks.removeFirst() else null
         val tx = hook?.invoke(url, listener) ?: FakeRemoteTransport(url, listener)
         transports += tx
-        listener.onOpen()
+        if (autoOpen) listener.onOpen()
         return tx
     }
 

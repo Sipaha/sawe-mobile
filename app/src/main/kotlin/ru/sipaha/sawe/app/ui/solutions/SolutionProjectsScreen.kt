@@ -27,8 +27,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -65,7 +63,6 @@ fun SolutionProjectsScreen(
     val detailsState by viewModel.solutionDetails.collectAsState()
     val catalog by viewModel.catalog.collectAsState()
     val memberAdds by viewModel.memberAdds.collectAsState()
-    val snackbarHostState = remember { SnackbarHostState() }
     var showAddProjectDialog by rememberSaveable { mutableStateOf(false) }
 
     val pendingAdds = memberAdds.values.filter { it.solutionId == solutionId }
@@ -77,9 +74,10 @@ fun SolutionProjectsScreen(
     LaunchedEffect(showAddProjectDialog) {
         if (showAddProjectDialog) viewModel.refreshCatalog()
     }
-    LaunchedEffect(Unit) {
-        viewModel.sendError.collect { snackbarHostState.showSnackbar(it) }
-    }
+    // No snackbar host here. `viewModel.sendError` is a single-consumer
+    // channel drained by the app-level host in `ui/App.kt`; collecting it
+    // here as well would make this screen and the chat screen steal notices
+    // from each other (N-57). This screen raises no messages of its own.
 
     fun displayName(m: SolutionMember): String =
         catalog.firstOrNull { it.catalogId == m.catalogId }?.name ?: m.catalogId.toString()
@@ -105,7 +103,6 @@ fun SolutionProjectsScreen(
                 },
             )
         },
-        snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         Box(
             modifier = Modifier

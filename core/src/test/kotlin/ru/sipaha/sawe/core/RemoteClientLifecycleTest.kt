@@ -142,13 +142,12 @@ class RemoteClientLifecycleTest {
         StandardTestDispatcher(),
     ) {
         val (client, factory) = newClient()
+        // 1008 = policy violation, the server's "you are not authorised"
+        // close code. Terminal on the first occurrence: unlike a pin
+        // mismatch it cannot be produced by anything in the path.
         factory.pendingHooks += { url, listener ->
             FakeRemoteTransport(url, listener).also {
-                listener.onFailure(
-                    javax.net.ssl.SSLHandshakeException(
-                        "leaf certificate fingerprint mismatch (pinning failure)",
-                    ),
-                )
+                listener.onClosed(1008, "unauthorised client")
             }
         }
         val connectResult = client.connect(scope = this@runTest)
@@ -474,6 +473,11 @@ class RemoteClientLifecycleTest {
         runCurrent()
         factory.latest().completeHandshake()
         runCurrent()
+        // Let the reconnected session prove itself — only a connection
+        // that stayed up earns the backoff reset (a peer that drops
+        // straight after every handshake keeps climbing the ladder).
+        advanceTimeBy(RemoteClient.MIN_STABLE_CONNECTION_MS + 1)
+        runCurrent()
         // Second disconnect — the attempt counter should reset and the
         // *next* Reconnecting state must say attempt=1, not attempt=2.
         factory.latest().closeFromServer()
@@ -671,10 +675,9 @@ class RemoteClientLifecycleTest {
         assertEquals("remote.solution_agent.send_message", persisted[0].method)
         client.close()
         runCurrent()
-        // close() clears the disk entry for items it completes with
-        // ClosedException (audit Phase 2 M6 option A — clean semantics,
-        // callers don't observe ghost replays on the next instance).
-        assertEquals(0, store.loadAll().size, "close should clear the store for ClosedException items")
+        // close() is a handoff: the in-memory caller is released, but the
+        // record stays for the next RemoteClient built for this server.
+        assertEquals(1, store.loadAll().size, "close must keep the store entry")
         supervisor.cancel()
         runCurrent()
     }

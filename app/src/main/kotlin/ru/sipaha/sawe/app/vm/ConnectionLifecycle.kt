@@ -42,6 +42,26 @@ internal interface ConnectionLifecycle {
     fun onReconnected()
 
     /**
+     * Called once per `Connected` edge, after the `editor.capabilities`
+     * probe has settled and [RemoteClient.serverFeatures] holds the
+     * negotiated token set for this socket (possibly empty).
+     *
+     * Exists because negotiation deliberately runs *after* the reconnect
+     * replay: [onReconnected] re-subscribes the moment the socket is up, so
+     * that a poke is never missed, and at that instant no feature is known
+     * yet. Anything whose request shape depends on a negotiated token — the
+     * `suppress_kinds` on `editor.subscribe` is the only one today — has to
+     * be re-issued here or it silently never takes effect.
+     *
+     * Fires for a failed probe too, with an empty feature set: "we now know
+     * there is nothing to use" is the same edge, and callers must be able to
+     * settle either way rather than wait for an answer that never comes.
+     *
+     * Default no-op so lifecycle stubs in tests can ignore it.
+     */
+    fun onFeaturesNegotiated() {}
+
+    /**
      * Called on every Connected → non-Connected falling edge. Distinct
      * from [onTearDown] which is for explicit server-switch / teardown:
      * this fires on transient drops the `RemoteClient` lifecycle loop

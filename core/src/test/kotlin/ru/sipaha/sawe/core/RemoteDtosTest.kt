@@ -21,10 +21,204 @@ class RemoteDtosTest {
 
     @Test fun `isServerTooOld gates a pre-v5 server and admits v5 plus newer`() {
         // Too-old direction is now gated (wire schema v5 cutover).
-        assertTrue(isServerTooOld(serverWire = 4, supported = 5)) // pre-cutover v4: too old
-        assertTrue(isServerTooOld(serverWire = 0, supported = 5)) // pre-versioned sentinel
-        assertFalse(isServerTooOld(serverWire = 5, supported = 5)) // exact match: OK
-        assertFalse(isServerTooOld(serverWire = 6, supported = 5)) // newer: not too-old
+        assertTrue(isServerTooOld(serverWire = 4, minSupported = 5)) // pre-cutover v4: too old
+        assertTrue(isServerTooOld(serverWire = 0, minSupported = 5)) // pre-versioned sentinel
+        assertFalse(isServerTooOld(serverWire = 5, minSupported = 5)) // exact match: OK
+        assertFalse(isServerTooOld(serverWire = 6, minSupported = 5)) // newer: not too-old
+    }
+
+    @Test
+    fun `MIN_SUPPORTED_WIRE_SCHEMA_VERSION is v6 and equals the upper bound today`() {
+        assertEquals(6, MIN_SUPPORTED_WIRE_SCHEMA_VERSION)
+        // The split is a deliberate no-op right now: the accepted range is
+        // the single point {6}. If a future change raises the upper bound
+        // without meaning to drop v6 desktops, THIS is the assertion that
+        // should be updated — not the gate.
+        assertEquals(SUPPORTED_WIRE_SCHEMA_VERSION, MIN_SUPPORTED_WIRE_SCHEMA_VERSION)
+    }
+
+    @Test
+    fun `the shipped gates admit exactly the supported range`() {
+        // Defaults, i.e. what a real connection actually evaluates.
+        assertFalse(isServerTooOld(MIN_SUPPORTED_WIRE_SCHEMA_VERSION))
+        assertFalse(isServerTooNew(SUPPORTED_WIRE_SCHEMA_VERSION))
+        assertTrue(isServerTooOld(MIN_SUPPORTED_WIRE_SCHEMA_VERSION - 1))
+        assertTrue(isServerTooNew(SUPPORTED_WIRE_SCHEMA_VERSION + 1))
+        // isServerTooOld now reads the MIN constant, so widening the range
+        // downward must not need isServerTooNew to move.
+        assertFalse(isServerTooOld(serverWire = 6, minSupported = 5))
+    }
+
+    // ---------------------------------------------------------------
+    // Feature negotiation (wire_features)
+    // ---------------------------------------------------------------
+
+    /**
+     * Both peers hard-code these strings. A typo cannot be caught at
+     * runtime — an unrecognised token is ignored by contract, so the
+     * feature silently never turns on. Assert the literals.
+     */
+    @Test
+    fun `wire feature tokens are the exact agreed strings`() {
+        assertEquals("entry_body_delta", WireFeature.ENTRY_BODY_DELTA)
+        assertEquals("omit_preview", WireFeature.OMIT_PREVIEW)
+        assertEquals("csid_dedupe", WireFeature.CSID_DEDUPE)
+        assertEquals("quiet_message_appended", WireFeature.QUIET_MESSAGE_APPENDED)
+    }
+
+    @Test
+    fun `capabilities without wire_features decodes as pre-negotiation`() {
+        val old = JsonRpc.json.decodeFromString(
+            CapabilitiesDto.serializer(),
+            """{"protocol_version":"2024-11-05","wire_schema_version":6}""",
+        )
+        // null, NOT emptyList: "predates negotiation" must stay
+        // distinguishable from "negotiates, has nothing on".
+        assertNull(old.wireFeatures)
+        assertNull(old.serverInstanceId)
+        assertNull(old.csidDedupeWindowMs)
+
+        val features = old.toServerFeatures()
+        assertEquals(ServerFeatures.NONE, features)
+        assertTrue(features.tokens.isEmpty())
+        assertFalse(features.has(WireFeature.ENTRY_BODY_DELTA))
+        assertFalse(features.has(WireFeature.OMIT_PREVIEW))
+        assertFalse(features.has(WireFeature.CSID_DEDUPE))
+        assertFalse(features.has(WireFeature.QUIET_MESSAGE_APPENDED))
+    }
+
+    @Test
+    fun `an empty wire_features array is negotiation with nothing enabled`() {
+        val decoded = JsonRpc.json.decodeFromString(
+            CapabilitiesDto.serializer(),
+            """{"wire_schema_version":6,"wire_features":[]}""",
+        )
+        assertEquals(emptyList(), decoded.wireFeatures)
+        assertTrue(decoded.toServerFeatures().tokens.isEmpty())
+    }
+
+    @Test
+    fun `capabilities decodes the full negotiation payload`() {
+        val decoded = JsonRpc.json.decodeFromString(
+            CapabilitiesDto.serializer(),
+            """
+            {
+              "protocol_version":"2024-11-05",
+              "wire_schema_version":6,
+              "wire_features":["entry_body_delta","omit_preview","csid_dedupe"],
+              "server_instance_id":"8f1c2a90-5b3e-4d17-9c2f-6a0d1e7b4c33",
+              "csid_dedupe_window_ms":86400000
+            }
+            """.trimIndent(),
+        )
+        val features = decoded.toServerFeatures()
+        assertTrue(features.has(WireFeature.ENTRY_BODY_DELTA))
+        assertTrue(features.has(WireFeature.OMIT_PREVIEW))
+        assertTrue(features.has(WireFeature.CSID_DEDUPE))
+        // Advertised by this build's server, but not by that payload.
+        assertFalse(features.has(WireFeature.QUIET_MESSAGE_APPENDED))
+        assertEquals("8f1c2a90-5b3e-4d17-9c2f-6a0d1e7b4c33", features.serverInstanceId)
+        assertEquals(86_400_000L, features.csidDedupeWindowMs)
+    }
+
+    /** An unknown token is carried, never rejected — forward compatibility. */
+    @Test
+    fun `unknown wire_features tokens are ignored not rejected`() {
+        val decoded = JsonRpc.json.decodeFromString(
+            CapabilitiesDto.serializer(),
+            """{"wire_schema_version":6,"wire_features":["from_the_future","csid_dedupe"]}""",
+        )
+        val features = decoded.toServerFeatures()
+        assertTrue(features.has(WireFeature.CSID_DEDUPE))
+        assertFalse(features.has(WireFeature.ENTRY_BODY_DELTA))
+    }
+
+    // ---------------------------------------------------------------
+    // send_message_blocks result (csid dedupe)
+    // ---------------------------------------------------------------
+
+    /**
+     * The literals are the contract, so they are asserted directly rather
+     * than through whatever the annotation happens to generate. A mismatch
+     * here is silent: an unrecognised verdict degrades to
+     * [SendDeliveryDto.Unknown], which reads as "do not rely on dedupe" and
+     * quietly disables the retry instead of failing.
+     */
+    @Test
+    fun `SendDeliveryDto wire values are accepted and duplicate`() {
+        assertEquals(
+            SendDeliveryDto.Accepted,
+            JsonRpc.json.decodeFromString(SendDeliveryDto.serializer(), "\"accepted\""),
+        )
+        assertEquals(
+            SendDeliveryDto.Duplicate,
+            JsonRpc.json.decodeFromString(SendDeliveryDto.serializer(), "\"duplicate\""),
+        )
+        assertEquals(
+            "\"accepted\"",
+            JsonRpc.json.encodeToString(SendDeliveryDto.serializer(), SendDeliveryDto.Accepted),
+        )
+        assertEquals(
+            "\"duplicate\"",
+            JsonRpc.json.encodeToString(SendDeliveryDto.serializer(), SendDeliveryDto.Duplicate),
+        )
+    }
+
+    /**
+     * A verdict from a server newer than this build must DEGRADE, not
+     * throw. Without the [SendDeliveryDto.Unknown] fallback an unrecognised
+     * string aborts the decode of the entire send result, and the send path
+     * reports that as a failed send — turning a message the server actually
+     * accepted into an error toast and a bounced draft. Same forward-compat
+     * rule as [EntryRoleDto.Unknown].
+     */
+    @Test
+    fun `an unknown delivery verdict degrades instead of throwing`() {
+        val future = JsonRpc.json.decodeFromString(
+            SendMessageBlocksResult.serializer(),
+            """{"delivery":"queued","client_send_ids":[7]}""",
+        )
+        assertEquals(SendDeliveryDto.Unknown, future.delivery)
+        // The rest of the result still decodes — the point is that nothing
+        // is lost, not merely that nothing threw.
+        assertEquals(listOf(7L), future.clientSendIds)
+        // And it is never mistaken for either real verdict.
+        assertFalse(future.delivery == SendDeliveryDto.Accepted)
+        assertFalse(future.delivery == SendDeliveryDto.Duplicate)
+    }
+
+    /**
+     * Unknown and absent are both "do not rely on dedupe", but they are
+     * different facts and must stay distinguishable.
+     */
+    @Test
+    fun `an unknown delivery is not the same fact as an absent one`() {
+        val unknown = JsonRpc.json.decodeFromString(
+            SendMessageBlocksResult.serializer(),
+            """{"delivery":"queued"}""",
+        )
+        val absent = JsonRpc.json.decodeFromString(SendMessageBlocksResult.serializer(), "{}")
+        assertEquals(SendDeliveryDto.Unknown, unknown.delivery)
+        assertNull(absent.delivery)
+    }
+
+    @Test
+    fun `SendMessageBlocksResult from a pre-dedupe server has a null delivery`() {
+        val old = JsonRpc.json.decodeFromString(SendMessageBlocksResult.serializer(), "{}")
+        // null must NOT be read as "accepted": only a server that made the
+        // dedupe promise may be replayed against.
+        assertNull(old.delivery)
+        assertTrue(old.clientSendIds.isEmpty())
+    }
+
+    @Test
+    fun `SendMessageBlocksResult decodes a duplicate verdict`() {
+        val dup = JsonRpc.json.decodeFromString(
+            SendMessageBlocksResult.serializer(),
+            """{"delivery":"duplicate","client_send_ids":[1757232041123]}""",
+        )
+        assertEquals(SendDeliveryDto.Duplicate, dup.delivery)
+        assertEquals(listOf(1757232041123L), dup.clientSendIds)
     }
 
     @Test
@@ -1599,4 +1793,56 @@ class RemoteDtosTest {
         assertEquals("ses-1", parsed.sessions[0].id)
     }
 
+    // -------------------------------------------------------------------------
+    // N-30 — optional `image_count`, the backfill's skip hint
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `image_count decodes when the server sends it`() {
+        val text = """{"role":"user","preview":"photo","index":3,"image_count":2}"""
+        val parsed = JsonRpc.json.decodeFromString(EntrySummary.serializer(), text)
+        assertEquals(2, parsed.imageCount)
+    }
+
+    @Test
+    fun `image_count zero licenses skipping the probe`() {
+        val text = """{"role":"user","preview":"just text","index":4,"image_count":0}"""
+        val parsed = JsonRpc.json.decodeFromString(EntrySummary.serializer(), text)
+        assertEquals(0, parsed.imageCount, "an explicit zero must survive as zero, not null")
+    }
+
+    @Test
+    fun `absent image_count decodes as unknown rather than none`() {
+        // What every currently-shipped desktop sends. Decoding this as 0
+        // would silently disable the image backfill against it.
+        val text = """{"role":"user","preview":"photo","index":3}"""
+        val parsed = JsonRpc.json.decodeFromString(EntrySummary.serializer(), text)
+        assertNull(parsed.imageCount, "absent must mean unknown — probe as before")
+    }
+
+    @Test
+    fun `an unknown future field on an entry is still ignored`() {
+        // The other direction of the same compatibility promise: a client
+        // older than a server field must not fail to decode the entry.
+        val text = """{"role":"user","preview":"p","index":1,"some_future_field":{"a":1}}"""
+        val parsed = JsonRpc.json.decodeFromString(EntrySummary.serializer(), text)
+        assertEquals("p", parsed.preview)
+    }
+
+    @Test
+    fun `image_count round-trips and stays absent when unknown`() {
+        val known = EntrySummary(role = EntryRoleDto.User, preview = "p", imageCount = 2)
+        val reencoded = JsonRpc.json.encodeToString(EntrySummary.serializer(), known)
+        assertEquals(2, JsonRpc.json.decodeFromString(EntrySummary.serializer(), reencoded).imageCount)
+
+        val unknown = EntrySummary(role = EntryRoleDto.User, preview = "p")
+        val encodedUnknown = JsonRpc.json.encodeToString(EntrySummary.serializer(), unknown)
+        assertFalse(
+            encodedUnknown.contains("image_count"),
+            "an unknown count must not be written as null: $encodedUnknown",
+        )
+        assertNull(
+            JsonRpc.json.decodeFromString(EntrySummary.serializer(), encodedUnknown).imageCount,
+        )
+    }
 }

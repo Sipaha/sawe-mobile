@@ -23,6 +23,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,6 +64,22 @@ private const val QUIET_TICK_MS: Long = 500L
 private const val LOUD_TICK_MS: Long = 15_000L
 
 /**
+ * Banner text for [ConnectionState.FailedTerminal]. Deliberately different
+ * from the shared "Нет связи" of [ConnectionState.Disconnected]: this state
+ * is not an outage the resilience layer will heal, it is "the desktop no
+ * longer accepts this phone's pairing secret".
+ */
+internal const val FAILED_TERMINAL_LABEL: String = "Сопряжение недействительно"
+
+/**
+ * Tap hint for the terminal state. The action goes straight to the QR
+ * pairing screen, which is the only thing that fixes it — reconnecting is
+ * NOT the remedy, since the stored secret is the very thing the desktop is
+ * rejecting, so retrying with it loops forever.
+ */
+internal const val FAILED_TERMINAL_ACTION_HINT: String = " · нажмите, чтобы сопрячь заново"
+
+/**
  * Slim under-the-header connection-status strip. Single source of truth
  * for the "wire isn't healthy right now" UI — used by every screen with
  * a header (Workspace, SessionDetail, …).
@@ -79,10 +96,13 @@ private const val LOUD_TICK_MS: Long = 15_000L
  *     outages ([ConnectionState.Disconnected] /
  *     [ConnectionState.FailedTerminal]).
  *
- * If [onRePair] is supplied the strip becomes clickable while
- * [ConnectionState.FailedTerminal] holds — the only state where the
- * user can actually do something. Callers that don't own a re-pair
- * route pass `null` and the strip stays informational.
+ * [onRePair] must navigate to the QR pairing screen. It is NOT a reconnect:
+ * the whole point of [ConnectionState.FailedTerminal] is that the stored
+ * secret is the thing being rejected, so retrying with it loops forever. It
+ * stays nullable so a caller with no route passes `null` and gets a plain
+ * informational strip rather than a tap that goes nowhere — the failure this
+ * banner exists to stop being silent about deserves better than a dead
+ * affordance.
  *
  * Hidden entirely while [state] is [ConnectionState.Connected] — a
  * healthy screen shows nothing.
@@ -100,9 +120,18 @@ fun ConnectionStatusBanner(
     // `LaunchedEffect(unhealthy)` re-fires only on the boolean flip, not
     // on inner-class transitions (Connecting → Reconnecting), which is
     // what we want.
-    var unhealthySinceMs by remember { mutableStateOf<Long?>(null) }
+    //
+    // `rememberSaveable`, so a rotation mid-outage doesn't re-stamp the
+    // start and restart the quiet window from zero — the user would rotate
+    // the phone in frustration and the banner would go quiet again, forever
+    // (N-60). Only stamp when we don't already have one for this dip.
+    var unhealthySinceMs by rememberSaveable { mutableStateOf<Long?>(null) }
     LaunchedEffect(unhealthy) {
-        unhealthySinceMs = if (unhealthy) System.currentTimeMillis() else null
+        unhealthySinceMs = when {
+            !unhealthy -> null
+            unhealthySinceMs == null -> System.currentTimeMillis()
+            else -> unhealthySinceMs
+        }
     }
 
     AnimatedVisibility(visible = unhealthy) {
@@ -139,14 +168,26 @@ fun ConnectionStatusBanner(
     }
 }
 
+/**
+ * The full-text banner shown once the grace window in [ConnectionStatusBanner]
+ * has expired. Split out (and `internal`) so its per-state copy can be tested
+ * without waiting out the 15-second quiet period.
+ */
 @Composable
-private fun LoudBanner(
+internal fun LoudBanner(
     state: ConnectionState,
     lastConnectedMs: Long?,
     now: Long,
     onRePair: (() -> Unit)?,
 ) {
-    val text = connectionBannerLabel(state) ?: return
+    // `connectionBannerLabel` renders Disconnected and FailedTerminal
+    // identically ("Нет связи"), which reads as a network problem the user
+    // should wait out — but FailedTerminal means the pairing itself is no
+    // longer valid (a rotated secret, or a pin mismatch that survived three
+    // consecutive attempts) and waiting will never fix it. Say so, and hand
+    // the user the one action that resolves it: a fresh QR scan (N-18).
+    val terminal = state is ConnectionState.FailedTerminal
+    val text = if (terminal) FAILED_TERMINAL_LABEL else connectionBannerLabel(state) ?: return
     val isHardOutage = state is ConnectionState.Disconnected ||
         state is ConnectionState.FailedTerminal
     val container = if (isHardOutage) {
@@ -171,20 +212,15 @@ private fun LoudBanner(
     } else {
         ""
     }
-    val tapHint = if (onRePair != null && state is ConnectionState.FailedTerminal) {
-        " · нажмите чтобы перепарить"
-    } else {
-        ""
-    }
-
-    val clickable = onRePair != null && state is ConnectionState.FailedTerminal
+    val clickable = onRePair != null && terminal
+    val tapHint = if (clickable) FAILED_TERMINAL_ACTION_HINT else ""
     Surface(
         color = container,
         modifier = Modifier
             .fillMaxWidth()
             .then(
-                if (clickable && onRePair != null) Modifier.clickable(onClick = onRePair)
-                else Modifier
+                if (onRePair != null && clickable) Modifier.clickable(onClick = onRePair)
+                else Modifier,
             ),
     ) {
         Row(

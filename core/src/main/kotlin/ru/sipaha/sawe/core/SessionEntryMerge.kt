@@ -196,6 +196,184 @@ fun applySessionDelta(current: SessionDeltaState, delta: GetSessionChangesResult
     )
 }
 
+// ---------------------------------------------------------------------
+// Entry-body deltas (WireFeature.ENTRY_BODY_DELTA)
+// ---------------------------------------------------------------------
+
+/**
+ * How many held bodies a poll offers the server at most.
+ *
+ * The server caps a response page at 10 changed entries, and in practice
+ * what actually mutates between two polls is one streaming assistant entry
+ * plus a live tool call or two. Eight newest bodies covers that with room
+ * to spare; more would only grow the request.
+ */
+const val KNOWN_ENTRIES_MAX = 8
+
+/**
+ * Smallest body worth offering a digest for, in UTF-8 bytes.
+ *
+ * Each offered entry costs roughly 70 bytes of request. Below this
+ * threshold the whole body is cheaper than the digest that would save it,
+ * so offering one is a straight loss.
+ *
+ * Measured against the OFFERED prefix, not the held body: the offer is
+ * what bounds the saving, so a long body whose stable prefix is tiny is
+ * still not worth offering.
+ */
+const val MIN_DELTA_BODY_BYTES = 512
+
+/**
+ * Build the `known_entries` offer for the next `get_session_changes` poll
+ * from the window this client currently holds.
+ *
+ * Newest first, so the cap keeps the entries that actually change; skips
+ * anything without a body, with the `-1` index sentinel (whose index the
+ * server could not resolve), or whose offered prefix is shorter than
+ * [MIN_DELTA_BODY_BYTES]. Returns an empty list when nothing qualifies —
+ * which callers must treat exactly as "absent", never as "delta
+ * everything".
+ *
+ * **What is offered is the body MINUS its trailing whitespace run, not the
+ * whole body**, and that detail is what makes the feature save anything at
+ * all. The server renders an assistant entry as `"## Assistant\n\n" + body
+ * + "\n\n"` (`session_entry_to_markdown`), so when the body grows the
+ * trailing `"\n\n"` MOVES: the held rendering is not a byte-prefix of the
+ * grown one, it diverges two bytes from its own end. Offering the whole
+ * held length would therefore fail the server's prefix check on every
+ * growing assistant entry — correct, but a whole-body fallback every time,
+ * i.e. zero saving on precisely the traffic this feature exists to cut.
+ * Trimming back to the last non-whitespace byte offers the part that is
+ * genuinely stable, and the tail the server returns simply starts there
+ * and re-includes the whitespace.
+ *
+ * The trim can only ever remove ASCII `\n` / space, which are never part
+ * of a multi-byte sequence, so the offered offset is always a UTF-8
+ * character boundary and the server's `is_char_boundary` check always
+ * passes. And because the server verifies whatever prefix the caller
+ * claims — it has no opinion about how the caller chose it — this policy
+ * is client-local and cannot desync the two implementations.
+ *
+ * Pure but not free: it hashes up to [KNOWN_ENTRIES_MAX] bodies, so call it
+ * from the poll coroutine, never on the main thread.
+ *
+ * The caller must additionally gate on
+ * [WireFeature.ENTRY_BODY_DELTA] before putting the result on the wire —
+ * [RemoteClient.getSessionChanges] enforces that gate itself, so the worst
+ * case of forgetting is wasted hashing, not a failed poll.
+ */
+fun buildKnownEntries(held: List<EntrySummary>): List<KnownEntryDto> =
+    held.asReversed()
+        .asSequence()
+        .mapNotNull { entry ->
+            val markdown = entry.markdown ?: return@mapNotNull null
+            if (entry.index < 0) return@mapNotNull null
+            val bytes = markdown.toByteArray(Charsets.UTF_8)
+            val offered = stableBodyPrefixLength(bytes)
+            if (offered < MIN_DELTA_BODY_BYTES) return@mapNotNull null
+            KnownEntryDto(
+                index = entry.index,
+                markdownLen = offered.toLong(),
+                markdownHash = Digests.bodyDigest(bytes.copyOf(offered)),
+            )
+        }
+        .take(KNOWN_ENTRIES_MAX)
+        .toList()
+
+/**
+ * Length of the leading run of [bytes] that a growing body keeps unchanged
+ * — everything up to the last byte that is not an ASCII newline or space.
+ *
+ * See [buildKnownEntries] for why the trailing whitespace has to come off.
+ * Returns 0 for an all-whitespace body, which that caller then skips.
+ */
+private fun stableBodyPrefixLength(bytes: ByteArray): Int {
+    val newline = '\n'.code.toByte()
+    val space = ' '.code.toByte()
+    var end = bytes.size
+    while (end > 0 && (bytes[end - 1] == newline || bytes[end - 1] == space)) {
+        end--
+    }
+    return end
+}
+
+/** Outcome of splicing delta bodies back into whole ones. */
+sealed interface BodyRehydration {
+    /** Every entry now carries a whole [EntrySummary.markdown], or no body at all. */
+    data class Ok(val delta: GetSessionChangesResult) : BodyRehydration
+
+    /**
+     * The delta could not be spliced — a protocol violation, or a base the
+     * client no longer holds. The caller MUST discard the whole delta and
+     * full-reload; publishing a partially-spliced window would put a
+     * corrupted transcript on screen and, worse, into the disk cache.
+     */
+    data class Broken(val reason: String) : BodyRehydration
+}
+
+/**
+ * Turn a delta's tail-only entry bodies back into whole ones by splicing
+ * each tail onto the body this client already holds for the same index.
+ *
+ * Applied to the delta BEFORE [applySessionDelta], so everything downstream
+ * — the published window, the disk cache, and the digest the next poll
+ * offers — sees ordinary whole bodies and never learns that a tail existed.
+ *
+ * Returns [BodyRehydration.Ok] with the delta untouched when it carries no
+ * delta bodies at all, which is the case for every response from a server
+ * that does not implement [WireFeature.ENTRY_BODY_DELTA].
+ *
+ * All-or-nothing: the first anomaly aborts with [BodyRehydration.Broken] and
+ * no partially-rehydrated list is ever returned. The anomalies are the
+ * violations of [EntrySummary.markdownPrefixLen]'s exclusivity table, plus
+ * the one legitimate-but-unusable case of a base body the client has since
+ * dropped.
+ */
+fun rehydrateEntryBodies(
+    held: List<EntrySummary>,
+    delta: GetSessionChangesResult,
+): BodyRehydration {
+    if (delta.changedEntries.none { it.markdownPrefixLen != null }) {
+        return BodyRehydration.Ok(delta)
+    }
+    val byIndex = held.associateBy { it.index }
+    val out = ArrayList<EntrySummary>(delta.changedEntries.size)
+    for (entry in delta.changedEntries) {
+        val prefixLen = entry.markdownPrefixLen
+        if (prefixLen == null) {
+            if (entry.markdownTail != null) {
+                return BodyRehydration.Broken("tail without prefix_len at ${entry.index}")
+            }
+            out += entry
+            continue
+        }
+        val tail = entry.markdownTail
+            ?: return BodyRehydration.Broken("prefix_len without tail at ${entry.index}")
+        if (entry.markdown != null) {
+            return BodyRehydration.Broken("both markdown and tail at ${entry.index}")
+        }
+        val base = byIndex[entry.index]?.markdown
+            ?: return BodyRehydration.Broken("no held body for ${entry.index}")
+        val baseBytes = base.toByteArray(Charsets.UTF_8)
+        if (prefixLen < 0 || prefixLen > baseBytes.size) {
+            return BodyRehydration.Broken("prefix_len out of range at ${entry.index}")
+        }
+        // Byte-indexed, NOT `base.substring(0, prefixLen)`: `prefixLen` is a
+        // UTF-8 byte count, and substring indexes UTF-16 units. Decoding the
+        // byte slice is only safe because the server proved the offset falls
+        // on a char boundary before it agreed to send a tail — a
+        // non-boundary offset is a digest mismatch there, so it comes back
+        // as a whole body instead.
+        val merged = String(baseBytes, 0, prefixLen.toInt(), Charsets.UTF_8) + tail
+        val expected = entry.markdownLen
+        if (expected != null && merged.toByteArray(Charsets.UTF_8).size.toLong() != expected) {
+            return BodyRehydration.Broken("length mismatch at ${entry.index}")
+        }
+        out += entry.copy(markdown = merged, markdownPrefixLen = null, markdownTail = null)
+    }
+    return BodyRehydration.Ok(delta.copy(changedEntries = out))
+}
+
 /**
  * Pop optimistic bubbles whose corresponding server-side "user" entry
  * has now landed. Matching is **id-first** (via `client_send_id`
@@ -256,6 +434,13 @@ fun reconcileOptimistic(
     // optimistic too would over-strip a user who literally typed
     // `[HH:MM:SS] …`. csid-stamped echoes never reach here (filtered out
     // above); this is the no-csid / legacy fallback path.
+    // This content-match key is why `preview` suppression carves out
+    // `role == "user"` entries (§3.1 of the wire spec): these are exactly
+    // those entries, and a server that blanked their preview would leave
+    // the key empty for every one of them. The carve-out is the server's
+    // contract, not something the client can compensate for — rebuilding
+    // the key from `markdown` would mean reimplementing the server's
+    // scalar-value-counting truncation against Kotlin's UTF-16 `length`.
     val serverPreviews: MutableList<String> = serverUser
         .filter { it.clientSendId == null }
         .map { stripInjectedMeta(stripRoleHeading(it.preview)) }

@@ -1,12 +1,9 @@
 package ru.sipaha.sawe.app.ui.solutions
 
 import android.content.Context
-import android.graphics.BitmapFactory
 import android.net.Uri
-import androidx.core.graphics.createBitmap
 import java.util.Locale
 import android.provider.OpenableColumns
-import android.util.Base64
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -131,8 +128,6 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
@@ -152,15 +147,18 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import ru.sipaha.sawe.core.ConnectionState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import ru.sipaha.sawe.app.vm.DeferredUpload
+import ru.sipaha.sawe.app.vm.mergeDraftSeed
 import ru.sipaha.sawe.app.vm.MainViewModel
 import ru.sipaha.sawe.app.vm.OpenSessionVM
 import ru.sipaha.sawe.app.vm.WorkspaceUiState
@@ -168,7 +166,6 @@ import ru.sipaha.sawe.app.vm.PendingUploadProgress
 import ru.sipaha.sawe.app.vm.PickedAttachment
 import ru.sipaha.sawe.app.vm.UiData
 import ru.sipaha.sawe.app.vm.UploadManager
-import ru.sipaha.sawe.core.ConnectionState
 import ru.sipaha.sawe.core.ContentBlockDto
 import ru.sipaha.sawe.core.ContextFill
 import ru.sipaha.sawe.core.DisplayState
@@ -218,6 +215,13 @@ fun SessionDetailScreen(
     sessionId: String,
     onBack: () -> Unit,
     onOpenSibling: (sessionId: String) -> Unit = {},
+    /**
+     * Navigate to the QR pairing screen. Backs the terminal connection
+     * banner, whose only real remedy is a fresh scan (N-18). Nullable, and
+     * null by default, so the banner shows a plain informational strip rather
+     * than a dead tap on any surface that hasn't wired the route yet.
+     */
+    onRePair: (() -> Unit)? = null,
 ) {
     val sessionState by viewModel.session.collectAsState()
     val optimistic by viewModel.optimisticEntries.collectAsState()
@@ -241,33 +245,11 @@ fun SessionDetailScreen(
         onDispose { viewModel.closeSession() }
     }
 
-    // Connection-aware error gate (Feature A). A send error that fires while
-    // we're already disconnected is most likely a transient blip the
-    // queue-replay / reconnect will heal within a second or two — surfacing it
-    // immediately would flash a scary snackbar that contradicts the connection
-    // banner. So: if Connected at the time of the error → genuine failure,
-    // show it now. Otherwise wait up to a ~4s grace window for the connection
-    // to come back; if it recovers, drop the error (the banner already informs
-    // the user); if it doesn't, the outage is real and we surface it.
-    LaunchedEffect(Unit) {
-        viewModel.sendError.collect { msg ->
-            if (viewModel.rawConnectionState.value is ConnectionState.Connected) {
-                snackbarHostState.showSnackbar(msg)
-            } else {
-                // Handle each error concurrently so the collector isn't blocked
-                // for the grace window (and overlapping errors each get one).
-                scope.launch {
-                    val recovered = withTimeoutOrNull(4_000L) {
-                        viewModel.rawConnectionState.first { it is ConnectionState.Connected }
-                        true
-                    }
-                    if (recovered != true) {
-                        snackbarHostState.showSnackbar(msg)
-                    }
-                }
-            }
-        }
-    }
+    // NOTE: `viewModel.sendError` is deliberately NOT collected here. It is a
+    // single-consumer channel drained by the app-level host in `ui/App.kt`; a
+    // second collector inside a route composable steals notices from whichever
+    // screen is on top (N-57). `snackbarHostState` below carries only the
+    // messages THIS screen raises itself.
 
     // Reset context produces a new session id server-side; hop the open
     // chat surface onto it so DisposableEffect's restart doesn't reopen
@@ -282,14 +264,13 @@ fun SessionDetailScreen(
     // Reading it here clears the slot, so the snackbar appears exactly
     // once per expiry event.
     //
-    // The bounce text takes precedence over the regular draft because
-    // it's the more recent intent — if the user was typing AND a
-    // background queued send expired, the typed text is in the draft
-    // slot and the failed-send text is in the bounce slot. Surfacing
-    // the bounce gets the lost content back into view; once the user
-    // edits/sends/cancels it, the typed draft can be recovered by hand
-    // from anywhere they pasted it. (Alternative: append the bounce
-    // to the typed draft separated by `\n\n`. Kept simpler for v1.)
+    // The bounce and the on-disk draft are both text the user typed and
+    // hasn't sent, so neither wins outright: `mergeDraftSeed` appends the
+    // bounce to the draft on a fresh paragraph. Preferring the bounce, as
+    // this used to, destroyed the NEWER text — a message that expired
+    // overnight overwrote whatever the user had started typing in the
+    // morning as soon as they re-entered the chat, and the debounced draft
+    // writer then persisted the overwrite (N-07).
     //
     // We use a `LaunchedEffect`-driven async load (via
     // `MainViewModel.loadDraftSeed`) instead of a `remember { ... }`
@@ -300,6 +281,20 @@ fun SessionDetailScreen(
     // value is replaced).
     var seedText by remember(sessionId) { mutableStateOf("") }
     var seedLoaded by remember(sessionId) { mutableStateOf(false) }
+    // Live half of the same recovery (N-07): a bounce that happens WHILE the
+    // chat is open never reaches `loadDraftSeed`, which only runs on open. The
+    // store publishes those on a single-consumer channel; the compose bar is
+    // the consumer and appends them to whatever the user has typed since.
+    //
+    // The store only emits for the session it believes is open, so the filter
+    // is a guard against a session-switch race rather than routine traffic. An
+    // emission dropped by it is not lost: the durable bounce slot is written
+    // first and [loadDraftSeed] seeds from it on the next open.
+    val liveBouncesForSession: Flow<String> = remember(sessionId, viewModel) {
+        viewModel.bouncedDrafts
+            .filter { it.sessionId == sessionId }
+            .map { it.text }
+    }
     LaunchedEffect(sessionId) {
         val (text, bounce) = viewModel.loadDraftSeed(sessionId)
         seedText = text
@@ -553,15 +548,27 @@ fun SessionDetailScreen(
                     sessionId = sessionId,
                     initialDraft = seedText,
                     seedLoaded = seedLoaded,
+                    liveBounces = liveBouncesForSession,
+                    onBounceApplied = {
+                        // Clear the durable slot only AFTER the text is in the
+                        // field, so a process death in between re-seeds on the
+                        // next open instead of losing the message.
+                        viewModel.consumeBounce(sessionId)
+                        snackbarHostState.showSnackbar(
+                            "Couldn't send — added back to your message for retry.",
+                        )
+                    },
                     onDraftChanged = { text -> viewModel.saveDraft(sessionId, text) },
                     onDraftFlush = { text -> viewModel.flushDraft(sessionId, text) },
                     initialAttachments = { viewModel.pickedAttachments(sessionId) },
                     onAttachmentsChanged = { viewModel.setPickedAttachments(sessionId, it) },
+                    deferredSendCsids = pendingUploads.keys,
                     onStartUpload = { uri, sid, mime, name, size ->
                         viewModel.startAttachmentUpload(uri, sid, mime, name, size)
                     },
                     onCancelUpload = viewModel::cancelAttachmentUpload,
                     onForgetUpload = viewModel::forgetAttachmentUpload,
+                    onRetryUpload = viewModel::retryAttachmentUpload,
                     awaitUploadTerminal = viewModel::awaitAttachmentUploadTerminal,
                     hasOptimisticSends = optimistic.isNotEmpty() ||
                         serverQueuedBundles.isNotEmpty(),
@@ -586,9 +593,14 @@ fun SessionDetailScreen(
             Column(modifier = Modifier.fillMaxSize()) {
                 // Connection-status strip (Feature B): shown only when NOT
                 // Connected, so a healthy chat looks exactly as before.
+                // `onRePair` goes to the QR screen — deliberately not a
+                // reconnect, which would retry with the very secret the
+                // desktop is rejecting and land the user back on this same
+                // banner forever (N-18).
                 ConnectionStatusBanner(
                     state = connectionState,
                     lastConnectedMs = lastConnectedMs,
+                    onRePair = onRePair,
                 )
                 // Per-source stream tabs (wire schema v3) — one pill per
                 // stream (Main first). Hidden when only Main exists, so a
@@ -617,9 +629,11 @@ fun SessionDetailScreen(
                             serverQueuedBundles = serverQueuedBundles,
                             selectedStream = selectedStream,
                             sessionDisplayState = displayState,
+                            offline = connectionState !is ConnectionState.Connected,
                             isLoadingOlder = isLoadingOlder,
                             onRequestOlder = { viewModel.loadOlder(sessionId) },
                             onAuthorizeToolCall = viewModel::authorizeToolCall,
+                            onCancelQueuedSend = viewModel::cancelQueuedSend,
                         )
                     }
                 }
@@ -713,7 +727,12 @@ private fun RenameSessionDialog(
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit,
 ) {
-    var text by rememberSaveable { mutableStateOf(initialTitle) }
+    // [DraftTextSaver] rather than the default `autoSaver`: the field accepts
+    // an unbounded paste and the raw String would travel through the
+    // saved-instance-state Binder transaction on backgrounding (N-58). Over
+    // the cap the restore falls back to `initialTitle`, which is the right
+    // answer for a title nobody meant to make 16 k characters long.
+    var text by rememberSaveable(stateSaver = DraftTextSaver) { mutableStateOf(initialTitle) }
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Rename session") },
@@ -746,9 +765,17 @@ private fun ChatList(
     serverQueuedBundles: List<ru.sipaha.sawe.core.QueuedBundleSummary>,
     selectedStream: StreamIdDto,
     sessionDisplayState: DisplayState,
+    /** True while the wire is down — drives the parked-send badge (N-07). */
+    offline: Boolean,
     isLoadingOlder: Boolean,
     onRequestOlder: () -> Unit,
     onAuthorizeToolCall: (toolCallId: String, optionId: String) -> Unit = { _, _ -> },
+    /**
+     * Withdraw the send parked in the offline queue under the given
+     * `client_send_id`. Offered on a bubble only while it is actually parked
+     * ([UserBubbleStatus.WaitingForConnection]) — N-07.
+     */
+    onCancelQueuedSend: (csid: Long) -> Unit = {},
 ) {
     // Per-source-streams cutover: the server already scoped `server.entries`
     // to the selected stream (stream-local indices), so we render them
@@ -869,6 +896,9 @@ private fun ChatList(
     val newestEntryKey: String? = combined.lastOrNull()?.let { entry ->
         entry.clientSendId?.let { "csid:$it" }
             ?: if (entry.index >= 0) "idx:${entry.index}"
+            // Reached only for an entry with neither a csid nor a server
+            // index, i.e. one this process built — so its `preview` is
+            // locally populated and can't have been omitted by the server.
             else "role:${entry.role}#${entry.preview.hashCode()}"
     }
     // Length of the newest entry's body. Content-only streaming updates keep
@@ -878,7 +908,7 @@ private fun ChatList(
     // growth (which happens BELOW the viewport in natural layout) never moves
     // their read position.
     val newestContentLen: Int = combined.lastOrNull()
-        ?.let { (it.markdown ?: it.preview).length } ?: 0
+        ?.let { entryBodyText(it).length } ?: 0
 
     // Follow-the-newest flag. true = pinned to the bottom, so auto-scroll keeps
     // the newest content in view as it streams; false = the user dragged up to
@@ -988,6 +1018,14 @@ private fun ChatList(
                 )
             }
             val today = remember(combined) { java.time.LocalDate.now() }
+            // Row keys, derived once per timeline. See [chatItemKeys] — it
+            // guarantees uniqueness, which the inline derivation this replaced
+            // could not: a desktop clock stepping back across local midnight
+            // makes `withDateSeparators` emit the same epoch day twice and a
+            // duplicate LazyColumn key is a crash, not a glitch (N-59).
+            val itemKeys = remember(timeline, serverQueueIdentitySet) {
+                chatItemKeys(timeline) { it in serverQueueIdentitySet }
+            }
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 state = lazyState,
@@ -1021,45 +1059,12 @@ private fun ChatList(
                 // through to the wire) rebinds and re-composes every
                 // bubble on screen — visible as a scroll jump and a
                 // brief "square" placeholder before the real content
-                // re-renders. Identity preference:
-                //   1. `clientSendId` for user entries — preserved
-                //      across the optimistic-bubble → server-echo
-                //      handoff so the row keeps its slot identity.
-                //   2. `index` for any server-known entry (post-R-6e).
-                //   3. A role+preview hash as last-resort fallback for
-                //      optimistic entries without csid (shouldn't
-                //      happen — see [[csid-required-on-every-optimistic-entry]]
-                //      — but defensive).
+                // re-renders. The identity preference (csid → server index →
+                // position) lives in [chatItemKeys]; see also
+                // [[csid-required-on-every-optimistic-entry]].
                 itemsIndexed(
                     items = timeline,
-                    key = { position, item ->
-                        when (item) {
-                            is ru.sipaha.sawe.core.ChatItem.DateSeparator ->
-                                "date:${item.epochDay}"
-                            is ru.sipaha.sawe.core.ChatItem.Message -> {
-                                val entry = item.entry
-                                when {
-                                    // Synthetic server-queue bubble: namespace its key
-                                    // so it can't collide with the REAL flushed user
-                                    // entry that carries the same csid during the
-                                    // queue-drain → message-appended handoff (a bare
-                                    // `csid:N` collision would crash the LazyColumn).
-                                    entry in serverQueueIdentitySet ->
-                                        "queued:${entry.clientSendId ?: "pos$position"}"
-                                    entry.clientSendId != null -> "csid:${entry.clientSendId}"
-                                    entry.index >= 0 -> "idx:${entry.index}"
-                                    // Un-indexed entries (index == -1, e.g. optimistic
-                                    // bubbles or legacy entries that carry no server
-                                    // index). Two such tool-call
-                                    // placeholders with the same truncated preview used
-                                    // to collide on `role#previewHash` and crash the
-                                    // LazyColumn ("Key … already used"). The itemsIndexed
-                                    // position is unique within the list, so key on it.
-                                    else -> "pos$position:${entry.role}"
-                                }
-                            }
-                        }
-                    },
+                    key = { position, _ -> itemKeys[position] },
                 ) { _, item ->
                     when (item) {
                         is ru.sipaha.sawe.core.ChatItem.DateSeparator ->
@@ -1072,11 +1077,16 @@ private fun ChatList(
                                 isServerQueued = entry in serverQueueIdentitySet,
                                 pendingUploads = pendingUploads,
                                 sessionDisplayState = sessionDisplayState,
+                                offline = offline,
                             )
+                            val cancellable = cancellableQueuedSendId(entry, status)
                             ChatBubble(
                                 entry = entry,
                                 userStatus = status,
                                 onAuthorizeToolCall = onAuthorizeToolCall,
+                                onCancelQueued = cancellable?.let {
+                                    { onCancelQueuedSend(it) }
+                                },
                             )
                         }
                     }
@@ -1230,16 +1240,37 @@ internal sealed class UserBubbleStatus {
      * wire and waiting for the server echo).
      */
     object Queued : UserBubbleStatus()
+    /**
+     * The wire is down, so this send is parked in the durable offline queue
+     * and cannot move until the connection comes back. Distinct from
+     * [Sending] — which means "on the wire, waiting for the echo", a matter
+     * of one RTT — because a parked send can sit here for as long as its
+     * 24-hour TTL and rendering that as "sending" tells the user the phone is
+     * making progress when it isn't (N-07).
+     *
+     * It is also the only badge that offers a cancel: this is the one state a
+     * message can be withdrawn from without lying about whether it was
+     * delivered. See [cancellableQueuedSendId].
+     */
+    object WaitingForConnection : UserBubbleStatus()
     object Sending : UserBubbleStatus()
     object Delivered : UserBubbleStatus()
 }
 
-private fun userBubbleStatusFor(
+/**
+ * Per-bubble delivery badge.
+ *
+ * [offline] is the live connection state: when the wire is down, an
+ * optimistic bubble that isn't mid-upload is parked in the offline queue, not
+ * in flight, and says so.
+ */
+internal fun userBubbleStatusFor(
     entry: EntrySummary,
     isOptimistic: Boolean,
     isServerQueued: Boolean,
     pendingUploads: Map<Long, PendingUploadProgress>,
     sessionDisplayState: DisplayState,
+    offline: Boolean = false,
 ): UserBubbleStatus {
     if (entry.role != EntryRoleDto.User) return UserBubbleStatus.None
     // Server-broadcast queue bundle: ALWAYS Queued regardless of
@@ -1272,6 +1303,10 @@ private fun userBubbleStatusFor(
         // server-side `pending_messages` queue is still gated, so a fresh
         // send placed during the transition has to wait for the next Idle
         // window before flushing — same Queued affordance as Running.
+        // The wire is down: whatever the session state last said about the
+        // agent being busy is stale, and the send is parked in the offline
+        // queue rather than waiting on a turn.
+        if (offline) return UserBubbleStatus.WaitingForConnection
         val busy = sessionDisplayState == DisplayState.Running ||
             sessionDisplayState == DisplayState.AwaitingInput ||
             sessionDisplayState == DisplayState.Stopping
@@ -1293,10 +1328,16 @@ private fun formatBytes(b: Long): String = when {
 }
 
 @Composable
-private fun ChatBubble(
+internal fun ChatBubble(
     entry: EntrySummary,
     userStatus: UserBubbleStatus = UserBubbleStatus.None,
     onAuthorizeToolCall: (toolCallId: String, optionId: String) -> Unit = { _, _ -> },
+    /**
+     * Withdraw the message parked in the offline queue under this bubble's
+     * `client_send_id`. Null for every bubble that isn't parked — see
+     * [UserBubbleStatus.WaitingForConnection].
+     */
+    onCancelQueued: (() -> Unit)? = null,
 ) {
     val role = entry.role
     // C3: per-message HH:MM, revealed ONLY on a SHORT tap. The always-on
@@ -1329,14 +1370,18 @@ private fun ChatBubble(
                     // the reader sees at a glance it's the watcher's voice.
                     if (entry.observerNudge) {
                         CenteredAnnotatedBubble(
-                            text = entry.markdown ?: entry.preview,
+                            text = entryBodyText(entry),
                             icon = Icons.Filled.Visibility,
                             bg = MaterialTheme.colorScheme.tertiaryContainer,
                             fg = MaterialTheme.colorScheme.onTertiaryContainer,
                             label = "observer",
                         )
                     } else {
-                        UserBubble(entry = entry, status = userStatus)
+                        UserBubble(
+                            entry = entry,
+                            status = userStatus,
+                            onCancelQueued = onCancelQueued,
+                        )
                     }
                 EntryRoleDto.Assistant -> {
                     // Skip assistant turns that have neither visible body
@@ -1345,7 +1390,7 @@ private fun ChatBubble(
                     // Assistant\n\n\n\n"). Thinking-only turns now render
                     // (as the collapsible Thoughts card in AssistantBubble),
                     // so the visibility check folds both signals together.
-                    if (hasVisibleAssistantContent(entry.markdown ?: entry.preview)) {
+                    if (hasVisibleAssistantContent(entryBodyText(entry))) {
                         AssistantBubble(entry = entry)
                     }
                 }
@@ -1359,7 +1404,7 @@ private fun ChatBubble(
                         )
                     } else {
                         CenteredAnnotatedBubble(
-                            text = entry.preview,
+                            text = entryBodyText(entry),
                             icon = Icons.Filled.Build,
                             bg = MaterialTheme.colorScheme.tertiaryContainer,
                             fg = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -1373,7 +1418,7 @@ private fun ChatBubble(
                         PlanBubble(plan = plan)
                     } else {
                         CenteredAnnotatedBubble(
-                            text = entry.preview,
+                            text = entryBodyText(entry),
                             icon = Icons.AutoMirrored.Filled.List,
                             bg = MaterialTheme.colorScheme.secondaryContainer,
                             fg = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -1384,7 +1429,7 @@ private fun ChatBubble(
                 EntryRoleDto.System -> {
                     // Editor-originated annotation — render distinctly per
                     // severity so it's clearly NOT the agent or the user.
-                    val text = entry.markdown ?: entry.preview
+                    val text = entryBodyText(entry)
                     when (entry.systemLevel) {
                         SystemLevelDto.Error -> CenteredAnnotatedBubble(
                             text = text,
@@ -1410,7 +1455,7 @@ private fun ChatBubble(
                     }
                 }
                 EntryRoleDto.Unknown -> CenteredAnnotatedBubble(
-                    text = entry.preview,
+                    text = entryBodyText(entry),
                     icon = Icons.Filled.Build,
                     bg = MaterialTheme.colorScheme.surfaceVariant,
                     fg = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1459,8 +1504,12 @@ private fun DateSeparatorRow(label: String) {
 }
 
 @Composable
-private fun UserBubble(entry: EntrySummary, status: UserBubbleStatus = UserBubbleStatus.None) {
-    val rawText = stripInjectedMeta(stripRoleHeading(entry.markdown ?: entry.preview))
+private fun UserBubble(
+    entry: EntrySummary,
+    status: UserBubbleStatus = UserBubbleStatus.None,
+    onCancelQueued: (() -> Unit)? = null,
+) {
+    val rawText = stripInjectedMeta(stripRoleHeading(entryBodyText(entry)))
     // Fold the auto-injected compact-context prompt (a large, agent-only
     // template) into a tappable placeholder instead of dumping it into the
     // chat — matches the desktop's folded one-line strip. Detected by its
@@ -1472,13 +1521,6 @@ private fun UserBubble(entry: EntrySummary, status: UserBubbleStatus = UserBubbl
     }
     val images = entry.images.orEmpty()
     var fullscreen by remember(entry.index) { mutableStateOf<EntryImage?>(null) }
-    // Decode images once per entry so the [Image #N] tap target opens
-    // the same Painter the assistant-side preview would. Cheap enough
-    // to do up-front (the user's own attachments are bounded by the
-    // 5 MB cap and the mobile picker enforces a small count).
-    val decodedImages: Map<Int, Painter> = remember(images) {
-        images.associate { it.index to bitmapPainterFromBase64(it.dataBase64) }
-    }
     val linkColor = MaterialTheme.colorScheme.onPrimary
     val annotated = remember(rawText, images, linkColor) {
         buildUserBubbleAnnotatedText(rawText, images.size, linkColor)
@@ -1547,33 +1589,75 @@ private fun UserBubble(entry: EntrySummary, status: UserBubbleStatus = UserBubbl
                         },
                     )
                 }
-                UserBubbleStatusRow(status = status)
+                UserBubbleStatusRow(status = status, onCancelQueued = onCancelQueued)
             }
         }
     }
     val tapped = fullscreen
     if (tapped != null) {
-        Dialog(onDismissRequest = { fullscreen = null }) {
-            Surface(
-                color = Color.Black,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 600.dp)
-                    .clickable { fullscreen = null },
-            ) {
-                val painter = decodedImages[tapped.index]
-                if (painter != null) {
-                    androidx.compose.foundation.Image(
-                        painter = painter,
-                        contentDescription = "Full-screen image",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxWidth(),
+        FullScreenImageDialog(image = tapped, onDismiss = { fullscreen = null })
+    }
+}
+
+/**
+ * Fullscreen viewer for one chat [image]. The decode happens here and only
+ * here — a bubble that merely scrolls past pays nothing, and the bytes are
+ * turned into a bitmap off the main thread at a viewer-appropriate resolution
+ * (N-30).
+ *
+ * Three states, because a spinner shown for a payload that will never decode
+ * is a lie the user can only escape by guessing: progress while the decode
+ * runs, the image once it lands, and an explicit failure line for a truncated
+ * or corrupt payload.
+ */
+@Composable
+internal fun FullScreenImageDialog(image: EntryImage, onDismiss: () -> Unit) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            color = Color.Black,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 600.dp)
+                .clickable(onClick = onDismiss),
+        ) {
+            when (val decoded = rememberEntryImagePainter(image)) {
+                is ImageDecodeResult.Ready -> androidx.compose.foundation.Image(
+                    painter = decoded.painter,
+                    contentDescription = "Full-screen image",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                ImageDecodeResult.Loading -> Box(
+                    modifier = Modifier.fillMaxWidth().height(240.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator(color = Color.White)
+                }
+                ImageDecodeResult.Failed -> Box(
+                    modifier = Modifier.fillMaxWidth().height(240.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = IMAGE_DECODE_FAILED_MESSAGE,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.White,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(24.dp),
                     )
                 }
             }
         }
     }
 }
+
+/**
+ * Shown in place of an image whose bytes we can't turn into a bitmap — a
+ * truncated base64 payload, or a format the platform decoder doesn't know.
+ * Names the desktop as the place the original still lives, because nothing on
+ * the phone can recover it.
+ */
+internal const val IMAGE_DECODE_FAILED_MESSAGE =
+    "Не удалось открыть изображение — откройте сессию на компьютере"
 
 private const val IMAGE_LINK_TAG = "spk-image"
 private val IMAGE_PLACEHOLDER_REGEX = Regex("""\[image #(\d+)]""", RegexOption.IGNORE_CASE)
@@ -1640,7 +1724,10 @@ private fun buildUserBubbleAnnotatedText(
  * doesn't bounce when scrolling through old conversations.
  */
 @Composable
-private fun ColumnScope.UserBubbleStatusRow(status: UserBubbleStatus) {
+private fun ColumnScope.UserBubbleStatusRow(
+    status: UserBubbleStatus,
+    onCancelQueued: (() -> Unit)? = null,
+) {
     if (status is UserBubbleStatus.None) return
     Row(
         // Wrap-content width + align to End of the parent Column. We
@@ -1707,6 +1794,37 @@ private fun ColumnScope.UserBubbleStatusRow(status: UserBubbleStatus) {
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.75f),
                 )
+            }
+            UserBubbleStatus.WaitingForConnection -> {
+                Icon(
+                    imageVector = Icons.Filled.CloudOff,
+                    contentDescription = "Waiting for connection",
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.75f),
+                )
+                Spacer(Modifier.size(6.dp))
+                Text(
+                    text = "Waiting for connection",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.75f),
+                )
+                // The one state a send can sit in for hours without the phone
+                // making any progress — and, until N-07, the one with no way
+                // out short of waiting for the 24 h TTL. Offered only here:
+                // every other badge means the message is moving, and a cancel
+                // there could only lie (see SessionDetailStore.cancelQueuedSend).
+                if (onCancelQueued != null) {
+                    Spacer(Modifier.size(10.dp))
+                    Text(
+                        text = "Cancel",
+                        style = MaterialTheme.typography.labelSmall,
+                        textDecoration = TextDecoration.Underline,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier
+                            .clickable(onClick = onCancelQueued)
+                            .semantics { contentDescription = "Cancel queued message" },
+                    )
+                }
             }
             UserBubbleStatus.Sending -> {
                 Icon(
@@ -2022,9 +2140,6 @@ private fun ThoughtsCard(thoughts: String) {
 @Composable
 private fun AssistantMarkdownBody(markdown: String, images: List<EntryImage>) {
     var fullscreen by remember { mutableStateOf<EntryImage?>(null) }
-    val decoded: Map<Int, Painter> = remember(images) {
-        images.associate { it.index to bitmapPainterFromBase64(it.dataBase64) }
-    }
     val onSurfaceVariant = MaterialTheme.colorScheme.onSurfaceVariant
     val codeBg = MaterialTheme.colorScheme.surface
     val linkColor = MaterialTheme.colorScheme.primary
@@ -2074,25 +2189,7 @@ private fun AssistantMarkdownBody(markdown: String, images: List<EntryImage>) {
 
     val tappedImage = fullscreen
     if (tappedImage != null) {
-        Dialog(onDismissRequest = { fullscreen = null }) {
-            Surface(
-                color = Color.Black,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 600.dp)
-                    .clickable { fullscreen = null },
-            ) {
-                val painter = decoded[tappedImage.index]
-                if (painter != null) {
-                    androidx.compose.foundation.Image(
-                        painter = painter,
-                        contentDescription = "Full-screen image",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-            }
-        }
+        FullScreenImageDialog(image = tappedImage, onDismiss = { fullscreen = null })
     }
 }
 
@@ -2461,25 +2558,6 @@ private fun parseInlineMarkdown(
         append(c)
         i++
     }
-}
-
-/**
- * Decode a base64 PNG/JPEG payload into a [BitmapPainter]. Failures (bad
- * base64, malformed image) yield a 1×1 transparent painter — the bubble
- * still renders and the dialog tap is a no-op.
- */
-private fun bitmapPainterFromBase64(data: String): Painter {
-    val bytes = runCatching { Base64.decode(data, Base64.DEFAULT) }.getOrNull()
-        ?: return emptyBitmapPainter()
-    val bitmap = runCatching {
-        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-    }.getOrNull() ?: return emptyBitmapPainter()
-    return BitmapPainter(bitmap.asImageBitmap())
-}
-
-private fun emptyBitmapPainter(): Painter {
-    val bm = createBitmap(1, 1)
-    return BitmapPainter(bm.asImageBitmap())
 }
 
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
@@ -2981,6 +3059,18 @@ private fun ComposeBar(
     sessionId: String,
     initialDraft: String,
     seedLoaded: Boolean,
+    /**
+     * Text the outbound queue handed back for THIS session while the chat was
+     * open. Appended to the live draft as it arrives — see the collector
+     * below. Already filtered to [sessionId] by the caller.
+     */
+    liveBounces: Flow<String>,
+    /**
+     * Called once a [liveBounces] emission has been merged into the draft.
+     * Retires the durable bounce slot (so re-opening the chat doesn't seed the
+     * same text again) and surfaces the "couldn't send" notice.
+     */
+    onBounceApplied: suspend () -> Unit,
     onDraftChanged: suspend (String) -> Unit,
     /**
      * Synchronous flush of the current draft text, called when the
@@ -2995,6 +3085,14 @@ private fun ComposeBar(
     initialAttachments: () -> List<PickedAttachment>,
     /** Mirror every mutation of the picked-attachment list back to the store. */
     onAttachmentsChanged: (List<PickedAttachment>) -> Unit,
+    /**
+     * `client_send_id`s of the deferred sends the store currently has in
+     * flight. An id LEAVING this set means that send reached a terminal
+     * state; on the failure terminal the store re-stages the attachment
+     * references it used to drop, so the compose bar re-reads
+     * [initialAttachments] and the chips reappear without a remount (N-04).
+     */
+    deferredSendCsids: Set<Long>,
     /**
      * Kick off a fresh chunked upload for [uri]. Returns the local key
      * (used for cancel / forget) + the StateFlow the preview card
@@ -3011,6 +3109,13 @@ private fun ComposeBar(
     onCancelUpload: (localKey: String) -> Unit,
     /** Drop local upload state after a successful send consumed the handle. */
     onForgetUpload: (localKey: String) -> Unit,
+    /**
+     * Restart a `Failed` upload in place under the same [localKey]. Returns
+     * false when the upload is unrecoverable (no metadata left, or a driver
+     * is already running for it) — the card then tells the user to remove and
+     * re-attach instead of offering a retry that would do nothing.
+     */
+    onRetryUpload: (localKey: String) -> Boolean,
     /**
      * Suspend until the upload for [localKey] reaches a terminal state.
      * Returns the server handle on Done, null on Failed. Used by Send
@@ -3052,6 +3157,22 @@ private fun ComposeBar(
         androidx.compose.runtime.snapshotFlow { pickedAttachments }
             .collect { onAttachmentsChanged(it) }
     }
+    // Re-stage attachments a failed deferred send gave back. Send drains the
+    // chip row synchronously (the message is "gone" the instant it is
+    // pressed), so without this the user's photo silently disappeared along
+    // with their text when the upload died mid-send. Merged by `localKey`
+    // rather than assigned, so anything picked in the meantime survives.
+    var settledDeferredCsids by remember(sessionId) { mutableStateOf(deferredSendCsids) }
+    LaunchedEffect(sessionId, deferredSendCsids) {
+        val previous = settledDeferredCsids
+        settledDeferredCsids = deferredSendCsids
+        if (!deferredSendSettled(previous, deferredSendCsids)) return@LaunchedEffect
+        val known = pickedAttachments.mapTo(mutableSetOf()) { it.localKey }
+        val restored = initialAttachments().filter { it.localKey !in known }
+        if (restored.isNotEmpty()) {
+            pickedAttachments = pickedAttachments + restored
+        }
+    }
     var showAttachSheet by remember { mutableStateOf(false) }
     val attachSheetState = rememberModalBottomSheetState()
 
@@ -3063,9 +3184,20 @@ private fun ComposeBar(
                 val resolved = withContext(Dispatchers.IO) {
                     uris.mapNotNull { resolvePickedAttachment(context, it) }
                 }
-                val (accepted, rejected) = resolved.partition { it.sizeBytes <= MAX_ATTACHMENT_BYTES }
-                rejected.forEach {
+                val (sized, tooBig) = resolved.partition { it.sizeBytes <= MAX_ATTACHMENT_BYTES }
+                tooBig.forEach {
                     onAttachmentError("`${it.displayName}` exceeds the 5 MB attachment cap")
+                }
+                // Refuse anything the desktop would reject at
+                // `send_message_blocks` resolution time. A rejected type still
+                // consumes one of the four per-session upload slots for up to
+                // an hour server-side, so the check has to happen BEFORE
+                // `upload_init` (N-44).
+                val (accepted, unsupported) = sized.partition {
+                    attachmentMimeIsSupported(it.mimeType)
+                }
+                unsupported.forEach {
+                    onAttachmentError(unsupportedAttachmentMessage(it.displayName, it.mimeType))
                 }
                 val started = accepted.map { item ->
                     val (key, flow) = onStartUpload(
@@ -3095,21 +3227,37 @@ private fun ComposeBar(
                     resolvePickedAttachment(context, uri)
                 }
                 if (resolved != null) {
-                    if (resolved.sizeBytes > MAX_ATTACHMENT_BYTES) {
-                        onAttachmentError("`${resolved.displayName}` exceeds the 5 MB attachment cap")
-                    } else {
-                        val (key, flow) = onStartUpload(
-                            resolved.uri, sessionId, resolved.mimeType,
-                            resolved.displayName, resolved.sizeBytes,
-                        )
-                        pickedAttachments = pickedAttachments + PickedAttachment(
-                            uri = resolved.uri,
-                            displayName = resolved.displayName,
-                            mimeType = resolved.mimeType,
-                            sizeBytes = resolved.sizeBytes,
-                            localKey = key,
-                            uploadState = flow,
-                        )
+                    when {
+                        resolved.sizeBytes > MAX_ATTACHMENT_BYTES ->
+                            onAttachmentError(
+                                "`${resolved.displayName}` exceeds the 5 MB attachment cap",
+                            )
+                        // The picker's mime filter is advisory — a document
+                        // provider can still hand back anything — so the
+                        // allow-list is re-checked here, before we spend a
+                        // server upload slot on a type that would be refused
+                        // at send time (N-44).
+                        !attachmentMimeIsSupported(resolved.mimeType) ->
+                            onAttachmentError(
+                                unsupportedAttachmentMessage(
+                                    resolved.displayName,
+                                    resolved.mimeType,
+                                ),
+                            )
+                        else -> {
+                            val (key, flow) = onStartUpload(
+                                resolved.uri, sessionId, resolved.mimeType,
+                                resolved.displayName, resolved.sizeBytes,
+                            )
+                            pickedAttachments = pickedAttachments + PickedAttachment(
+                                uri = resolved.uri,
+                                displayName = resolved.displayName,
+                                mimeType = resolved.mimeType,
+                                sizeBytes = resolved.sizeBytes,
+                                localKey = key,
+                                uploadState = flow,
+                            )
+                        }
                     }
                 }
             }
@@ -3120,7 +3268,16 @@ private fun ComposeBar(
     // on sessionId resets when the user navigates between sessions; the
     // disk write below is debounced 500 ms via `snapshotFlow.debounce` so
     // the I/O scheduler isn't hammered by every keystroke.
-    var draft by rememberSaveable(sessionId) { mutableStateOf(initialDraft) }
+    //
+    // [DraftTextSaver] caps what reaches the saved-state Bundle: the field
+    // accepts an unbounded paste, and the default `autoSaver` would push the
+    // whole thing through a Binder transaction on backgrounding, killing the
+    // app with `TransactionTooLargeException` (N-58). Over the cap nothing is
+    // saved and the disk draft — flushed synchronously by the `onDispose`
+    // below — is what restores the text.
+    var draft by rememberSaveable(sessionId, stateSaver = DraftTextSaver) {
+        mutableStateOf(initialDraft)
+    }
     // The async seed lands AFTER the first composition. Seat it into the
     // text field the moment it arrives so the user sees their saved draft
     // (or a bounce-recovered message) instead of an empty field.
@@ -3129,6 +3286,19 @@ private fun ComposeBar(
         // any keystrokes that landed during the brief async window.
         if (seedLoaded && draft.isEmpty()) {
             draft = initialDraft
+        }
+    }
+    // Live bounce delivery (N-07). A queued message that TTL-expires, is
+    // abandoned, or is cancelled while the user is sitting in this chat used
+    // to leave its text in a disk slot that is only read on open — so the
+    // message the phone gave up on was invisible until the user navigated away
+    // and came back. Merged with [mergeDraftSeed] rather than assigned, so
+    // whatever they have typed since survives; [onBounceApplied] retires the
+    // disk slot afterwards, which is also what raises the notice.
+    LaunchedEffect(sessionId) {
+        liveBounces.collect { bounced ->
+            draft = mergeDraftSeed(draft, bounced)
+            onBounceApplied()
         }
     }
     // F5: per-session debounced writer. snapshotFlow + debounce(500) +
@@ -3251,13 +3421,15 @@ private fun ComposeBar(
                             attachment = item,
                             onRemove = {
                                 // Abort the in-flight upload server-side
-                                // (best-effort upload_abort) AND remove
+                                // (best-effort upload_abort, which releases the
+                                // server's per-session upload slot) AND remove
                                 // the local row in one action.
                                 onCancelUpload(item.localKey)
                                 pickedAttachments = pickedAttachments.filter {
                                     it.localKey != item.localKey
                                 }
                             },
+                            onRetry = onRetryUpload,
                         )
                     }
                 }
@@ -3496,7 +3668,7 @@ private fun ComposeBar(
                     supportingContent = { Text("Text-like files only in V1") },
                     modifier = Modifier.clickable {
                         showAttachSheet = false
-                        fileLauncher.launch(arrayOf("*/*"))
+                        fileLauncher.launch(ATTACHMENT_FILE_PICKER_MIME_TYPES)
                     },
                 )
                 Spacer(Modifier.height(16.dp))
@@ -3526,6 +3698,25 @@ private data class ResolvedAttachment(
 private const val MAX_PHOTOS_PER_PICK = 4
 private const val MAX_ATTACHMENT_BYTES: Long = 5L * 1024 * 1024
 
+/** Copy shown when [UploadManager.retry] reports an upload is past saving. */
+private const val UNRECOVERABLE_UPLOAD_MESSAGE =
+    "This upload can't be resumed. Remove the attachment and add it again."
+
+/**
+ * Saved-state saver for free-text fields, capped by [draftSaveableValue].
+ * `save` returning null means "keep nothing in the Bundle" — `rememberSaveable`
+ * then falls back to its initial value on restore. For the compose-bar draft
+ * that fallback is immediately overwritten by the async disk seed; for the
+ * short-lived new-session dialog an over-cap paste simply isn't carried across
+ * a rotation, which beats killing the process with a
+ * `TransactionTooLargeException` (N-58).
+ */
+internal val DraftTextSaver: androidx.compose.runtime.saveable.Saver<String, Any> =
+    androidx.compose.runtime.saveable.Saver(
+        save = { draftSaveableValue(it) },
+        restore = { it as? String },
+    )
+
 /**
  * Resolve a SAF / PhotoPicker [Uri] into a [PickedAttachment] by
  * querying the content resolver for `_display_name` + `_size` and the
@@ -3552,15 +3743,26 @@ private fun resolvePickedAttachment(context: Context, uri: Uri): ResolvedAttachm
             }
         }
     }
-    return ResolvedAttachment(uri = uri, displayName = displayName, mimeType = mime, sizeBytes = size)
+    return ResolvedAttachment(
+        uri = uri,
+        displayName = displayName,
+        // Providers commonly answer `application/octet-stream` for source
+        // files they have no mime-map entry for. [normalizeAttachmentMime]
+        // relabels those from the file extension so a `.kt` / `.py` / `.toml`
+        // attachment isn't refused for a reason that has nothing to do with
+        // its contents.
+        mimeType = normalizeAttachmentMime(mime, displayName),
+        sizeBytes = size,
+    )
 }
 
 /**
  * One picked attachment rendered as a small card in the compose-row
- * preview strip. Images get a thumbnail decoded at low resolution
- * (`inSampleSize = 4`) so a 5 MB photo doesn't blow the heap; files get
- * an icon + name + size readout. The corner × button removes the item
- * from the live list (and aborts the upload server-side).
+ * preview strip. Images get a thumbnail decoded off the main thread at
+ * thumbnail resolution so a 5 MB photo doesn't blow the heap or stall the
+ * compose bar; files get an icon + name + size readout. The corner × button
+ * removes the item from the live list (and aborts the upload server-side,
+ * releasing the server's per-session upload slot).
  *
  * Upload-state overlay (chunked-upload integration):
  *   - Queued / Uploading / Paused: a small `CircularProgressIndicator`
@@ -3569,16 +3771,19 @@ private fun resolvePickedAttachment(context: Context, uri: Uri): ResolvedAttachm
  *   - Done: a small green check icon in the top-left so the user
  *     knows the attachment is ready to send.
  *   - Failed: a small red error icon in the top-left + the failure
- *     reason as the percent label; tap-to-retry isn't wired (cancel
- *     and re-pick is the V1 recovery path; cheaper to ship than a
- *     dedicated retry button on a tiny card).
+ *     reason as the percent label. Tapping the card opens the full reason
+ *     with a **Retry** action wired to [onRetry], which restarts the upload
+ *     in place under the same `localKey` (so the chip and any deferred send
+ *     keep their references). When [onRetry] answers `false` the upload is
+ *     past saving and the dialog switches to a Remove action instead of
+ *     promising a retry that can't happen (N-48).
  */
 @Composable
-private fun AttachmentPreviewCard(
+internal fun AttachmentPreviewCard(
     attachment: PickedAttachment,
     onRemove: () -> Unit,
+    onRetry: (localKey: String) -> Boolean,
 ) {
-    val context = LocalContext.current
     val isImage = attachment.mimeType.startsWith("image/", ignoreCase = true)
     val uploadState by attachment.uploadState.collectAsState()
     // Shared modal trigger for both image and file variants: failure
@@ -3590,6 +3795,21 @@ private fun AttachmentPreviewCard(
     // AlertDialog with the selectable full text.
     var failureDialogOpen by rememberSaveable(attachment.localKey) {
         mutableStateOf(false)
+    }
+    // Latched once [onRetry] has told us this upload can't be restarted, so
+    // the dialog stops offering an action that does nothing and points at the
+    // one recovery that does work.
+    var retryRefused by rememberSaveable(attachment.localKey) {
+        mutableStateOf(false)
+    }
+    // ...but only for as long as that verdict holds. `retry` also answers
+    // `false` when a driver coroutine happens to be running for this key at
+    // that instant, which is a transient, and the latch would otherwise pin
+    // the card to "remove and re-attach" for the rest of its life even though
+    // a retry a moment later would have worked. Any move out of `Failed` means
+    // the upload is live again, so the verdict is stale.
+    LaunchedEffect(uploadState) {
+        if (uploadState !is UploadManager.State.Failed) retryRefused = false
     }
     Box(
         modifier = Modifier
@@ -3610,15 +3830,11 @@ private fun AttachmentPreviewCard(
                 ),
         ) {
             if (isImage) {
-                val painter: Painter? = remember(attachment.uri) {
-                    runCatching {
-                        context.contentResolver.openInputStream(attachment.uri)?.use { stream ->
-                            val options = BitmapFactory.Options().apply { inSampleSize = 4 }
-                            val bitmap = BitmapFactory.decodeStream(stream, null, options)
-                            bitmap?.let { BitmapPainter(it.asImageBitmap()) }
-                        }
-                    }.getOrNull()
-                }
+                // Decoded off the main thread at thumbnail resolution — a
+                // 4-photo pick used to freeze the compose bar for hundreds of
+                // ms doing four full ContentProvider reads plus four decodes
+                // inside composition (N-49).
+                val painter: Painter? = rememberContentUriPainter(attachment.uri)
                 if (painter != null) {
                     androidx.compose.foundation.Image(
                         painter = painter,
@@ -3723,26 +3939,51 @@ private fun AttachmentPreviewCard(
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { failureDialogOpen = false },
                 title = {
-                    androidx.compose.material3.Text("Upload failed: ${attachment.displayName}")
+                    Text("Upload failed: ${attachment.displayName}")
                 },
                 text = {
-                    // SelectionContainer lets the user long-press to
-                    // copy the reason for a bug report — the strings
-                    // come straight from server / exception messages
-                    // and are often the only diagnostic info available.
-                    SelectionContainer {
-                        androidx.compose.material3.Text(
-                            text = reason,
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        // SelectionContainer lets the user long-press to
+                        // copy the reason for a bug report — the strings
+                        // come straight from server / exception messages
+                        // and are often the only diagnostic info available.
+                        SelectionContainer {
+                            Text(
+                                text = reason,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                        if (retryRefused) {
+                            Text(
+                                text = UNRECOVERABLE_UPLOAD_MESSAGE,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
                     }
                 },
                 confirmButton = {
-                    androidx.compose.material3.TextButton(
-                        onClick = { failureDialogOpen = false },
-                    ) {
-                        androidx.compose.material3.Text("OK")
+                    if (retryRefused) {
+                        TextButton(
+                            onClick = {
+                                failureDialogOpen = false
+                                onRemove()
+                            },
+                        ) { Text("Remove") }
+                    } else {
+                        TextButton(
+                            onClick = {
+                                if (onRetry(attachment.localKey)) {
+                                    failureDialogOpen = false
+                                } else {
+                                    retryRefused = true
+                                }
+                            },
+                        ) { Text("Retry") }
                     }
+                },
+                dismissButton = {
+                    TextButton(onClick = { failureDialogOpen = false }) { Text("Close") }
                 },
             )
         }
@@ -4270,7 +4511,17 @@ private fun SupervisorSettingsSheet(
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var promptText by rememberSaveable { mutableStateOf(state?.customPrompt ?: "") }
+    // [DraftTextSaver] rather than the default `autoSaver`. A system prompt is
+    // exactly the shape of thing that gets pasted, and this field — unlike the
+    // compose-bar draft — has no synchronous disk flush behind it, so it is
+    // both the likeliest to overflow the saved-state Binder budget (N-58) and
+    // the one with the least to fall back on. Over the cap the restore re-runs
+    // the initialiser and the effect below re-seeds from `state.customPrompt`,
+    // so the server's stored prompt survives; only an over-cap *unsaved* edit
+    // is lost, which beats killing the process on backgrounding.
+    var promptText by rememberSaveable(stateSaver = DraftTextSaver) {
+        mutableStateOf(state?.customPrompt ?: "")
+    }
     // Sync the local draft when the server state first arrives (i.e. on open).
     LaunchedEffect(state?.customPrompt) {
         if (state != null && promptText.isEmpty()) {

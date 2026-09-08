@@ -3,6 +3,13 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+        Default-network callbacks only: ConnectionManager watches for the
+        Wi-Fi -> cellular handover so the WebSocket is rebuilt in seconds
+        instead of waiting out a ping timeout plus a capped backoff. No
+        network *state* is read or transmitted.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
 
     <uses-feature

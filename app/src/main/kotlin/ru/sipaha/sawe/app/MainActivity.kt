@@ -21,24 +21,18 @@ class MainActivity : ComponentActivity() {
         // explicitly so the compose row stays above the keyboard AND
         // clears the system nav bar at rest.
         super.onCreate(savedInstanceState)
-        // Cold-start auto-resume: the VM inspects [PairingRepository.loadAll]
-        // and returns the appropriate landing destination — `pairing` when
-        // nothing is paired, `solutions` for the single-server R-6b
-        // auto-resume path, or `servers` when 2+ are paired. The VM also
-        // kicks off [switchToServer] synchronously for the
-        // most-recently-active server in the latter two cases, so by the
-        // time the nav graph renders we're already in Connecting state.
-        val initialRoute = if (savedInstanceState == null) {
-            viewModel.coldStartLandingRoute()
-        } else {
-            // Recreated activity (e.g. orientation change). The VM survived
-            // and is already in the right state — let the nav graph
-            // restore its own back stack.
-            null
-        }
+        // NOTE: no cold-start branch on `savedInstanceState` here.
+        // Connecting is the ViewModel's job — it hydrates the pairing list
+        // off the Main thread and binds the most-recently-used server as
+        // soon as it exists, whether this Activity is a fresh launch, a
+        // rotation, or a re-creation after the OS killed the process in
+        // the background. Gating that on `savedInstanceState == null` used
+        // to leave the restored Activity with no client at all and no way
+        // to get one (N-10). The nav graph resolves its own landing route
+        // from [MainViewModel.landingRoute].
         setContent {
             SaweMobileTheme {
-                App(vm = viewModel, initialRoute = initialRoute)
+                App(vm = viewModel)
             }
         }
     }

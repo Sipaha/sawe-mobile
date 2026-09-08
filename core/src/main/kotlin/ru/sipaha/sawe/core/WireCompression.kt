@@ -142,13 +142,24 @@ object WireCompression {
         else -> throw WireCompressionException("unknown dictionary id $dictId")
     }
 
-    private fun utf8Size(text: String): Int {
+    /**
+     * UTF-8 length of [text] without materialising the byte array.
+     *
+     * Both halves of a surrogate pair count 2, so the pair costs the
+     * correct 4 bytes — counting only the high half as 2 and letting the
+     * low half fall through to the 3-byte branch inflated every
+     * astral-plane character (emoji) by one byte, which both tripped the
+     * compression threshold early and let the "strictly smaller than raw"
+     * guard accept a compressed frame slightly *larger* than the text it
+     * replaced.
+     */
+    internal fun utf8Size(text: String): Int {
         var bytes = 0
         for (c in text) {
             bytes += when {
                 c.code < 0x80 -> 1
                 c.code < 0x800 -> 2
-                Character.isHighSurrogate(c) -> 2 // pair → 4 total, counted 2+2
+                Character.isSurrogate(c) -> 2 // pair → 2 + 2 = 4 total
                 else -> 3
             }
         }

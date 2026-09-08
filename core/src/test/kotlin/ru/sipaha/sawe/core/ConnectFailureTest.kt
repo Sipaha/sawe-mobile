@@ -148,4 +148,38 @@ class ConnectFailureTest {
         assertNotNull(cls.userMessage)
         assertContains(cls.userMessage, "something specific")
     }
+
+    // N-08 (server half): 1009 condemns the message, not the connection.
+
+    @Test
+    fun `ServerClosed 1009 is retryable but rejects the message`() {
+        val failure = ConnectFailure.ServerClosed(1009, "message too big")
+        assertTrue(failure.isRetryable, "the link is fine — reconnecting must still happen")
+        assertTrue(failure.rejectsMessage, "1009 condemns the message")
+        assertTrue(
+            failure.userMessage.contains("too large", ignoreCase = true),
+            "the banner must say what actually happened: ${failure.userMessage}",
+        )
+    }
+
+    @Test
+    fun `other close codes do not reject the message`() {
+        for (code in listOf(1000, 1001, 1006, 1008, 1011)) {
+            assertFalse(
+                ConnectFailure.ServerClosed(code, "bye").rejectsMessage,
+                "close code $code must not condemn the pending message",
+            )
+        }
+        // …and neither does any non-close failure.
+        assertFalse(ConnectFailure.Unreachable("no route").rejectsMessage)
+        assertFalse(ConnectFailure.HandshakeTimeout(10_000L).rejectsMessage)
+    }
+
+    @Test
+    fun `MessageRejectedException carries the failure and its message`() {
+        val failure = ConnectFailure.ServerClosed(1009, "message too big")
+        val error = MessageRejectedException(failure)
+        assertEquals(failure, error.failure)
+        assertEquals(failure.userMessage, error.message)
+    }
 }

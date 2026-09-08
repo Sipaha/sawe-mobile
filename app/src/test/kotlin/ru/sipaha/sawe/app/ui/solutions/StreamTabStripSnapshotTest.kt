@@ -51,9 +51,11 @@ class StreamTabStripSnapshotTest {
 
         captureRoboImage(
             filePath = "src/test/snapshots/roborazzi/StreamTabStrip_main_plus_two_teammates.png",
-            // Compare against the committed golden (flip to Record to re-baseline),
-            // matching WorkspaceScreenSnapshotTest.
-            roborazziOptions = RoborazziOptions(taskType = RoborazziTaskType.Compare),
+            // VERIFYING: compares against the committed golden and FAILS the
+            // test on a mismatch (Compare only writes *_compare.png and
+            // returns, so the golden was decorative). Diff artifacts still
+            // land in build/outputs/roborazzi/. Flip to Record to re-baseline.
+            roborazziOptions = RoborazziOptions(taskType = RoborazziTaskType.Verify),
         ) {
             MaterialTheme {
                 Surface {
@@ -92,9 +94,11 @@ class StreamTabStripSnapshotTest {
 
         captureRoboImage(
             filePath = "src/test/snapshots/roborazzi/StreamTabStrip_main_teammate_shell.png",
-            // Compare against the committed golden (flip to Record to re-baseline),
-            // matching WorkspaceScreenSnapshotTest.
-            roborazziOptions = RoborazziOptions(taskType = RoborazziTaskType.Compare),
+            // VERIFYING: compares against the committed golden and FAILS the
+            // test on a mismatch (Compare only writes *_compare.png and
+            // returns, so the golden was decorative). Diff artifacts still
+            // land in build/outputs/roborazzi/. Flip to Record to re-baseline.
+            roborazziOptions = RoborazziOptions(taskType = RoborazziTaskType.Verify),
         ) {
             MaterialTheme {
                 Surface {

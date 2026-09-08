@@ -30,7 +30,7 @@ import java.util.TimeZone
  *
  * Privacy: stack traces are passed verbatim from `Throwable.printStackTrace`.
  * The codebase doesn't currently put HMAC secrets, pairing URLs, or
- * EncryptedSharedPreferences plaintext into exception messages — verified
+ * encrypted-prefs plaintext into exception messages — verified
  * by `grep -rn "Log\." app/src core/src` (R-6g audit). If future work
  * adds such a path, scrub before `throw` or override `getLocalizedMessage()`.
  */

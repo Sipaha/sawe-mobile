@@ -36,12 +36,20 @@ import kotlinx.coroutines.flow.asSharedFlow
  * ### First-cold-start discrimination
  *
  * The very first `0 -> 1` transition during process bring-up IS the
- * cold launch, where the existing `MainViewModel.coldStartLandingRoute()`
- * + `switchToServer` pipeline already triggers a full refresh as a side
- * effect of the initial connect. Emitting on that transition would
- * double-fetch and is wasteful (cheap, but pointless). The
+ * cold launch, where `ConnectionManager`'s own hydrate-and-connect
+ * pipeline already triggers a full refresh as a side effect of the
+ * initial connect. Emitting on that transition would double-fetch and is
+ * wasteful (cheap, but pointless). The
  * [ForegroundEdgeDetector.hasReportedFirstStart] flag suppresses the
  * first emission and lets every subsequent foreground edge through.
+ *
+ * ### The background edge
+ *
+ * [backgroundEvents] is the symmetric `1 -> 0` signal. Nothing in the app
+ * used to observe the app going away, so the RPC heartbeat kept pinging
+ * (and waking the radio) all night behind a locked screen. The background
+ * edge is NOT suppressed on the first cycle — there is no cold-start
+ * equivalent for it.
  */
 object ForegroundEventBus {
     /**
@@ -58,7 +66,14 @@ object ForegroundEventBus {
     private val _events = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
     val events: SharedFlow<Unit> = _events.asSharedFlow()
 
-    private val detector = ForegroundEdgeDetector { _events.tryEmit(Unit) }
+    /** `1 -> 0`: the last started Activity stopped — the app is in the background. */
+    private val _backgroundEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+    val backgroundEvents: SharedFlow<Unit> = _backgroundEvents.asSharedFlow()
+
+    private val detector = ForegroundEdgeDetector(
+        onForeground = { _events.tryEmit(Unit) },
+        onBackground = { _backgroundEvents.tryEmit(Unit) },
+    )
 
     fun install(application: Application) {
         application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
@@ -84,15 +99,19 @@ object ForegroundEventBus {
  *
  * Counts started activities and invokes [onForeground] exactly when the
  * count goes `0 -> 1` AFTER the first start (the very first `0 -> 1`
- * during cold launch is suppressed — see [ForegroundEventBus] KDoc).
+ * during cold launch is suppressed — see [ForegroundEventBus] KDoc), and
+ * [onBackground] whenever it goes `1 -> 0`.
  *
  * Configuration-change Activity recreation interleaves
  * `onActivityStarted` for the new instance with `onActivityStopped` for
  * the old one (new starts before old stops), so the count never returns
- * to zero and no spurious foreground edge fires. This is the same
- * pattern [androidx.lifecycle.ProcessLifecycleOwner] uses internally.
+ * to zero and neither edge fires spuriously. This is the same pattern
+ * [androidx.lifecycle.ProcessLifecycleOwner] uses internally.
  */
-internal class ForegroundEdgeDetector(private val onForeground: () -> Unit) {
+internal class ForegroundEdgeDetector(
+    private val onForeground: () -> Unit,
+    private val onBackground: () -> Unit = {},
+) {
     @Volatile
     private var startedActivityCount: Int = 0
 
@@ -112,8 +131,11 @@ internal class ForegroundEdgeDetector(private val onForeground: () -> Unit) {
     }
 
     fun onActivityStopped() {
-        if (startedActivityCount > 0) {
-            startedActivityCount -= 1
+        val previous = startedActivityCount
+        if (previous <= 0) return
+        startedActivityCount = previous - 1
+        if (previous == 1) {
+            onBackground()
         }
     }
 }

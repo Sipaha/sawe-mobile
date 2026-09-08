@@ -36,9 +36,32 @@ import androidx.core.content.edit
  * `openSession` which exercises `get_session`, and a 404 there shows
  * the error state and the user pops back to a working route.
  *
- * **Storage:** plain [SharedPreferences]. The route string is purely
- * cosmetic (no auth secret), and encrypting it would slow cold-start
- * unnecessarily.
+ * **Storage: deliberately plain [SharedPreferences] — the one store in
+ * `data/` that is not encrypted, and it stays that way on a stated test.**
+ *
+ * The test this app applies is "does the store hold content", not "has the
+ * server seen it" (`spk_history_cache` is server-derived transcript text
+ * and it IS encrypted). This file fails that test in full: every value it
+ * can hold is the string `route:<serverId>` maps to, and the only shapes
+ * [saveRoute] accepts are `workspace`, `workspace/sessions/<sessionId>` and
+ * `workspace/solutions/<solutionId>/projects` — opaque server-assigned
+ * identifiers and fixed path segments. No text the user typed, no title, no
+ * message body, no name they chose. The identifiers themselves are not a
+ * secret either: they are the ids the paired server hands out and receives
+ * back on every call.
+ *
+ * The stores it sits next to are encrypted for concrete reasons this one
+ * has no equivalent of — [DraftRepository] holds unsent text,
+ * [ListCacheRepository] holds session titles, [PairingRepository] holds the
+ * HMAC secret. Sweeping this file in along with them would buy nothing and
+ * cost a Keystore-shaped failure mode on the cold-start path that decides
+ * the landing screen.
+ *
+ * **If a route ever carries a value rather than an id** — a search query, a
+ * filter string, anything typed — this rationale is void and the file moves
+ * to [EncryptedPrefs.open] like the rest (with a `persistenceDropNotice`
+ * branch and a [LegacyPrefsFormat.PLAIN] import). `NavStateStorageTest`
+ * asserts the current state so that change has to be made deliberately.
  */
 class NavStateRepository(
     private val context: Context,
@@ -183,15 +206,10 @@ class NavStateRepository(
         private val PROJECTS_RE = Regex("""^solutions/([^/]+)/projects$""")
         private val SOLUTION_RE = Regex("""^solutions/[^/]+$""")
 
-        @Volatile
-        private var instance: NavStateRepository? = null
+        private val holder = SingletonHolder(::NavStateRepository)
 
+        /** Process-wide instance; provider rebound per call ([SingletonHolder]). */
         fun get(context: Context, activeServerProvider: () -> String?): NavStateRepository =
-            synchronized(this) {
-                val store = instance
-                    ?: NavStateRepository(context.applicationContext).also { instance = it }
-                store.activeServerProvider = activeServerProvider
-                store
-            }
+            holder.get(context) { it.activeServerProvider = activeServerProvider }
     }
 }

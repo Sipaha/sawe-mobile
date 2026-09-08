@@ -1,7 +1,31 @@
 package ru.sipaha.sawe.core
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
+
+/**
+ * Provenance of the last time a [QueuedMessage] was handed to a transport.
+ *
+ * Written **ahead** of the frame (see `QueueController.dispatchOne`), so a
+ * process kill in the window between the write and the response leaves a
+ * record that admits "bytes may already be on the desktop's socket". The
+ * absence of this field is the load-bearing half of the contract: no
+ * attempt ⇒ nothing was ever written for this record ⇒ replaying it after a
+ * restart is a first delivery, not a repeat.
+ *
+ * @property atMs wall clock (the controller's `nowMs`) at the moment the
+ *   frame was about to be written.
+ * @property instanceId editor process the frame was written to; null when
+ *   that peer advertised no csid dedupe. Null must never be read as "same
+ *   process" — it is the conservative value and denies a replay.
+ */
+@Serializable
+data class QueuedSendAttempt(
+    @SerialName("at_ms") val atMs: Long,
+    /** Editor process the frame was written to; null when that peer advertised no csid dedupe. */
+    @SerialName("instance_id") val instanceId: String? = null,
+)
 
 /**
  * One outbound JSON-RPC call awaiting a live connection.
@@ -15,6 +39,17 @@ import kotlinx.serialization.json.JsonElement
  *
  * [enqueuedAtMs] is the source of truth for FIFO ordering and TTL
  * arithmetic.
+ *
+ * [attempt] records whether this record has ever been handed to a
+ * transport, and to which editor process. It is what lets the
+ * cross-process replay gate tell "typed offline, never sent" (free to
+ * send) from "the frame went out and we died before the answer" (a repeat
+ * unless the desktop's dedupe table can still absorb it). Absent means
+ * never attempted — which is also how blobs written by builds that predate
+ * the field decode, and the correct reading for them: those builds had no
+ * dedupe to lean on and their queue entries were replayed unconditionally.
+ * Both stores decode with `ignoreUnknownKeys = true`, so a downgraded build
+ * ignores the key rather than failing the whole blob.
  */
 @Serializable
 data class QueuedMessage(
@@ -22,6 +57,7 @@ data class QueuedMessage(
     val method: String,
     val params: JsonElement?,
     val enqueuedAtMs: Long,
+    val attempt: QueuedSendAttempt? = null,
 )
 
 /**
@@ -30,9 +66,9 @@ data class QueuedMessage(
  * Two implementations live in this codebase:
  *  - [InMemoryQueueStore] — used by `:cli`, `:core` tests, and the
  *    default builder for backwards compatibility.
- *  - `EncryptedQueueStore` in `:app/data` — disk-backed via
- *    EncryptedSharedPreferences so a typed-but-unsent message survives
- *    a process kill.
+ *  - `EncryptedQueueStore` in `:app/data` — disk-backed, on a
+ *    Tink-encrypted `SharedPreferences` file, so a typed-but-unsent
+ *    message survives a process kill.
  *
  * **Concurrency:** all methods are called from the [RemoteClient]
  * lifecycle coroutine or under [stateLock] — implementations don't

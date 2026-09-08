@@ -21,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ru.sipaha.sawe.app.ui.common.ConnectionStatusBanner
@@ -39,6 +40,13 @@ fun WorkspaceScreen(
     onOpenSession: (sessionId: String) -> Unit,
     onOpenProjects: (solutionId: Long) -> Unit,
     onOpenSettings: () -> Unit,
+    /**
+     * Navigate to the QR pairing screen. Backs the terminal connection
+     * banner, whose only real remedy is a fresh scan (N-18). Nullable, and
+     * null by default, so the banner shows a plain informational strip rather
+     * than a dead tap on any surface that hasn't wired the route yet.
+     */
+    onRePair: (() -> Unit)? = null,
 ) {
     val state by viewModel.workspaceState.collectAsState()
     // Picker visibility lives inside the screen now (E1): the FAB and
@@ -81,11 +89,15 @@ fun WorkspaceScreen(
             ConnectionStatusBanner(
                 state = connectionState,
                 lastConnectedMs = lastConnectedMs,
+                onRePair = onRePair,
             )
             Box(Modifier.fillMaxSize()) {
                 when (val s = state) {
                     WorkspaceUiState.Loading -> LoadingState()
-                    is WorkspaceUiState.Error -> ErrorState(s.message)
+                    is WorkspaceUiState.Error -> ErrorState(
+                        msg = s.message,
+                        onRetry = { viewModel.refreshWorkspace() },
+                    )
                     is WorkspaceUiState.Loaded -> {
                         if (s.snapshot.solutions.isEmpty()) {
                             EmptyState(
@@ -387,8 +399,23 @@ internal fun EmptyState(onOpenPicker: () -> Unit = {}, onCreateNew: () -> Unit =
 @Composable
 private fun LoadingState() = Box(Modifier.fillMaxSize(), Alignment.Center) { CircularProgressIndicator() }
 
+/**
+ * Terminal state for a workspace snapshot we couldn't fetch.
+ *
+ * The retry button is what makes this state survivable: nothing else in the
+ * app re-runs `workspace.snapshot` until the next Connected or foreground
+ * edge, so a first fetch that timed out on a slow link used to leave the
+ * screen stuck until the user backgrounded and resumed the app (N-12).
+ */
 @Composable
-private fun ErrorState(msg: String) = Box(Modifier.fillMaxSize().padding(24.dp), Alignment.Center) { Text(msg) }
+internal fun ErrorState(msg: String, onRetry: () -> Unit = {}) = Column(
+    modifier = Modifier.fillMaxSize().padding(24.dp),
+    verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+    horizontalAlignment = Alignment.CenterHorizontally,
+) {
+    Text(text = msg, textAlign = TextAlign.Center)
+    Button(onClick = onRetry) { Text("Retry") }
+}
 
 @Composable
 private fun StaleProgressBar() = LinearProgressIndicator(modifier = Modifier.fillMaxWidth())

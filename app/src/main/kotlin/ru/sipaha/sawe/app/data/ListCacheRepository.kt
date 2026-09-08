@@ -3,6 +3,8 @@ package ru.sipaha.sawe.app.data
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import ru.sipaha.sawe.core.SessionSummary
@@ -23,11 +25,17 @@ import ru.sipaha.sawe.core.SolutionSummary
  * survive disconnects: a fresh response overwrites; a failed refresh
  * leaves the cached entries in place.
  *
- * **Storage:** plain [SharedPreferences]. The lists contain server-shaped
- * metadata (ids, display names, member paths, session titles) — not
- * pairing secrets or anything we'd encrypt at rest. Same reasoning as
- * [DraftRepository]; the encrypted-prefs flow is reserved for
- * authoritative session ids and pairing URLs.
+ * **Storage:** encrypted, via [EncryptedPrefs.open]. The lists were once
+ * called "server-shaped metadata (ids, display names, member paths, session
+ * titles) — not pairing secrets", but a session title is a summary of what
+ * the user asked the agent to do, and a member path is a directory layout
+ * off their machine. "The server has it already" is not the line this app
+ * draws either: [SessionHistoryRepository] caches server-derived transcript
+ * text and encrypts it. Content is the line, and titles are content.
+ *
+ * Writes land once per `solutions.list` / `list_sessions` response — a
+ * handful per screen, off Main — so one AES pass over a list blob costs
+ * nothing that a refresh does not already spend on the wire.
  *
  * **Per-server scoping:** every key embeds the active server id (resolved
  * via [activeServerProvider] on each call), so two paired servers with
@@ -52,10 +60,19 @@ class ListCacheRepository(
 
     private val prefs: SharedPreferences? by lazy { openPrefs() }
 
-    private fun openPrefs(): SharedPreferences? = runCatching {
-        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    }.onFailure { Log.w(TAG, "openPrefs() failed; list cache disabled", it) }
-        .getOrNull()
+    /** `null` degrades to a no-op disk layer — see [DraftRepository.openPrefs]. */
+    private fun openPrefs(): SharedPreferences? =
+        EncryptedPrefs.open(context, PREFS_NAME, LegacyPrefsFormat.PLAIN)
+
+    /**
+     * Resolve the encrypted prefs file (and the one-off import of the old
+     * plain file) on [Dispatchers.IO]. Idempotent — the cold-start read of
+     * the cached solutions list is what races it, and it blocks on the same
+     * `by lazy` initialiser rather than running a second one.
+     */
+    suspend fun warmUp() {
+        withContext(Dispatchers.IO) { prefs }
+    }
 
     fun loadSolutions(): List<SolutionSummary>? {
         val p = prefs ?: return null
@@ -147,7 +164,7 @@ class ListCacheRepository(
 
     companion object {
         private const val TAG = "ListCacheRepository"
-        private const val PREFS_NAME = "spk_list_cache"
+        internal const val PREFS_NAME = "spk_list_cache"
 
         // ignoreUnknownKeys keeps an older cache blob readable after a
         // future server-side schema addition; a model expansion shouldn't
@@ -157,15 +174,10 @@ class ListCacheRepository(
             encodeDefaults = false
         }
 
-        @Volatile
-        private var instance: ListCacheRepository? = null
+        private val holder = SingletonHolder(::ListCacheRepository)
 
+        /** Process-wide instance; provider rebound per call ([SingletonHolder]). */
         fun get(context: Context, activeServerProvider: () -> String?): ListCacheRepository =
-            synchronized(this) {
-                val store = instance
-                    ?: ListCacheRepository(context.applicationContext).also { instance = it }
-                store.activeServerProvider = activeServerProvider
-                store
-            }
+            holder.get(context) { it.activeServerProvider = activeServerProvider }
     }
 }

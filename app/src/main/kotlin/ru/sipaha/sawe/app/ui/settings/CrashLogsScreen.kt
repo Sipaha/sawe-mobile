@@ -30,14 +30,20 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import ru.sipaha.sawe.app.diagnostics.CrashLogger
 import java.io.File
 import java.text.DateFormat
@@ -49,19 +55,25 @@ import java.util.Date
  * via Intent.ACTION_SEND (text/plain), or clear them all. No automatic
  * upload to anywhere — the user is in charge of where the report goes.
  *
- * State is held locally (`var files by remember`) and reseeded only
- * when the user clears. We *don't* re-read on every recomposition —
- * crashes happen between process lifetimes, so the list of files
- * doesn't change during a single screen session except as a result of
- * `clearAll()`.
+ * The listing and every file read happen on [Dispatchers.IO] and are cached
+ * per-file: the directory scan is a `produceState` that runs once per
+ * `reloadToken`, and a viewed file's text is read once instead of on every
+ * recomposition of the dialog (it used to be read inside the `Text(...)`
+ * call, i.e. from the main thread, repeatedly — N-60). The list is reseeded
+ * only when the user clears: crashes happen between process lifetimes, so it
+ * can't change while this screen is up.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CrashLogsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
-    var files by remember { mutableStateOf(CrashLogger.listCrashFiles(context)) }
+    var reloadToken by remember { mutableIntStateOf(0) }
+    val files: List<File> by produceState(initialValue = emptyList(), context, reloadToken) {
+        value = withContext(Dispatchers.IO) { CrashLogger.listCrashFiles(context) }
+    }
     var viewing by remember { mutableStateOf<File?>(null) }
     var showClearDialog by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     Scaffold(
         topBar = {
@@ -122,6 +134,16 @@ fun CrashLogsScreen(onBack: () -> Unit) {
     }
 
     viewing?.let { file ->
+        // Read once, here, for BOTH the dialog body and the share intent.
+        // Sharing used to kick off its own read on `rememberCoroutineScope()`
+        // and then set `viewing = null`; a Back press before that read
+        // finished cancelled the scope and the chooser simply never appeared —
+        // no error, no chooser, nothing. Reusing the text the user is already
+        // looking at means Share has no async work left to lose.
+        val body: String? by produceState<String?>(initialValue = null, file) {
+            value = withContext(Dispatchers.IO) { CrashLogger.readCrashFile(file) }
+        }
+        val loaded = body
         AlertDialog(
             onDismissRequest = { viewing = null },
             title = { Text(file.name) },
@@ -132,17 +154,23 @@ fun CrashLogsScreen(onBack: () -> Unit) {
                         .verticalScroll(rememberScrollState()),
                 ) {
                     Text(
-                        text = CrashLogger.readCrashFile(file),
+                        text = loaded ?: "Loading…",
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
                     )
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
-                    shareCrashLog(context, file)
-                    viewing = null
-                }) { Text("Share") }
+                TextButton(
+                    // Nothing to share until the read lands. Disabled rather
+                    // than queued: a few KB off a local file is imperceptible,
+                    // and a Share that silently does nothing is the bug.
+                    enabled = loaded != null,
+                    onClick = {
+                        loaded?.let { shareCrashLog(context, file.name, it) }
+                        viewing = null
+                    },
+                ) { Text("Share") }
             },
             dismissButton = {
                 TextButton(onClick = { viewing = null }) { Text("Close") }
@@ -157,9 +185,11 @@ fun CrashLogsScreen(onBack: () -> Unit) {
             text = { Text("All ${files.size} crash file(s) will be deleted.") },
             confirmButton = {
                 TextButton(onClick = {
-                    CrashLogger.clearAll(context)
-                    files = emptyList()
                     showClearDialog = false
+                    scope.launch {
+                        withContext(Dispatchers.IO) { CrashLogger.clearAll(context) }
+                        reloadToken++
+                    }
                 }) { Text("Clear") }
             },
             dismissButton = {
@@ -171,8 +201,10 @@ fun CrashLogsScreen(onBack: () -> Unit) {
 
 /**
  * Fire an ACTION_SEND chooser so the user can pipe the crash text into
- * mail / Telegram / Files. We attach the body as EXTRA_TEXT (not a
- * `content://` Uri via FileProvider) because:
+ * mail / Telegram / Files. Takes the already-read [body] so there is no I/O —
+ * and therefore no cancellable coroutine — between the tap and the chooser.
+ * We attach the body as EXTRA_TEXT (not a `content://` Uri via FileProvider)
+ * because:
  *  1. We don't ship a FileProvider authority yet — adding one is more
  *     work than the share flow benefits from at this stage.
  *  2. Crash files are small (a few KB) and fit in an intent extra.
@@ -180,11 +212,20 @@ fun CrashLogsScreen(onBack: () -> Unit) {
  *     "send the message you just read to me" is intuitively the
  *     correct mental model.
  */
-private fun shareCrashLog(context: Context, file: File) {
-    val intent = Intent(Intent.ACTION_SEND).apply {
-        type = "text/plain"
-        putExtra(Intent.EXTRA_SUBJECT, "spk-editor crash: ${file.name}")
-        putExtra(Intent.EXTRA_TEXT, CrashLogger.readCrashFile(file))
-    }
-    context.startActivity(Intent.createChooser(intent, "Share crash log"))
+private fun shareCrashLog(context: Context, fileName: String, body: String) {
+    context.startActivity(
+        Intent.createChooser(crashLogShareIntent(fileName, body), "Share crash log"),
+    )
 }
+
+/**
+ * The ACTION_SEND intent for one crash log. A pure function of text the caller
+ * already holds — which is the whole point: there is no I/O, and therefore no
+ * cancellable coroutine, between the Share tap and the chooser.
+ */
+internal fun crashLogShareIntent(fileName: String, body: String): Intent =
+    Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_SUBJECT, "spk-editor crash: $fileName")
+        putExtra(Intent.EXTRA_TEXT, body)
+    }

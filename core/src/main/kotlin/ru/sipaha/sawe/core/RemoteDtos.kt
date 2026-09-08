@@ -14,6 +14,7 @@ import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonEncoder
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -72,6 +73,25 @@ import kotlinx.serialization.json.put
 const val SUPPORTED_WIRE_SCHEMA_VERSION: Int = 6
 
 /**
+ * OLDEST chat-wire schema this client still speaks — the lower bound of the
+ * accepted range, of which [SUPPORTED_WIRE_SCHEMA_VERSION] is the upper.
+ *
+ * Split out from [SUPPORTED_WIRE_SCHEMA_VERSION] so that
+ * backwards-compatible server work never has to reason about an *equality*
+ * gate. Today the two are equal, so the accepted range is the single point
+ * `{6}` and the split changes no behaviour whatsoever. It exists so the
+ * next genuinely breaking bump can raise
+ * [SUPPORTED_WIRE_SCHEMA_VERSION] while leaving this constant behind,
+ * widening the range instead of turning every still-supported desktop into
+ * an "update the editor" terminal screen.
+ *
+ * Additive wire work (new optional request params, new nullable response
+ * fields) is negotiated by feature TOKENS — see [WireFeature] and
+ * [ServerFeatures] — and must NOT move either of these constants.
+ */
+const val MIN_SUPPORTED_WIRE_SCHEMA_VERSION: Int = 6
+
+/**
  * True iff the server advertises a chat-wire schema this client doesn't
  * support yet. The UI surfaces an "update the app" gate on `true` instead
  * of trying to drive sessions off a wire it can't decode.
@@ -91,14 +111,19 @@ fun isServerTooNew(serverWire: Int, supported: Int = SUPPORTED_WIRE_SCHEMA_VERSI
  * editor" gate on `true` rather than silently mis-rendering.
  *
  * A field-absent / pre-versioned server reports `wire_schema_version = 0`
- * ([CapabilitiesDto] sentinel) which is `< supported`, so it is correctly
+ * ([CapabilitiesDto] sentinel) which is `< minSupported`, so it is correctly
  * classified as too-old and gated.
  *
- * The [supported] override is for unit tests so the gate's threshold can be
- * exercised without rebuilding the constant.
+ * The threshold is [MIN_SUPPORTED_WIRE_SCHEMA_VERSION], the bottom of the
+ * accepted range — NOT [SUPPORTED_WIRE_SCHEMA_VERSION]. The two are equal
+ * today, so this is behaviour-identical; the split is what lets a future
+ * upper-bound bump keep serving still-compatible desktops.
+ *
+ * The [minSupported] override is for unit tests so the gate's threshold can
+ * be exercised without rebuilding the constant.
  */
-fun isServerTooOld(serverWire: Int, supported: Int = SUPPORTED_WIRE_SCHEMA_VERSION): Boolean =
-    serverWire < supported
+fun isServerTooOld(serverWire: Int, minSupported: Int = MIN_SUPPORTED_WIRE_SCHEMA_VERSION): Boolean =
+    serverWire < minSupported
 
 /**
  * Result envelope for `remote.editor.capabilities`.
@@ -109,16 +134,294 @@ fun isServerTooOld(serverWire: Int, supported: Int = SUPPORTED_WIRE_SCHEMA_VERSI
  *   - [protocolVersion] for the optional version banner on the splash.
  *   - [wireSchemaVersion] for the breaking-incompatibility gate; see
  *     [isServerTooNew].
+ *   - [wireFeatures] / [serverInstanceId] / [csidDedupeWindowMs] for
+ *     additive, non-breaking wire behaviours that need BOTH peers — see
+ *     [ServerFeatures].
  *
- * **Both fields default to a pre-versioned sentinel** so an older server
+ * **Every field defaults to a pre-versioned sentinel** so an older server
  * that doesn't emit them decodes cleanly: missing `protocol_version`
  * becomes "unknown" (preserving prior behaviour), missing
  * `wire_schema_version` becomes `0` (older-than-supported → not gated).
+ *
+ * This response is the ONLY negotiation channel available before first
+ * use: the server's request-params structs are `deny_unknown_fields`, so a
+ * client cannot probe for a parameter by sending it — an unknown key is a
+ * `-32602`, i.e. a failed call, not a graceful "unsupported". Capability
+ * must therefore be known BEFORE a gated parameter is ever put on the
+ * wire.
  */
 @Serializable
 data class CapabilitiesDto(
     @SerialName("protocol_version") val protocolVersion: String = "unknown",
     @SerialName("wire_schema_version") val wireSchemaVersion: Int = 0,
+    /**
+     * Additive feature tokens this server build advertises — see
+     * [WireFeature] for the exact strings.
+     *
+     * **`null` (key absent) means "this server predates feature
+     * negotiation", NOT "no features".** A server that HAS negotiation but
+     * nothing enabled emits `[]`. Both collapse to the same behaviour
+     * today, but they must stay distinguishable: a future token whose
+     * absent-meaning is not "off" would otherwise be silently mis-read.
+     * Same rule as [EntrySummary.imageCount].
+     *
+     * Unknown tokens are ignored, never rejected — order is not
+     * significant and duplicates are not permitted.
+     */
+    @SerialName("wire_features") val wireFeatures: List<String>? = null,
+    /**
+     * Identity of the editor PROCESS behind this connection — a fresh
+     * UUIDv4 minted once per editor start, stable for that process's whole
+     * life.
+     *
+     * Consumed by the [WireFeature.CSID_DEDUPE] retry policy: the server's
+     * `spk_client_send_id` dedupe table is in-memory, so it died with the
+     * previous process. A client that dispatched an ambiguous send to
+     * instance A must NOT replay it against instance B — the replay would
+     * duplicate the message instead of being absorbed.
+     *
+     * `null` ⇒ old server; treat every send as non-replayable, exactly as
+     * before this field existed.
+     */
+    @SerialName("server_instance_id") val serverInstanceId: String? = null,
+    /**
+     * How long an accepted `spk_client_send_id` stays deduplicated on the
+     * server, in milliseconds. Emitted only when [WireFeature.CSID_DEDUPE]
+     * is advertised.
+     *
+     * `null` ⇒ no dedupe, or an old server — never "zero window", never
+     * "unbounded".
+     */
+    @SerialName("csid_dedupe_window_ms") val csidDedupeWindowMs: Long? = null,
+)
+
+/**
+ * The exact `wire_features` tokens, byte-for-byte as the server emits them
+ * (lowercase snake_case).
+ *
+ * **Never inline these strings at a call site.** Both peers define the same
+ * constants (`crates/editor_mcp/src/tools/capabilities.rs`); a typo on
+ * either side silently disables the feature rather than failing loudly,
+ * because an unrecognised token is ignored by contract.
+ */
+object WireFeature {
+    /**
+     * Append/delta entry bodies: the `known_entries` request parameter on
+     * `get_session_changes`, and the `markdown_prefix_len` /
+     * `markdown_tail` / `markdown_len` response fields on [EntrySummary].
+     */
+    const val ENTRY_BODY_DELTA = "entry_body_delta"
+
+    /**
+     * The `omit_preview_when_markdown` request parameter on
+     * `get_session_changes` / `get_session`: the server drops
+     * [EntrySummary.preview] for non-user entries on which it already sent
+     * a body.
+     */
+    const val OMIT_PREVIEW = "omit_preview"
+
+    /**
+     * Server-side idempotency by `spk_client_send_id`: a replayed send
+     * bundle is absorbed instead of duplicated, and the send result
+     * carries [SendMessageBlocksResult.delivery].
+     */
+    const val CSID_DEDUPE = "csid_dedupe"
+
+    /**
+     * The `suppress_kinds` parameter on `editor.subscribe`: the proxy
+     * drops the named notification kinds for THIS connection only.
+     */
+    const val QUIET_MESSAGE_APPENDED = "quiet_message_appended"
+}
+
+/**
+ * Immutable, per-CONNECTION view of what the peer on the other end of the
+ * live socket supports. Built from one successful
+ * `remote.editor.capabilities` response via [toServerFeatures].
+ *
+ * **Lifetime rule (load-bearing):** these flags belong to the socket, not
+ * to the app or the server address. [RemoteClient] resets them to [NONE] on
+ * every transition out of `Connected`, so a reconnect that lands on a
+ * DOWNGRADED desktop starts from "no features" and re-learns them from that
+ * desktop's own capabilities response. Inheriting the previous socket's
+ * flags would put a gated parameter into a `deny_unknown_fields` params
+ * struct and turn the first poll after the downgrade into a hard error.
+ *
+ * A consequence, and it is the correct one: calls issued between the
+ * `Connected` edge and the capabilities answer see [NONE] and take the
+ * legacy path. That is graceful degradation for one round trip, not a bug —
+ * nothing may block on the gate.
+ */
+data class ServerFeatures(
+    val tokens: Set<String> = emptySet(),
+    val serverInstanceId: String? = null,
+    val csidDedupeWindowMs: Long? = null,
+) {
+    /** True iff the peer advertised [token] on the current connection. */
+    fun has(token: String): Boolean = token in tokens
+
+    companion object {
+        /**
+         * "Nothing negotiated" — an old server, a probe that failed, or a
+         * connection whose capabilities answer has not landed yet. Every
+         * gated parameter is suppressed under this value.
+         */
+        val NONE = ServerFeatures()
+    }
+}
+
+/** Project a capabilities response onto the per-connection feature view. */
+fun CapabilitiesDto.toServerFeatures(): ServerFeatures = ServerFeatures(
+    tokens = wireFeatures?.toSet().orEmpty(),
+    serverInstanceId = serverInstanceId,
+    csidDedupeWindowMs = csidDedupeWindowMs,
+)
+
+/**
+ * Emit `omit_preview_when_markdown: true` into a hand-built params object
+ * iff [features] advertises [WireFeature.OMIT_PREVIEW]; emit nothing
+ * otherwise.
+ *
+ * For the `remote.solution_agent.get_session` call sites, which build their
+ * own params (pagination cursors, `include_full_content`, …) instead of
+ * going through a [RemoteClient] helper. The gate lives here rather than at
+ * the call site so that "did we check the feature?" is not a question a
+ * reader has to answer by tracing the caller: passing a [ServerFeatures]
+ * that does not carry the token simply produces no key.
+ *
+ * `false` is never emitted — the server defaults it to `false`, and
+ * omitting keeps old-server compatibility provable by inspection.
+ */
+fun JsonObjectBuilder.putOmitPreviewWhenMarkdown(features: ServerFeatures) {
+    if (features.has(WireFeature.OMIT_PREVIEW)) {
+        put("omit_preview_when_markdown", true)
+    }
+}
+
+/**
+ * One entry the client already holds, offered to the server so it can reply
+ * with only the bytes that were appended since — the request half of
+ * [WireFeature.ENTRY_BODY_DELTA]. Built by [buildKnownEntries].
+ *
+ * **This shape is UNEXTENDABLE without a new feature token — do not add a
+ * field to it.** The server's mirror struct is `deny_unknown_fields`, so an
+ * extra key here is not politely ignored by an older desktop: serde rejects
+ * the element and fails the whole `get_session_changes` call, i.e. a failed
+ * poll rather than a degraded one. Adding a field is therefore a
+ * compatibility event, not an additive change, and the cost lands on
+ * desktops already in the field. If one is genuinely needed, gate it behind
+ * a new token in [WireFeature] exactly as this struct itself was gated.
+ *
+ * @property index STREAM-LOCAL index, the same space as [EntrySummary.index].
+ * @property markdownLen UTF-8 BYTE length of the body held for [index] —
+ *   `String.toByteArray(Charsets.UTF_8).size`, NEVER `String.length`
+ *   (UTF-16 units). The server compares this against Rust's
+ *   `String::len()`, which is bytes; a UTF-16 count would splice a tail at
+ *   the wrong offset.
+ * @property markdownHash [Digests.bodyDigest] over exactly those
+ *   [markdownLen] bytes — 32 lowercase hex chars. The hash, not the length,
+ *   is what makes the splice safe: a tool-call entry mutates IN PLACE at
+ *   constant length (status flip, `args_preview` rewrite), so a
+ *   length-only match would append a tail to a stale prefix and corrupt the
+ *   transcript with no error anywhere.
+ */
+@Serializable
+data class KnownEntryDto(
+    val index: Int,
+    @SerialName("markdown_len") val markdownLen: Long,
+    @SerialName("markdown_hash") val markdownHash: String,
+)
+
+/**
+ * What the server did with a `send_message_blocks` call, once it dedupes by
+ * `spk_client_send_id` ([WireFeature.CSID_DEDUPE]).
+ *
+ * Wire values are exactly `"accepted"` and `"duplicate"`.
+ */
+@Serializable(with = SendDeliveryDtoSerializer::class)
+enum class SendDeliveryDto {
+    /** This call enqueued the message. */
+    Accepted,
+
+    /**
+     * An identical csid set was already accepted inside the server's dedupe
+     * window, and this call did nothing. The caller must treat it as a
+     * SUCCESS: the first copy is live, its echo will pop the optimistic
+     * bubble by csid, and re-sending or bouncing the text to the draft
+     * would either duplicate the message or lose it.
+     */
+    Duplicate,
+
+    /**
+     * A verdict this client build does not know — a server newer than it.
+     *
+     * Distinct from a `null` [SendMessageBlocksResult.delivery], which means
+     * "this server predates dedupe entirely". Both say "do not rely on
+     * dedupe for this send", but they are different facts and stay
+     * distinguishable, the same way absent and empty do everywhere else on
+     * this wire.
+     *
+     * It exists so a future third verdict DEGRADES instead of throwing.
+     * Without it an unrecognised string aborts the decode of the whole send
+     * result, which the send path would report as a failed send — turning a
+     * message the server actually accepted into an error toast and a
+     * bounced draft. Never treat this as [Accepted] or [Duplicate].
+     */
+    Unknown,
+}
+
+/**
+ * Lenient string codec for [SendDeliveryDto] — unknown verdicts decode to
+ * [SendDeliveryDto.Unknown] rather than throwing, matching
+ * [EntryRoleDtoSerializer] and every other wire enum in this file.
+ */
+internal object SendDeliveryDtoSerializer : KSerializer<SendDeliveryDto> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("SendDeliveryDto", PrimitiveKind.STRING)
+
+    override fun deserialize(decoder: Decoder): SendDeliveryDto =
+        when (decoder.decodeString()) {
+            "accepted" -> SendDeliveryDto.Accepted
+            "duplicate" -> SendDeliveryDto.Duplicate
+            else -> SendDeliveryDto.Unknown
+        }
+
+    override fun serialize(encoder: Encoder, value: SendDeliveryDto) {
+        encoder.encodeString(
+            when (value) {
+                SendDeliveryDto.Accepted -> "accepted"
+                SendDeliveryDto.Duplicate -> "duplicate"
+                SendDeliveryDto.Unknown -> "unknown"
+            },
+        )
+    }
+}
+
+/**
+ * Result envelope for `remote.solution_agent.send_message_blocks`.
+ *
+ * Everything is defaulted: pre-dedupe servers answer with `{}`, which is
+ * still a success (the absence of an error envelope has always been the
+ * success signal on this path).
+ */
+@Serializable
+data class SendMessageBlocksResult(
+    /**
+     * **`null` = this server predates csid dedupe. Never read it as
+     * "accepted".** The distinction is the whole point: `Accepted` is a
+     * server PROMISE that a replay of the same csid set will be absorbed,
+     * and only a server that made that promise may be replayed against.
+     *
+     * [SendDeliveryDto.Unknown] is a third case — a server newer than this
+     * build — and carries the same "do not rely on dedupe" consequence as
+     * `null` without being the same fact.
+     */
+    val delivery: SendDeliveryDto? = null,
+    /**
+     * The csids the server recognised on this call, in source order. Empty
+     * for an unstamped (desktop-originated) send.
+     */
+    @SerialName("client_send_ids") val clientSendIds: List<Long> = emptyList(),
 )
 
 @Serializable
@@ -332,8 +635,23 @@ data class ListSessionsResult(
 data class EntrySummary(
     /** Role tag — structured enum (`user`, `assistant`, `tool_call`, `plan`). */
     val role: EntryRoleDto,
-    /** Truncated markdown rendering of the entry (≤200 chars, ellipsised). */
-    val preview: String,
+    /**
+     * Truncated markdown rendering of the entry (≤200 Unicode scalar
+     * values, ellipsised).
+     *
+     * **Defaults to `""`.** A server honouring `omit_preview_when_markdown`
+     * ([WireFeature.OMIT_PREVIEW]) omits this key for `role != user` entries
+     * on which it already sent a body, because on those the preview is a
+     * duplicated prefix of [markdown] that nothing renders. So every reader
+     * must use `markdown ?: preview` — which has always been the rule, and
+     * is what the detail screen already does.
+     *
+     * User entries always carry it: `reconcileOptimistic` keys csid-less
+     * optimistic bubbles off the server's preview text, and reconstructing
+     * that key from [markdown] would mean reimplementing the server's
+     * scalar-value-counting truncation against Kotlin's UTF-16 `length`.
+     */
+    val preview: String = "",
     /**
      * Absolute index of this entry inside the session's transcript
      * (post-R-6e). The server populates it on every page so paginated
@@ -353,12 +671,90 @@ data class EntrySummary(
      */
     val markdown: String? = null,
     /**
+     * Total UTF-8 BYTE length of this entry's full body — the length of the
+     * body the server holds, in BOTH the whole ([markdown]) and the delta
+     * ([markdownTail]) forms. Used to verify a splice: after rehydration the
+     * merged body must measure exactly this many bytes.
+     *
+     * **`null` means "old server, or no body was built for this entry" —
+     * never "length zero".**
+     */
+    @SerialName("markdown_len") val markdownLen: Long? = null,
+    /**
+     * Present iff the server verified the [KnownEntryDto] digest this client
+     * offered for [index] and is therefore sending only the tail. Its value
+     * is this client's own `markdown_len`, echoed back.
+     *
+     * When it is present, [markdown] is ABSENT and [markdownTail] is
+     * present — the three states are exhaustive and mutually exclusive:
+     *
+     * | [markdown] | [markdownPrefixLen] | [markdownTail] | meaning |
+     * |---|---|---|---|
+     * | present | null | null | whole body |
+     * | null | present | present | delta body |
+     * | null | null | null | no body built |
+     *
+     * Anything else is a protocol violation and makes
+     * [rehydrateEntryBodies] return [BodyRehydration.Broken].
+     *
+     * **Transient.** [rehydrateEntryBodies] splices the body and clears this
+     * field, so it is always `null` by the time an entry is published or
+     * written to the disk cache.
+     */
+    @SerialName("markdown_prefix_len") val markdownPrefixLen: Long? = null,
+    /**
+     * The bytes to append after this client's first [markdownPrefixLen]
+     * bytes. Present iff [markdownPrefixLen] is.
+     *
+     * `""` is legal and is NOT "empty body" or "absent" — it just means the
+     * offered prefix already reached the end of the server's body.
+     *
+     * **Emptiness is not the "unchanged" signal, so never branch on it.**
+     * [buildKnownEntries] offers the held body minus its trailing
+     * whitespace run, so an unchanged entry comes back with that whitespace
+     * as its tail (`"\n\n"` for the usual rendering), not with `""`. A
+     * caller offering the exact current body would see `""` instead — both
+     * are ordinary tails and both splice the same way. The honest test for
+     * "did this entry actually change" is `markdownLen` against the held
+     * length, never `markdownTail.isEmpty()`.
+     *
+     * **Transient**, exactly like [markdownPrefixLen].
+     */
+    @SerialName("markdown_tail") val markdownTail: String? = null,
+    /**
      * Inline images referenced from [markdown] via `spk-image://N` URLs.
      * Present only when the request set `include_images=true` and the
      * entry actually carries image blocks. Index of each [EntryImage]
      * matches the `N` in the URL.
      */
     val images: List<EntryImage>? = null,
+    /**
+     * How many images this entry has that the server can inline, i.e. what
+     * a `get_session_entry(include_images = true)` for this entry would
+     * return. Independent of whether [images] is populated on THIS
+     * response.
+     *
+     * Exists so the lazy per-entry image backfill can skip entries that
+     * have nothing to fetch. Without it the client cannot tell a text-only
+     * user entry from one whose images were merely omitted, so it has to
+     * probe every user entry on every session open — one wasted round trip
+     * each, on the path that N-30 exists to make cheap.
+     *
+     * **`null` means "unknown", NOT "none".** A server that predates the
+     * field omits it, and treating that as zero would silently switch the
+     * backfill off against every such desktop. Only `0` licenses skipping
+     * the probe; `null` must behave exactly as before this field existed.
+     *
+     * Counts only *extractable* images — the raw image blocks of a user
+     * message. Assistant and tool-call content is flattened to
+     * `spk-image://N` markdown server-side with the blocks discarded, so
+     * those entries report 0 and are correctly never probed.
+     *
+     * Survives the disk cache, which is the point: `stripImages` drops the
+     * blobs but keeps the count, so a cache hit still knows an entry has
+     * images worth fetching.
+     */
+    @SerialName("image_count") val imageCount: Int? = null,
     /** Tool-call detail — present only on entries with `role=tool_call`. */
     @SerialName("tool_call") val toolCall: ToolCallSummary? = null,
     /** Plan detail — present only on entries with `role=plan`. */

@@ -11,7 +11,8 @@ import kotlinx.serialization.json.put
  *
  * Right now only [InMemoryQueueStore] lives in `:core`; the `:app`-only
  * `EncryptedQueueStore` is exercised manually since Android-only types
- * (Context, MasterKey) can't be unit-tested here without Robolectric.
+ * (Context, the Android Keystore) can't be unit-tested here without
+ * Robolectric.
  * The contract test enforces the cross-implementation invariants that
  * `RemoteClient.rehydrateQueue` / `flushQueue` depend on:
  *

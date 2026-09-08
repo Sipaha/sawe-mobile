@@ -33,16 +33,12 @@
 # future per-app overrides if a release stack trace lands on a stripped
 # OkHttp internal.
 
-# AndroidX security-crypto pulls in Tink, which carries compile-only
-# references to com.google.errorprone.annotations.*. These are NOT
-# present at runtime (they're build-time `@CheckReturnValue` / `@Immutable`
-# markers), so R8 just needs to be told to ignore the missing references.
-# The androidx.security:security-crypto:1.1.0-alpha06 consumer rules
-# don't ship these `-dontwarn`s, hence we add them here.
--dontwarn com.google.errorprone.annotations.CanIgnoreReturnValue
--dontwarn com.google.errorprone.annotations.CheckReturnValue
--dontwarn com.google.errorprone.annotations.Immutable
--dontwarn com.google.errorprone.annotations.RestrictedApi
+# Tink is a DIRECT dependency now (com.google.crypto.tink:tink-android),
+# behind `data/TinkEncryptedPrefs.kt`. No keep rules are needed for it: the
+# tink-android jar ships its own `META-INF/proguard/protobuf.pro`, which AGP
+# picks up automatically and which is what stops R8 renaming the fields the
+# shaded protobuf-lite reflects over. Verified against the R8 configuration
+# dump in `app/build/outputs/mapping/release/configuration.txt`.
 
 # Preventive keep rules for security-sensitive `:core` classes. Neither
 # is currently referenced reflectively, but both sit on the trust path

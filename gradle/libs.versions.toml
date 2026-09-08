@@ -12,11 +12,17 @@ lifecycle = "2.9.0"
 navigation-compose = "2.9.8"
 core-ktx = "1.16.0"
 appcompat = "1.7.1"
-security-crypto = "1.1.0-alpha07"
+tink = "1.23.0"
 zxing = "4.3.0"
 markdown-renderer = "0.39.0"
 robolectric = "4.16"
 roborazzi = "1.43.1"
+# Instrumentation (androidTest) only. 1.6.x of `runner` is the pair that
+# `androidx.test.ext:junit` 1.2.1 is published against; `core` comes along
+# transitively but is declared because the tests import ApplicationProvider.
+androidx-test-runner = "1.6.2"
+androidx-test-core = "1.6.1"
+androidx-test-ext-junit = "1.2.1"
 
 [libraries]
 okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
@@ -43,7 +49,7 @@ lifecycle-runtime-ktx = { module = "androidx.lifecycle:lifecycle-runtime-ktx", v
 navigation-compose = { module = "androidx.navigation:navigation-compose", version.ref = "navigation-compose" }
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "core-ktx" }
 androidx-appcompat = { module = "androidx.appcompat:appcompat", version.ref = "appcompat" }
-androidx-security-crypto = { module = "androidx.security:security-crypto", version.ref = "security-crypto" }
+tink-android = { module = "com.google.crypto.tink:tink-android", version.ref = "tink" }
 zxing-android-embedded = { module = "com.journeyapps:zxing-android-embedded", version.ref = "zxing" }
 markdown-renderer = { module = "com.mikepenz:multiplatform-markdown-renderer-m3", version.ref = "markdown-renderer" }
 robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectric" }
@@ -52,6 +58,9 @@ compose-ui-test-manifest = { module = "androidx.compose.ui:ui-test-manifest" }
 roborazzi-compose = { module = "io.github.takahirom.roborazzi:roborazzi-compose", version.ref = "roborazzi" }
 roborazzi-junit-rule = { module = "io.github.takahirom.roborazzi:roborazzi-junit-rule", version.ref = "roborazzi" }
 roborazzi-core = { module = "io.github.takahirom.roborazzi:roborazzi-core", version.ref = "roborazzi" }
+androidx-test-runner = { module = "androidx.test:runner", version.ref = "androidx-test-runner" }
+androidx-test-core = { module = "androidx.test:core", version.ref = "androidx-test-core" }
+androidx-test-ext-junit = { module = "androidx.test.ext:junit", version.ref = "androidx-test-ext-junit" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

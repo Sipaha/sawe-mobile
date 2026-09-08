@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import androidx.core.content.edit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -22,9 +24,16 @@ import kotlinx.serialization.json.Json
  * leave the device a second time. Entries whose `localKey` is no longer
  * known to UploadManager are dropped (purged / cancelled in a prior run).
  *
- * Storage is plain [SharedPreferences] — attachment metadata isn't a
- * secret (the user picked the file themselves), and encrypted prefs cost
- * startup time that doesn't earn anything here.
+ * **Storage:** encrypted, via [EncryptedPrefs.open]. The earlier rationale
+ * ("attachment metadata isn't a secret — the user picked the file
+ * themselves") confused *who chose it* with *what it reveals*: an
+ * [AttachmentRef] is a file name and a MIME type, and a list of the file
+ * names someone was about to send is content about them. It also pairs with
+ * [DraftRepository] — encrypting the covering message while leaving the
+ * names of its attachments in clear next to it would be a threat model with
+ * a hole in the middle. Writes are per compose-bar attachment change (pick,
+ * remove, send), never in a tight loop, so the per-entry AES cost is not on
+ * any hot path; the keyset unwrap is paid once by `warmUpEncryptedPrefs`.
  */
 class AttachmentDraftRepository(
     private val context: Context,
@@ -40,10 +49,18 @@ class AttachmentDraftRepository(
         encodeDefaults = true
     }
 
-    private fun openPrefs(): SharedPreferences? = runCatching {
-        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    }.onFailure { Log.w(TAG, "openPrefs() failed; attachment drafts won't persist", it) }
-        .getOrNull()
+    /** `null` degrades to a no-op disk layer — see [DraftRepository.openPrefs]. */
+    private fun openPrefs(): SharedPreferences? =
+        EncryptedPrefs.open(context, PREFS_NAME, LegacyPrefsFormat.PLAIN)
+
+    /**
+     * Resolve the encrypted prefs file (and the one-off import of the old
+     * plain file) on [Dispatchers.IO], so no caller pays the Keystore
+     * round-trip on Main. Idempotent.
+     */
+    suspend fun warmUp() {
+        withContext(Dispatchers.IO) { prefs }
+    }
 
     fun save(sessionId: String, refs: List<AttachmentRef>) {
         val p = prefs ?: return
@@ -97,19 +114,13 @@ class AttachmentDraftRepository(
 
     companion object {
         private const val TAG = "AttachmentDraftRepository"
-        private const val PREFS_NAME = "spk_attachment_drafts"
+        internal const val PREFS_NAME = "spk_attachment_drafts"
 
-        @Volatile
-        private var instance: AttachmentDraftRepository? = null
+        private val holder = SingletonHolder(::AttachmentDraftRepository)
 
+        /** Process-wide instance; provider rebound per call ([SingletonHolder]). */
         fun get(context: Context, activeServerProvider: () -> String?): AttachmentDraftRepository =
-            synchronized(this) {
-                val existing = instance
-                val store = existing
-                    ?: AttachmentDraftRepository(context.applicationContext).also { instance = it }
-                store.activeServerProvider = activeServerProvider
-                store
-            }
+            holder.get(context) { it.activeServerProvider = activeServerProvider }
     }
 }
 

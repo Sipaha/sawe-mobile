@@ -12,11 +12,11 @@ import kotlinx.serialization.Serializable
  * if the user re-pairs the SAME server with a fresh QR code, we
  * regenerate the id only if the entry was first removed and re-added
  * (because by then the per-server scoped repositories — drafts,
- * queue, lastSeen, nav — have been wiped on remove).
+ * queue, nav — have been wiped on remove).
  *
  * **Persistence:** the whole list is JSON-encoded into a single
  * `paired_servers_v2` key inside [PairingRepository]'s
- * `EncryptedSharedPreferences` file. We rewrite the whole blob on
+ * [TinkEncryptedPrefs] file. We rewrite the whole blob on
  * every mutation; typical list size is 1-3 entries, so the
  * partial-update bookkeeping isn't worth the complexity.
  *

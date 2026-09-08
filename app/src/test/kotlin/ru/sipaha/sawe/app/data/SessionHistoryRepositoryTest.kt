@@ -18,10 +18,10 @@ import ru.sipaha.sawe.app.data.CachedSessionHistory.Companion.CACHE_SCHEMA_VERSI
  * gate bug that pure in-memory `schemaVersion = 1` objects miss (a `1` set explicitly never
  * survives a serialize→deserialize round trip under `encodeDefaults = false`).
  *
- * Note on EncryptedSharedPreferences: the full disk round-trip through
+ * Note on the encrypted prefs layer: the full disk round-trip through
  * [SessionHistoryRepository.load] / [SessionHistoryRepository.save] requires a real Android
- * Keystore (MasterKey → EncryptedSharedPreferences), which Robolectric's shadow does not
- * emulate. The serialization-level tests below prove the gate behaviour against the SAME bytes
+ * Keystore (the Tink keyset behind [TinkEncryptedPrefs] is wrapped by it), which
+ * Robolectric's shadow does not emulate. The serialization-level tests below prove the gate behaviour against the SAME bytes
  * that would land on disk; the encrypted-prefs file I/O + key eviction side-effect still needs
  * a manual / instrumented verify.
  */

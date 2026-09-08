@@ -1,7 +1,9 @@
 package ru.sipaha.sawe.app.vm
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -22,6 +24,8 @@ import ru.sipaha.sawe.core.MemberAddCompletedPayload
 import ru.sipaha.sawe.core.MemberAddProgressPayload
 import ru.sipaha.sawe.core.MessageAppendedPayload
 import ru.sipaha.sawe.core.RemoteClient
+import ru.sipaha.sawe.core.ServerFeatures
+import ru.sipaha.sawe.core.WireFeature
 import ru.sipaha.sawe.core.AgentSessionContextResetPayload
 import ru.sipaha.sawe.core.SessionActiveSubagentsChangedPayload
 import ru.sipaha.sawe.core.SessionCreatedPayload
@@ -58,16 +62,48 @@ import ru.sipaha.sawe.core.WorkspaceSolutionOpenedPayload
  *     when either [startObservingSessions] or [SessionDetailStore.openSession]
  *     needs it, torn down in [reset] on server switch.
  *  2. **`refreshSessionsJob` is single-flight** — see [singleFlightRefresh]
- *     for the semantics. A new refresh cancels the previous in-flight one.
+ *     for the semantics. A user-initiated refresh cancels the previous
+ *     in-flight one; a NOTIFICATION-driven one goes through
+ *     [refreshSessionsDebounced], which coalesces the burst and waits for an
+ *     in-flight refresh rather than cancelling a query the server has already
+ *     executed.
  *  3. **The create-session in-flight flag is server-scoped** — it MUST
  *     be cleared in [reset] otherwise a server switch mid-create leaves
  *     the "Create" button permanently disabled on the new server.
  */
+/**
+ * The kind this client would rather the proxy stopped forwarding.
+ *
+ * `agent_session_message_appended` and `agent_session_dirty` are emitted for
+ * the same server-side event, and the mobile handler for the former
+ * (`SessionDetailStore.onMessageAppended`) does byte-for-byte what
+ * `onSessionDirty` does: schedule a delta poll. Nothing reads the payload.
+ * `dirty` is additionally coalesced per session inside the proxy, so
+ * dropping the append twin loses no signal and removes one uncoalesced frame
+ * per appended message.
+ *
+ * The kind stays SUBSCRIBED (it is still in [SUBSCRIPTION_KINDS]); only
+ * forwarding is suppressed, so a server that ignores the request — or the
+ * window before the capabilities probe answers — simply delivers both, as
+ * it always did.
+ */
+private val SUPPRESSIBLE_KINDS: List<String> = listOf("agent_session_message_appended")
+
+/**
+ * What to ask the proxy to stop forwarding on a connection that advertised
+ * [features] — empty unless [WireFeature.QUIET_MESSAGE_APPENDED] is on.
+ *
+ * `RemoteClient.subscribe` drops the parameter on its own when the token is
+ * absent; deciding it here as well keeps the intent visible at the call
+ * site and makes the rule testable without a socket.
+ */
+internal fun suppressKindsFor(features: ServerFeatures): List<String> =
+    if (features.has(WireFeature.QUIET_MESSAGE_APPENDED)) SUPPRESSIBLE_KINDS else emptyList()
+
 internal class SessionListStore(
     private val scope: CoroutineScope,
     private val context: ConnectionContext,
     private val listCacheRepository: ListCacheRepository,
-    private val lastSeen: LastSeenIndex,
     private val sessionHistoryRepository: SessionHistoryRepository,
 ) {
     private val _sessions = MutableStateFlow<UiData<List<SessionSummary>>>(UiData.Loading)
@@ -102,6 +138,16 @@ internal class SessionListStore(
      * router above to avoid double subscriptions.
      */
     internal var uploadNotificationRouter: ((UploadChunkAckedPayload) -> Unit)? = null
+
+    /**
+     * Chunk-REJECTION routing — the negative counterpart of
+     * [uploadNotificationRouter], wired by the coordinator to
+     * [UploadManager]. The server emits `upload_chunk_rejected` when it
+     * refuses a chunk and, unless the upload id is unknown, names the offset
+     * the next chunk must carry; forwarding it lets the upload re-seek
+     * immediately instead of sitting out its 30 s ack timeout first.
+     */
+    internal var uploadRejectionRouter: ((UploadChunkRejectedPayload) -> Unit)? = null
 
     /**
      * Solution member-add / change notification routing — wired by the
@@ -140,6 +186,16 @@ internal class SessionListStore(
 
     private var refreshSessionsJob: Job? = null
 
+    /**
+     * Trailing-edge debounce timer for notification-driven list refreshes.
+     * A busy solution fans `agent_session_state_changed` out per session on
+     * every agent transition (and the supervisor adds more), so the raw
+     * signal is dozens of `list_sessions` a minute — each one a full
+     * round-trip on a serial connection, interleaved with the open chat's
+     * transcript polls. User-initiated refreshes never go through this.
+     */
+    private var refreshDebounceJob: Job? = null
+
     /** Tear-down hook called from coordinator on server switch / disconnect. */
     fun reset() {
         notificationsObserverJob?.cancel()
@@ -147,6 +203,8 @@ internal class SessionListStore(
         observingSolutionId = null
         refreshSessionsJob?.cancel()
         refreshSessionsJob = null
+        refreshDebounceJob?.cancel()
+        refreshDebounceJob = null
         _sessions.value = UiData.Loading
         _agents.value = UiData.Loading
         _sessionChildren.value = emptyMap()
@@ -202,6 +260,41 @@ internal class SessionListStore(
         )
     }
 
+    /**
+     * Notification-driven variant of [refreshSessions].
+     *
+     * Two differences from the direct call, both aimed at the "reading one
+     * chat on LTE costs dozens of `list_sessions` a minute" path:
+     *  - a trailing-edge [SESSIONS_REFRESH_DEBOUNCE_MS] window collapses the
+     *    burst of per-session `state_changed` events one agent transition
+     *    fans out into a single request;
+     *  - it WAITS for an in-flight refresh instead of cancelling it. The
+     *    cancel was client-local — the server still executed the query and
+     *    still wrote the response ahead of the replacement in its serial
+     *    loop, so cancelling bought nothing and threw away a result that had
+     *    already been paid for.
+     */
+    private fun refreshSessionsDebounced(solutionId: Long) {
+        refreshDebounceJob?.cancel()
+        refreshDebounceJob = scope.launch {
+            delay(SESSIONS_REFRESH_DEBOUNCE_MS)
+            refreshSessionsJob?.join()
+            refreshSessions(solutionId)
+        }
+    }
+
+    /**
+     * True when [notifSessionId] is worth a list refresh: either it names a
+     * session the held list already shows (its row needs updating) or the
+     * notification didn't carry an id at all, in which case we can't tell and
+     * refresh to be safe. Also true while the list hasn't loaded yet.
+     */
+    private fun concernsLoadedSession(notifSessionId: String?): Boolean =
+        shouldRefreshForSessionEvent(
+            notifSessionId = notifSessionId,
+            loadedSessionIds = (_sessions.value as? UiData.Loaded)?.value?.map { it.id },
+        )
+
     fun startObservingSessions(solutionId: Long) {
         if (context.activeClient() == null) return
         observingSolutionId = solutionId
@@ -244,9 +337,44 @@ internal class SessionListStore(
         // Synchronously dispatch the subscribe first. Result is best-effort:
         // a transient failure here means the collector still launches and
         // the next reconnect cycle will retry — better than leaving the
-        // wire un-observed.
-        runCatching { active.subscribe(SUBSCRIPTION_KINDS) }
+        // wire un-observed. A CANCELLATION is not such a failure: it means
+        // the caller is being torn down, and swallowing it would launch a
+        // collector on a scope that is already dying.
+        //
+        // This runs on the Connected edge, BEFORE the capabilities probe has
+        // answered, so `serverFeatures` is still empty and the suppression
+        // list resolves to nothing. That is deliberate — replaying the
+        // subscription set is what keeps pokes from being lost, and it must
+        // not wait on a negotiation round trip. [applyNegotiatedFeatures]
+        // re-issues the subscribe once the answer lands.
+        runCatching { active.subscribe(SUBSCRIPTION_KINDS, suppressKindsFor(active.serverFeatures.value)) }
+            .onFailure { if (it is CancellationException) throw it }
         notificationsObserverJob = scope.launch { runNotificationsCollector(active) }
+    }
+
+    /**
+     * Re-send the subscription set now that the capabilities probe has
+     * answered ([ConnectionLifecycle.onFeaturesNegotiated]).
+     *
+     * `suppress_kinds` is a per-connection instruction to the proxy and can
+     * only be sent once the peer has advertised
+     * [WireFeature.QUIET_MESSAGE_APPENDED]; the reconnect replay above runs
+     * before negotiation by design, so without this second call the
+     * suppression would never take effect on any connection. `subscribe` is
+     * idempotent server-side and the kinds list is unchanged, so the re-send
+     * costs one small frame and changes nothing when the token is absent.
+     *
+     * Deliberately does NOT restart the collector: it is already running on
+     * the same client and the notification flow is process-local.
+     */
+    fun applyNegotiatedFeatures() {
+        val active = context.activeClient() ?: return
+        val suppress = suppressKindsFor(active.serverFeatures.value)
+        if (suppress.isEmpty()) return
+        scope.launch {
+            runCatching { active.subscribe(SUBSCRIPTION_KINDS, suppress) }
+                .onFailure { if (it is CancellationException) throw it }
+        }
     }
 
     /**
@@ -264,7 +392,8 @@ internal class SessionListStore(
             // workspace.* / agent_session_* deltas never make it back to us.
             // (subscribe is documented idempotent server-side, so a duplicate
             // when the observer restarts for any other reason is harmless.)
-            runCatching { active.subscribe(SUBSCRIPTION_KINDS) }
+            runCatching { active.subscribe(SUBSCRIPTION_KINDS, suppressKindsFor(active.serverFeatures.value)) }
+                .onFailure { if (it is CancellationException) throw it }
             runNotificationsCollector(active)
         }
     }
@@ -296,6 +425,14 @@ internal class SessionListStore(
 
     private companion object {
         /**
+         * Trailing-edge quiet window for notification-driven list refreshes.
+         * Long enough to swallow the per-session fan-out of one agent
+         * transition, short enough that a session appearing / changing state
+         * still shows up while the user is looking at the list.
+         */
+        private const val SESSIONS_REFRESH_DEBOUNCE_MS: Long = 1_500L
+
+        /**
          * Notification kinds re-subscribed on every reconnect (server-side
          * subscription set is per-WS-connection, so we must replay
          * everything we want to hear after each new socket).
@@ -305,11 +442,17 @@ internal class SessionListStore(
             "agent_session_created",
             "agent_session_closed",
             "agent_session_title_changed",
+            // Kept subscribed unconditionally, but asked to be suppressed on
+            // the forwarding side when the peer supports it — see
+            // [SUPPRESSIBLE_KINDS]. Never remove it from this list: the
+            // suppression is a per-connection courtesy the server may ignore,
+            // and against one that does ignore it this is still the only
+            // append signal an older desktop sends.
             "agent_session_message_appended",
             "agent_session_queue_changed",
-            // Content-free "transcript advanced — re-poll" signal carrying
-            // `current_seq`. The detail store polls get_session_changes to
-            // CONVERGENCE (cursor >= current_seq) on it, so a single delivered
+            // Content-free "transcript advanced — re-poll" signal. The detail
+            // store polls get_session_changes from its cursor until the server
+            // reports the selected stream caught up, so a single delivered
             // dirty heals a view left short by lost per-entry append pokes (the
             // "interrupted reply stays interrupted" bug).
             "agent_session_dirty",
@@ -330,6 +473,13 @@ internal class SessionListStore(
             // this UploadManager would need its own subscribe +
             // collector duplicating the lifecycle handling.
             "upload_chunk_acked",
+            // Negative counterpart of the ack: the server refused a chunk
+            // (out of order, overrun, or an upload id it no longer knows)
+            // and names the offset the next chunk must carry. Without it the
+            // client only learns something is wrong when its 30 s ack timeout
+            // fires, and then has to guess where to resume. Additive on the
+            // wire — an older server simply never sends it.
+            "upload_chunk_rejected",
             // Solution member-add progress + completion + generic
             // solution change — drive the project-registry ghost rows
             // and the member-list refresh. Routed to CatalogStore via
@@ -366,6 +516,12 @@ internal class SessionListStore(
                     )
                 }.getOrNull()
             } ?: return
+            router(payload)
+            return
+        }
+        if (kind == "upload_chunk_rejected") {
+            val router = uploadRejectionRouter ?: return
+            val payload = data?.decodeOrNull(UploadChunkRejectedPayload.serializer()) ?: return
             router(payload)
             return
         }
@@ -481,10 +637,22 @@ internal class SessionListStore(
             ?.solutionId
         val solutionId = observingSolutionId ?: cachedSolutionId
         when (kind) {
-            "agent_session_state_changed",
+            // A session appearing or disappearing cannot be resolved from the
+            // held list — always re-fetch.
             "agent_session_created",
-            "agent_session_closed",
-            "agent_session_title_changed" -> if (solutionId != null) refreshSessions(solutionId)
+            "agent_session_closed" -> if (solutionId != null) refreshSessionsDebounced(solutionId)
+            // A state / title change for a session we are not showing tells us
+            // nothing: the desktop fans these out for EVERY session of an
+            // agent (a model-list probe alone touches all of them), and each
+            // one used to cost a full `list_sessions` round-trip on the same
+            // serial connection the open chat is polling.
+            "agent_session_state_changed",
+            "agent_session_title_changed" -> {
+                val notifSessionId = data?.get("session_id")?.jsonPrimitive?.content
+                if (solutionId != null && concernsLoadedSession(notifSessionId)) {
+                    refreshSessionsDebounced(solutionId)
+                }
+            }
         }
 
         // Detail handler — fan out to the detail store. The router
@@ -534,7 +702,7 @@ internal class SessionListStore(
                         )
                     }.getOrNull()
                 } ?: return
-                router.onSessionDirty(payload.sessionId, payload.currentSeq)
+                router.onSessionDirty(payload.sessionId)
             }
             "agent_session_queue_changed" -> {
                 val payload = data?.let {
@@ -774,6 +942,27 @@ internal class SessionListStore(
 }
 
 /**
+ * Whether a per-session `state_changed` / `title_changed` notification is worth
+ * a `list_sessions` refresh.
+ *
+ * The desktop fans these out for EVERY session of an agent (a model-list probe
+ * alone touches all of them, and the supervisor adds more), and each one used
+ * to cost a full round-trip on the same serial connection the open chat polls.
+ * A change to a session the held list doesn't show cannot alter a single row.
+ *
+ * Refreshes when the list hasn't loaded yet ([loadedSessionIds] is null) or the
+ * notification carried no id — neither is evidence that the event is
+ * irrelevant, and a missed refresh is worse than a spare one.
+ */
+internal fun shouldRefreshForSessionEvent(
+    notifSessionId: String?,
+    loadedSessionIds: List<String>?,
+): Boolean {
+    if (notifSessionId == null || loadedSessionIds == null) return true
+    return notifSessionId in loadedSessionIds
+}
+
+/**
  * Callback surface that [SessionListStore] uses to forward detail-shaped
  * notifications to [SessionDetailStore]. Each method is invoked from
  * the single consolidated collector coroutine inside the list store —
@@ -790,17 +979,31 @@ internal interface DetailNotificationRouter {
     /** Fallback when the message-appended notification couldn't be decoded — full refetch. */
     fun onMessageAppendedFallback()
 
-    /** A session-state or title-change notification. [notifSessionId] is null when the payload didn't carry one. */
+    /**
+     * A session-state or title-change notification. [notifSessionId] is null
+     * when the payload didn't carry one.
+     *
+     * Known wire gap: `GetSessionChangesResult` carries no `title`, so the
+     * delta poll this triggers can never bring a renamed session's new title
+     * to the detail screen — that only refreshes on a full `get_session`. The
+     * poll is still worth firing (a title change rides the same `change_seq`
+     * bump as anything else that may have happened), but do not read it as
+     * "the title will be up to date afterwards".
+     */
     fun onSessionStateOrTitleChanged(notifSessionId: String?)
 
     /**
-     * Content-free "transcript advanced — re-poll" signal. [currentSeq] is the
-     * session's `change_seq` at emit time. The detail store polls
-     * `get_session_changes` to CONVERGENCE (held cursor >= [currentSeq]) with
-     * bounded retry, so a single delivered dirty heals a view stranded by lost
+     * Content-free "transcript advanced — re-poll" signal. The detail store
+     * polls `get_session_changes` from its held cursor until the server
+     * reports the selected stream caught up (`has_more == false`), retrying
+     * failed polls, so a single delivered dirty heals a view stranded by lost
      * per-entry append pokes.
+     *
+     * The payload's `current_seq` is deliberately NOT forwarded: it is the
+     * session-GLOBAL `change_seq`, and the detail cursor is per-stream, so it
+     * is not a target a caught-up client can generally reach.
      */
-    fun onSessionDirty(sessionId: String, currentSeq: Long)
+    fun onSessionDirty(sessionId: String)
 
     /**
      * The server-side `pending_messages` queue mutated. Carries every

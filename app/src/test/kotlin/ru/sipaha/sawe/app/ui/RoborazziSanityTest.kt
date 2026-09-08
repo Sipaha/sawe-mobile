@@ -19,9 +19,15 @@ import org.robolectric.annotation.GraphicsMode
  * tests will not work — fix here first.
  *
  * NOTE: The Roborazzi Gradle plugin is NOT applied (incompatible with AGP 9),
- * so we call [captureRoboImage] directly with an explicit
- * [RoborazziOptions] specifying [RoborazziTaskType.Record]. The captured PNG
- * is written relative to the module root (app/).
+ * so we call [captureRoboImage] directly with an explicit [RoborazziOptions].
+ * The captured PNG is written relative to the module root (app/).
+ *
+ * This is the ONE call site that deliberately stays in
+ * [RoborazziTaskType.Record]: it proves the rig can render and write a PNG,
+ * it is not guarding a golden, and its output is intentionally rewritten on
+ * every run. Every other capture site compares against a committed golden and
+ * therefore uses [RoborazziTaskType.Verify], which fails the test on a
+ * mismatch (plain `Compare` never throws).
  */
 @OptIn(ExperimentalRoborazziApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -34,6 +40,7 @@ class RoborazziSanityTest {
         captureRoboImage(
             filePath = "src/test/snapshots/roborazzi/RoborazziSanityTest_rig_renders_a_text_and_writes_png.png",
             roborazziOptions = RoborazziOptions(
+                // RECORDING on purpose — see the class KDoc. Not a golden.
                 taskType = RoborazziTaskType.Record,
             ),
         ) {

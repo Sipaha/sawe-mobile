@@ -3,21 +3,32 @@ package ru.sipaha.sawe.app.data
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Persists per-session compose-bar drafts across process death (R-6d).
  *
  * **Two channels, one prefs file:**
- *   - `draft:<serverId>:<sessionId>` — the live typing buffer. Saved on
- *     every keystroke (debounced 500 ms by the caller), cleared after a
- *     successful send.
+ *   - `draft:<serverId>:<sessionId>` — the live typing buffer. Written on
+ *     the trailing edge of a 500 ms debounce owned by the caller (NOT once
+ *     per keystroke), plus one synchronous flush when the compose bar
+ *     leaves composition; cleared after a successful send.
  *   - `bounced:<serverId>:<sessionId>` — the read-once recovery slot for
  *     TTL-expired or terminally-failed messages. Written by
  *     [ru.sipaha.sawe.app.vm.MainViewModel.handleExpiredMessage] when
- *     [ru.sipaha.sawe.core.RemoteClient.onMessageExpired] fires. Read
- *     once via [bouncedFor] when the user next opens the session, which
- *     also clears the slot — so the bounce surfaces exactly once per
- *     expiry event.
+ *     [ru.sipaha.sawe.core.RemoteClient.onMessageExpired] fires, and by
+ *     the user-initiated cancel of a message parked in the offline queue.
+ *     Read once via [bouncedFor], which also clears the slot — so the
+ *     bounce surfaces exactly once per expiry event.
+ *
+ *     This slot is the *durable* route, taken when the session is not on
+ *     screen at the moment the bounce happens. A bounce for the currently
+ *     open session is additionally pushed live through
+ *     [ru.sipaha.sawe.app.vm.SessionDetailStore.bouncedDrafts] so the
+ *     compose bar recovers the text without waiting for a reopen; that
+ *     path retires this slot via `consumeBounce` only after the text has
+ *     been merged into the draft.
  *
  * **R-6c-multi per-server scoping:** every key now embeds the active
  * server id (provided via [activeServerProvider]). Same session id on
@@ -26,12 +37,30 @@ import android.util.Log
  * [MainViewModel] is reflected immediately in subsequent
  * [save] / [load] / [bouncedFor].
  *
- * **Storage:** plain [SharedPreferences] (not encrypted). Drafts aren't
- * secrets in the threat model — the server has the same text the moment
- * Send is tapped, and the encryption overhead would just bloat startup
- * time. The encrypted-prefs flow is reserved for the pairing URL (which
- * embeds the HMAC secret) and the queued-messages blob (which carries
- * authoritative session ids).
+ * **Storage:** encrypted, via [EncryptedPrefs.open].
+ *
+ * It used to be a plain file, justified as "drafts aren't secrets — the
+ * server has the same text the moment Send is tapped". That is false for
+ * both channels this file holds. A draft is text that has reached NO server
+ * — it is unsent by definition, and the half-written message someone
+ * abandoned is exactly the kind of thing they would not expect to find
+ * lying in clear on the filesystem. The `bounced:` slot is stronger still:
+ * it holds a message that was *attempted* and did not go out. Nor is
+ * "server-derived" the line this app draws — `spk_history_cache` is
+ * server-derived transcript text and it is encrypted too. The line is
+ * whether the store holds content.
+ *
+ * The write cost is one AES-GCM value encrypt plus one AES-SIV key encrypt
+ * per entry, which the write pattern can afford: [save] is driven by a
+ * 500 ms trailing-edge debounce in the compose bar, not by the keystroke
+ * (`SessionDetailScreen`'s `snapshotFlow { draft }.debounce(500)`), and the
+ * only unbatched writer is the one-per-back-press `flushDraft`. The keyset
+ * unwrap — the part that actually costs milliseconds — is paid once at
+ * ViewModel construction by `warmUpEncryptedPrefs`, off Main.
+ *
+ * A lost Keystore keyset now costs this file's contents; that is reported
+ * on [PersistenceHealth.droppedStores] and surfaced to the user by
+ * `persistenceDropNotice`, which a plain file had no way to do.
  *
  * **Lifecycle:** singleton tied to `applicationContext`. Same rationale
  * as [PairingRepository] — opening a SharedPreferences file is cheap,
@@ -54,10 +83,25 @@ class DraftRepository(
 
     private val prefs: SharedPreferences? by lazy { openPrefs() }
 
-    private fun openPrefs(): SharedPreferences? = runCatching {
-        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    }.onFailure { Log.w(TAG, "openPrefs() failed; drafts won't persist", it) }
-        .getOrNull()
+    /**
+     * `null` means "degrade to a no-op disk layer", which is what every
+     * method here already handles — same contract the plain open had, minus
+     * the silent-forever failure mode: [EncryptedPrefs.open] recovers a
+     * lost keyset and reports the loss.
+     */
+    private fun openPrefs(): SharedPreferences? =
+        EncryptedPrefs.open(context, PREFS_NAME, LegacyPrefsFormat.PLAIN)
+
+    /**
+     * Resolve the encrypted prefs file (Tink keyset unwrap through the
+     * Android Keystore, plus the one-off import of the old plain file) on
+     * [Dispatchers.IO]. Idempotent — the `by lazy` delegate does the work
+     * once and every later access, including the synchronous [save] on Main
+     * from `flushDraft`, is a field read.
+     */
+    suspend fun warmUp() {
+        withContext(Dispatchers.IO) { prefs }
+    }
 
     /** Save the in-progress draft for [sessionId]. Empty string clears it. */
     fun save(sessionId: String, text: String) {
@@ -193,20 +237,18 @@ class DraftRepository(
 
     companion object {
         private const val TAG = "DraftRepository"
-        private const val PREFS_NAME = "spk_drafts"
+        internal const val PREFS_NAME = "spk_drafts"
 
-        @Volatile
-        private var instance: DraftRepository? = null
+        private val holder = SingletonHolder(::DraftRepository)
 
+        /**
+         * The process-wide drafts store, with [activeServerProvider]
+         * rebound on every call — see the kdoc on [activeServerProvider].
+         * Without that rebind, the first caller's lambda would silently
+         * capture for the life of the JVM. [SingletonHolder] owns both
+         * halves of that rule.
+         */
         fun get(context: Context, activeServerProvider: () -> String?): DraftRepository =
-            synchronized(this) {
-                val existing = instance
-                val store = existing ?: DraftRepository(context.applicationContext).also { instance = it }
-                // Rebind the provider every call — see kdoc on
-                // [activeServerProvider]. Without this, the first caller's
-                // lambda would silently capture for the life of the JVM.
-                store.activeServerProvider = activeServerProvider
-                store
-            }
+            holder.get(context) { it.activeServerProvider = activeServerProvider }
     }
 }

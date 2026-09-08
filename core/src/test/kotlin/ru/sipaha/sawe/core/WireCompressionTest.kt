@@ -92,4 +92,28 @@ class WireCompressionTest {
         val adler = Adler32().apply { update(WIRE_DICT_PROTO_V1_BYTES) }.value
         assertEquals(WIRE_DICT_PROTO_V1_ADLER32, adler)
     }
+
+    /**
+     * N-39: the byte count drives both the compression threshold and the
+     * "compressed must be strictly smaller" guard, so over-counting an
+     * emoji-dense message could make the client send a compressed frame
+     * that is actually larger than the text it replaced.
+     */
+    @Test
+    fun `utf8Size matches the real encoding for every plane`() {
+        val samples = listOf(
+            "ascii only",
+            "кириллица", // 2 bytes per char
+            "日本語", // 3 bytes per char
+            "😀", // one surrogate pair, 4 bytes
+            "hi 😀🎉 there — ok",
+        )
+        for (s in samples) {
+            assertEquals(
+                s.toByteArray(Charsets.UTF_8).size,
+                WireCompression.utf8Size(s),
+                "utf8Size disagrees with the encoder for \"$s\"",
+            )
+        }
+    }
 }

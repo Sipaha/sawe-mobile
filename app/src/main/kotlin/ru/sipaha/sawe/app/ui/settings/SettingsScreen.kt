@@ -33,8 +33,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -168,13 +171,17 @@ fun SettingsScreen(
             }
 
             SectionHeader("Diagnostics")
-            // The file count is read at composition time and is *not*
-            // reactive. Crash files only appear between process
-            // lifetimes (the process is being killed when one is
-            // written), so we can't observe new files arriving from
-            // within a running Settings screen — and a `remember` is
-            // enough.
-            val crashFileCount = remember { CrashLogger.listCrashFiles(context).size }
+            // Read once, off the main thread. Crash files only appear
+            // between process lifetimes (the process is being killed when one
+            // is written), so we can't observe new files arriving from within
+            // a running Settings screen — but the directory listing is still
+            // disk I/O and has no business running in composition (N-60).
+            // Renders "No crashes recorded" for the frame or two before the
+            // real count lands, which is also the overwhelmingly common
+            // answer.
+            val crashFileCount: Int by produceState(initialValue = 0, context) {
+                value = withContext(Dispatchers.IO) { CrashLogger.listCrashFiles(context).size }
+            }
             ListItem(
                 headlineContent = { Text("Crash logs") },
                 supportingContent = {

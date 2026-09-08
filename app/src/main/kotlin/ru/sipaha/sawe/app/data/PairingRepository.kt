@@ -3,7 +3,8 @@ package ru.sipaha.sawe.app.data
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
-import androidx.security.crypto.EncryptedSharedPreferences
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import ru.sipaha.sawe.core.PairingUrl
@@ -18,10 +19,13 @@ import java.util.UUID
  * [activeServerId] (or the most-recently-connected entry) and reconnects
  * to that one; the new Servers screen lets the user switch between them.
  *
- * **Storage:** Android-Keystore-backed [EncryptedSharedPreferences] file
- * `spk_pairing` (same file as R-6b — only the keys changed, which keeps
- * the keystore master key stable across upgrade and avoids a fresh
- * round-trip with the keystore subsystem on first R-6c launch).
+ * **Storage:** Android-Keystore-backed [TinkEncryptedPrefs] store
+ * `spk_pairing` (same logical store as R-6b — only the keys changed. The
+ * physical file moved once, when the deprecated
+ * `EncryptedSharedPreferences` layer was replaced by [TinkEncryptedPrefs];
+ * [LegacyPrefsImport] carried the old contents across on first launch, and
+ * the reader it needed was deleted on 2026-09-08 once every install had run
+ * it — see [LegacyPrefsFormat.NONE]).
  *
  *   - `paired_servers_v2` — JSON `List<PairedServer>` blob.
  *   - `active_server_id`  — String id of the active server, or absent.
@@ -33,12 +37,20 @@ import java.util.UUID
  * active, and delete the v1 key. One-shot — once v2 is present we never
  * look at v1 again.
  *
- * **Failure path:** if EncryptedSharedPreferences is unavailable
+ * **Threading:** opening the file unwraps a Tink keyset through the
+ * Android Keystore and blocks for tens to hundreds of ms (seconds on a
+ * slow TEE). Cold start reaches [loadAll] / [activeServerId] from the
+ * landing-route decision, so callers should [warmUp] — or use
+ * [loadAllOnIo] / [activeServerIdOnIo] — instead of paying for it on
+ * Main (N-56).
+ *
+ * **Failure path:** if [TinkEncryptedPrefs] is unavailable
  * (keystore unreachable — factory-reset credential store, device
  * migration), every method becomes a no-op equivalent: [loadAll]
  * returns the empty list, [activeServerId] returns `null`, mutations
  * silently drop. The app still works, just without persistence —
- * mirrors R-6b behavior.
+ * mirrors R-6b behavior. An *unreadable keyset* is recovered rather
+ * than tolerated — see [EncryptedPrefs.open].
  */
 class PairingRepository(private val context: Context) {
 
@@ -52,18 +64,27 @@ class PairingRepository(private val context: Context) {
         opened
     }
 
-    private fun openPrefs(): SharedPreferences? = runCatching {
-        val masterKey = AppMasterKey.get(context) ?: return@runCatching null
-        EncryptedSharedPreferences.create(
-            context,
-            PREFS_NAME,
-            masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-        )
-    }.onFailure {
-        Log.w(TAG, "EncryptedSharedPreferences unavailable; pairing won't persist", it)
-    }.getOrNull()
+    // LegacyPrefsFormat.NONE: this store's pre-Tink file was an
+    // `EncryptedSharedPreferences` one, and the only reader for that shape
+    // went with the androidx.security:security-crypto dependency on
+    // 2026-09-08 — there is nothing left for the importer to drain.
+    private fun openPrefs(): SharedPreferences? =
+        EncryptedPrefs.open(context, PREFS_NAME, LegacyPrefsFormat.NONE)
+
+    /**
+     * Resolve the encrypted prefs file (and run the v1→v2 migration) on
+     * [Dispatchers.IO]. Idempotent — the `by lazy` delegate does the work
+     * once, so every later synchronous read is a field access.
+     */
+    suspend fun warmUp() {
+        withContext(Dispatchers.IO) { prefs }
+    }
+
+    /** [loadAll] off the main thread. */
+    suspend fun loadAllOnIo(): List<PairedServer> = withContext(Dispatchers.IO) { loadAll() }
+
+    /** [activeServerId] off the main thread. */
+    suspend fun activeServerIdOnIo(): String? = withContext(Dispatchers.IO) { activeServerId() }
 
     /**
      * Migrate the R-6b single-URL `pairing_url` key into the R-6c
@@ -214,7 +235,9 @@ class PairingRepository(private val context: Context) {
 
     companion object {
         private const val TAG = "PairingRepository"
-        private const val PREFS_NAME = "spk_pairing"
+
+        /** Prefs-file name; also the [PersistenceHealth] identifier for this store. */
+        internal const val PREFS_NAME = "spk_pairing"
         private const val KEY_URL_V1 = "url"
         private const val KEY_LIST_V2 = "paired_servers_v2"
         private const val KEY_ACTIVE_ID = "active_server_id"
@@ -224,12 +247,13 @@ class PairingRepository(private val context: Context) {
             encodeDefaults = true
         }
 
-        @Volatile
-        private var instance: PairingRepository? = null
+        private val holder = SingletonHolder(::PairingRepository)
 
-        fun get(context: Context): PairingRepository =
-            instance ?: synchronized(this) {
-                instance ?: PairingRepository(context.applicationContext).also { instance = it }
-            }
+        /**
+         * Process-wide instance. No provider to rebind: this repository is
+         * the *source* of the active server id every other store scopes by,
+         * so it has nothing to scope itself against.
+         */
+        fun get(context: Context): PairingRepository = holder.get(context)
     }
 }

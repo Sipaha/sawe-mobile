@@ -71,8 +71,13 @@ internal class OkHttpRemoteTransportFactory(
         }
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
             // Acknowledge the close to flush the queue, then OkHttp delivers
-            // onClosed on the same thread.
-            webSocket.close(code, reason)
+            // onClosed on the same thread. We answer with a plain 1000 rather
+            // than echoing the peer's code: `WebSocket.close` validates the
+            // code, and 1005 ("no status received" — what OkHttp reports for
+            // a Close frame with an empty payload) is not a legal code to
+            // *send*, so echoing it throws IllegalArgumentException on the
+            // reader thread and turns a clean close into a transport failure.
+            webSocket.close(1000, null)
         }
     }
 
@@ -109,6 +114,18 @@ internal class OkHttpRemoteTransportFactory(
                 .hostnameVerifier { _, _ -> true } // fingerprint pin obsoletes hostname check
                 .pingInterval(30, TimeUnit.SECONDS)
                 .readTimeout(0, TimeUnit.MILLISECONDS)
+                // `readTimeout(0)` is what a steady-state WebSocket needs
+                // (the socket is idle between frames), but it also applies
+                // to the TLS handshake and to reading the HTTP 101 — a
+                // black-holed ClientHello would otherwise hang the call
+                // until the OS gives up on TCP retransmits. `callTimeout`
+                // bounds DNS + TCP + TLS + upgrade and OkHttp clears it
+                // once the WebSocket is open (`RealCall.timeoutEarlyExit`),
+                // so it never truncates a live session. Kept in step with
+                // [ConnectFailure.PRE_OPEN_TIMEOUT_MS], the coroutine-side
+                // budget for the same phase.
+                .callTimeout(ConnectFailure.PRE_OPEN_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                .connectTimeout(10, TimeUnit.SECONDS)
         }
     }
 }
@@ -119,4 +136,10 @@ private class OkHttpRemoteTransport(private val socket: WebSocket) : RemoteTrans
     override fun close(code: Int, reason: String) {
         socket.close(code, reason)
     }
+
+    override fun cancel() {
+        socket.cancel()
+    }
+
+    override fun queuedBytes(): Long = socket.queueSize()
 }

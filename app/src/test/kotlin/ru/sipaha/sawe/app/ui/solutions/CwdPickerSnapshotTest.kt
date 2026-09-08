@@ -39,9 +39,11 @@ class CwdPickerSnapshotTest {
 
         captureRoboImage(
             filePath = "src/test/snapshots/roborazzi/CwdPicker_member_projects_only.png",
-            // Compare against the committed golden (flip to Record to re-baseline),
-            // matching WorkspaceScreenSnapshotTest.
-            roborazziOptions = RoborazziOptions(taskType = RoborazziTaskType.Compare),
+            // VERIFYING: compares against the committed golden and FAILS the
+            // test on a mismatch (Compare only writes *_compare.png and
+            // returns, so the golden was decorative). Diff artifacts still
+            // land in build/outputs/roborazzi/. Flip to Record to re-baseline.
+            roborazziOptions = RoborazziOptions(taskType = RoborazziTaskType.Verify),
         ) {
             MaterialTheme {
                 Surface {

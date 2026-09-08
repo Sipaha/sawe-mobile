@@ -17,10 +17,13 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.material3.Button
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -51,25 +54,51 @@ import ru.sipaha.sawe.app.vm.UiState
  * we push `workspace` onto the back stack (popping any prior pairing entry).
  * When it flips back to Disconnected we pop everything except `pairing`.
  *
- * **R-6c-multi:** [initialRoute] picks the cold-start landing destination
- * based on the paired-server count:
- *   - `null` (recreated activity) → start at `pairing` and rely on the
- *     surviving VM state to push us forward.
- *   - `"pairing"` (first launch / no servers paired) → identical to the
- *     R-6b unpaired path.
- *   - `"workspace"` (single server) → R-6b auto-resume preserved.
- *   - `"servers"` (multi-server) → user picks which one to connect to.
+ * **R-6c-multi:** the cold-start landing destination follows the
+ * paired-server count and is resolved asynchronously by the ViewModel
+ * ([MainViewModel.landingRoute]) because reading the pairing list opens an
+ * encrypted prefs file (a Tink keyset unwrap through the Android Keystore):
+ *   - `"pairing"` (first launch / no servers paired),
+ *   - `"workspace"` (single server — R-6b auto-resume preserved),
+ *   - `"servers"` (multi-server — user picks which one to connect to).
+ * A short splash covers the resolution. [initialRoute] overrides it, for
+ * previews and tests.
  *
  * R-6a adds a persistent banner above the NavHost surfaced from
  * [MainViewModel.connectionBanner]. It's hidden in Connected/Disconnected
  * and surfaces a one-line "reconnecting…" or "re-pair required" state.
+ *
+ * The terminal variant of that banner is tappable, and this graph is what
+ * makes it so: `onRePair` routes to `pairing`. It deliberately is NOT
+ * [MainViewModel.retryConnection] — a `FailedTerminal` is the desktop
+ * rejecting THIS phone's stored secret, so reconnecting with that same
+ * secret fails identically every time. Only a fresh QR carries a new one
+ * (N-18). Screens that don't pass it get a plain informational strip
+ * rather than a dead tap.
  */
 @Composable
 fun AppNav(viewModel: MainViewModel, initialRoute: String? = null) {
     val navController = rememberNavController()
     val uiState by viewModel.state.collectAsState()
+    val landingRoute by viewModel.landingRoute.collectAsState()
+    val coroutineScope = rememberCoroutineScope()
 
-    val startDestination = initialRoute ?: "pairing"
+    // Latch the first resolved route: NavHost rebuilds its graph when
+    // `startDestination` changes, so it must be stable for the lifetime of
+    // this composition even though the flow behind it can move (e.g. the
+    // last server is forgotten).
+    var resolvedStart by remember { mutableStateOf(initialRoute) }
+    LaunchedEffect(landingRoute) {
+        if (resolvedStart == null) resolvedStart = landingRoute
+    }
+    val startDestination = resolvedStart
+    if (startDestination == null) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center,
+        ) { CircularProgressIndicator() }
+        return
+    }
 
     // R-6d: persist the resolved nav route on every back-stack change so
     // a cold-start can land the user back on the deepest screen they
@@ -143,7 +172,10 @@ fun AppNav(viewModel: MainViewModel, initialRoute: String? = null) {
 
     val gate = uiState
     if (gate is UiState.IncompatibleServer) {
-        IncompatibleServerScreen(state = gate)
+        IncompatibleServerScreen(
+            state = gate,
+            onRetry = { viewModel.retryConnection() },
+        )
         return
     }
 
@@ -202,6 +234,7 @@ fun AppNav(viewModel: MainViewModel, initialRoute: String? = null) {
                         navController.navigate("workspace/solutions/$solutionId/projects")
                     },
                     onOpenSettings = { navController.navigate("settings") },
+                    onRePair = { navController.navigate("pairing") { launchSingleTop = true } },
                 )
             }
             composable("settings") {
@@ -212,12 +245,18 @@ fun AppNav(viewModel: MainViewModel, initialRoute: String? = null) {
                     // route to either `servers` (others survive) or
                     // `pairing` (last server gone).
                     onForget = {
-                        viewModel.forgetPairing()
-                        val remainingCount = viewModel.pairedServers.value.size
-                        val target = if (remainingCount >= 1) "servers" else "pairing"
-                        navController.navigate(target) {
-                            popUpTo(target) { inclusive = remainingCount == 0 }
-                            launchSingleTop = true
+                        // Await the removal before reading the remaining
+                        // count — the fire-and-forget variant used to send
+                        // the user who just forgot their ONLY server to an
+                        // empty servers list instead of the QR screen (N-27).
+                        coroutineScope.launch {
+                            viewModel.forgetPairingAndAwait()
+                            val remainingCount = viewModel.pairedServers.value.size
+                            val target = if (remainingCount >= 1) "servers" else "pairing"
+                            navController.navigate(target) {
+                                popUpTo(target) { inclusive = remainingCount == 0 }
+                                launchSingleTop = true
+                            }
                         }
                     },
                     onSwitchServer = {
@@ -262,6 +301,7 @@ fun AppNav(viewModel: MainViewModel, initialRoute: String? = null) {
                             launchSingleTop = true
                         }
                     },
+                    onRePair = { navController.navigate("pairing") { launchSingleTop = true } },
                 )
             }
         }
@@ -300,11 +340,15 @@ private fun resolvedRoute(entry: NavBackStackEntry): String? {
  * the user can't drive an undecodable wire.
  *
  * Wired from [AppNav]'s top-level `if (uiState is IncompatibleServer)`
- * short-circuit; no nav callbacks because there's no in-app
- * remediation (the user updates the app via the store / sideload).
+ * short-circuit. [onRetry] rebuilds the connection from scratch: the gate
+ * tears the client down, so without it the only way out after updating the
+ * editor was to kill the app from Recents (N-20).
  */
 @Composable
-private fun IncompatibleServerScreen(state: UiState.IncompatibleServer) {
+private fun IncompatibleServerScreen(
+    state: UiState.IncompatibleServer,
+    onRetry: () -> Unit,
+) {
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.errorContainer,
@@ -327,6 +371,12 @@ private fun IncompatibleServerScreen(state: UiState.IncompatibleServer) {
                 modifier = Modifier.padding(top = 16.dp),
                 style = MaterialTheme.typography.bodyLarge,
             )
+            Button(
+                onClick = onRetry,
+                modifier = Modifier.padding(top = 24.dp),
+            ) {
+                Text("Retry")
+            }
             Text(
                 text = "Server wire schema: ${state.serverWireSchemaVersion} • " +
                     "app supports: ${state.supportedWireSchemaVersion}",

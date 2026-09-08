@@ -145,4 +145,91 @@ class GetSessionChangesDtoTest {
         assertEquals(0L, result.epoch)
         assertEquals(0L, result.currentSeq)
     }
+
+    /**
+     * A v6-shaped response from a server that knows nothing about entry
+     * body deltas still decodes, and all three new fields read `null` —
+     * "whole body / old server", never "length zero" or "empty tail".
+     */
+    @Test
+    fun `entry from a pre-delta server decodes with the three body fields null`() {
+        val json = """
+            {
+              "epoch": 1,
+              "current_seq": 12,
+              "reset": false,
+              "total_count": 1,
+              "changed_entries": [
+                {"role":"assistant","index":42,"preview":"hi","markdown":"hi there","image_count":0}
+              ],
+              "streams": [
+                {"id":{"type":"main"},"kind":"main","label":"Main","state":{"type":"live"},"seq":12,"total_count":1}
+              ],
+              "selected_stream_id": {"type":"main"}
+            }
+        """.trimIndent()
+        val entry = JsonRpc.json
+            .decodeFromString(GetSessionChangesResult.serializer(), json)
+            .changedEntries
+            .single()
+
+        assertEquals("hi there", entry.markdown)
+        assertNull(entry.markdownLen)
+        assertNull(entry.markdownPrefixLen)
+        assertNull(entry.markdownTail)
+    }
+
+    @Test
+    fun `a delta-body entry decodes with no markdown and an echoed prefix length`() {
+        val json = """
+            {"role":"assistant","index":42,"markdown_len":8219,
+             "markdown_prefix_len":8123,"markdown_tail":" and the rest.",
+             "image_count":0,"created_ms":1757232041123}
+        """.trimIndent()
+        val entry = JsonRpc.json.decodeFromString(EntrySummary.serializer(), json)
+
+        assertNull(entry.markdown)
+        assertEquals(8219L, entry.markdownLen)
+        assertEquals(8123L, entry.markdownPrefixLen)
+        assertEquals(" and the rest.", entry.markdownTail)
+        // No `preview` key on this entry: a body-carrying non-user entry
+        // under `omit_preview_when_markdown`.
+        assertEquals("", entry.preview)
+    }
+
+    /**
+     * `markdown_tail: ""` is the common "body unchanged" case. It must
+     * decode as an empty string, NOT collapse into "absent".
+     */
+    @Test
+    fun `an empty markdown_tail is distinguishable from an absent one`() {
+        val unchanged = JsonRpc.json.decodeFromString(
+            EntrySummary.serializer(),
+            """{"role":"assistant","index":1,"markdown_len":10,"markdown_prefix_len":10,"markdown_tail":""}""",
+        )
+        assertEquals("", unchanged.markdownTail)
+
+        val whole = JsonRpc.json.decodeFromString(
+            EntrySummary.serializer(),
+            """{"role":"assistant","index":1,"markdown":"whole body","markdown_len":10}""",
+        )
+        assertNull(whole.markdownTail)
+    }
+
+    /**
+     * `preview` lost its non-null-no-default status so a server honouring
+     * `omit_preview_when_markdown` can drop the key. Every reader uses
+     * `markdown ?: preview`, so the default is only ever seen where a body
+     * is present.
+     */
+    @Test
+    fun `an entry with no preview key decodes with an empty preview`() {
+        val entry = JsonRpc.json.decodeFromString(
+            EntrySummary.serializer(),
+            """{"role":"tool_call","index":37,"markdown":"the tool body","image_count":0}""",
+        )
+        assertEquals("", entry.preview)
+        assertEquals("the tool body", entry.markdown)
+        assertEquals("the tool body", entry.markdown ?: entry.preview)
+    }
 }

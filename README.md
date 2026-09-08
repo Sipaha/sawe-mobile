@@ -24,7 +24,7 @@ spk-editor-mobile/
   cli/    # Pure JVM smoke client over :core. Single-shot RPC against
           # a live editor for debugging. No Android.
   app/    # Android Compose UI. Depends on :core. Multi-server pairing,
-          # Settings, Crash logs, EncryptedSharedPreferences-backed
+          # Settings, Crash logs, Tink-encrypted persisted
           # state. Requires Android SDK to build.
 ```
 
@@ -157,8 +157,9 @@ tag byte-for-byte (see `core::HmacChallengeAuth.HMAC_DOMAIN_TAG` and
 5. The phone handshakes the editor (TLS pin + HMAC + welcome), then
    pulls the Solutions list.
 
-Pairing URLs are persisted in `EncryptedSharedPreferences`
-(Android-Keystore master key, AES-256-GCM values). On every cold
+Pairing URLs are persisted in an encrypted `SharedPreferences` file
+(`TinkEncryptedPrefs`: AES-256-SIV keys, AES-256-GCM values, keyset
+wrapped by an Android Keystore master key). On every cold
 start, `MainActivity` reads the saved URL(s) and reconnects to the
 active one without prompting. To change the address (e.g. new public
 IP), open **Settings → Edit address / label**; to drop a pairing,
