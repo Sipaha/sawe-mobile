@@ -661,8 +661,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
         catalogStore.addMemberFromCatalog(solutionId, catalogId)
     fun createEmptyMember(solutionId: Long, name: String) =
         catalogStore.createEmptyMember(solutionId, name)
-    fun removeMember(solutionId: Long, catalogId: Long) =
-        catalogStore.removeMember(solutionId, catalogId)
+    fun removeMember(solutionId: Long, memberId: Long) =
+        catalogStore.removeMember(solutionId, memberId)
     fun removeCatalogProject(catalogId: Long) =
         catalogStore.removeCatalogProject(catalogId)
 

@@ -1291,26 +1291,58 @@ class RemoteDtosTest {
     }
 
     @Test
-    fun `SolutionMember round-trips with snake_case catalog_id and local_path`() {
-        // The wire emits all three fields snake_case; the DTO uses
-        // SerialName to map catalog_id → catalogId and local_path → localPath.
-        // The status field is a free-form string (no enum classifier on
-        // the client side yet) so any value must round-trip verbatim.
+    fun `SolutionMember round-trips a catalog-cloned member`() {
+        // Verbatim shape of the server's `MemberDetail`
+        // (crates/solutions/src/mcp/solutions_lifecycle.rs): the member's own
+        // `id`, a display `name`, `local_path`, `status`, and — only for a
+        // member cloned from the catalog — `origin_catalog_id`.
         val text = """
             {
-              "catalog_id": 123,
+              "id": 7,
+              "name": "foo",
               "local_path": "/home/user/projects/foo",
-              "status": "active"
+              "origin_catalog_id": 123,
+              "status": "ok"
             }
         """.trimIndent()
         val parsed = JsonRpc.json.decodeFromString(SolutionMember.serializer(), text)
-        assertEquals(123L, parsed.catalogId)
+        assertEquals(7L, parsed.memberId)
+        assertEquals("foo", parsed.name)
         assertEquals("/home/user/projects/foo", parsed.localPath)
-        assertEquals("active", parsed.status)
+        assertEquals(123L, parsed.originCatalogId)
+        assertEquals("ok", parsed.status)
 
         val reencoded = JsonRpc.json.encodeToString(SolutionMember.serializer(), parsed)
         val again = JsonRpc.json.decodeFromString(SolutionMember.serializer(), reencoded)
         assertEquals(parsed, again)
+    }
+
+    @Test
+    fun `SolutionMember decodes an empty project that has no origin_catalog_id`() {
+        // The regression that broke the projects screen outright: a member
+        // created by `solutions.add_empty_member` has no catalog row, so the
+        // server omits `origin_catalog_id` (skip_serializing_if). Declaring
+        // it required made the FIRST member of a solution poison
+        // `solutions.get` permanently.
+        val text = """
+            {"id": 1, "name": "new-project", "local_path": "/ss/x/new-project", "status": "ok"}
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(SolutionMember.serializer(), text)
+        assertEquals(1L, parsed.memberId)
+        assertEquals("new-project", parsed.name)
+        assertNull(parsed.originCatalogId)
+    }
+
+    @Test
+    fun `SolutionMember ignores the catalog_id key the server no longer sends`() {
+        // Guards the direction of the fix: `catalog_id` is dead on a member.
+        // If it ever comes back it must not be mistaken for the member id.
+        val text = """
+            {"id": 4, "name": "m", "local_path": "/p", "status": "ok", "catalog_id": 99}
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(SolutionMember.serializer(), text)
+        assertEquals(4L, parsed.memberId)
+        assertNull(parsed.originCatalogId)
     }
 
     @Test
@@ -1321,8 +1353,8 @@ class RemoteDtosTest {
               "name": "Spk Editor",
               "root": "/home/spk/.spk/spk-editor",
               "members": [
-                {"catalog_id": 1, "local_path": "/p/one", "status": "active"},
-                {"catalog_id": 2, "local_path": "/p/two", "status": "missing"}
+                {"id": 1, "name": "one", "local_path": "/p/one", "origin_catalog_id": 11, "status": "ok"},
+                {"id": 2, "name": "two", "local_path": "/p/two", "status": "missing_on_disk"}
               ],
               "last_opened_at": "2026-05-16T08:00:00Z"
             }
@@ -1332,8 +1364,10 @@ class RemoteDtosTest {
         assertEquals("Spk Editor", parsed.name)
         assertEquals("/home/spk/.spk/spk-editor", parsed.root)
         assertEquals(2, parsed.members.size)
-        assertEquals(1L, parsed.members[0].catalogId)
-        assertEquals("missing", parsed.members[1].status)
+        assertEquals(1L, parsed.members[0].memberId)
+        assertEquals(11L, parsed.members[0].originCatalogId)
+        assertNull(parsed.members[1].originCatalogId)
+        assertEquals("missing_on_disk", parsed.members[1].status)
         assertEquals("2026-05-16T08:00:00Z", parsed.lastOpenedAt)
 
         val reencoded = JsonRpc.json.encodeToString(SolutionDetails.serializer(), parsed)
@@ -1365,7 +1399,7 @@ class RemoteDtosTest {
                 "name": "X",
                 "root": "/x",
                 "members": [
-                  {"catalog_id": 3, "local_path": "/x/m", "status": "active"}
+                  {"id": 3, "name": "m", "local_path": "/x/m", "status": "ok"}
                 ],
                 "last_opened_at": "2026-05-17T12:00:00Z"
               }
@@ -1541,12 +1575,14 @@ class RemoteDtosTest {
     }
 
     @Test
-    fun `AddEmptyMemberResult maps snake_case catalog_id`() {
+    fun `AddEmptyMemberResult maps snake_case member_id`() {
+        // The server returns the new MEMBER id — an empty project never gets
+        // a catalog row, so there is no catalog id to return.
         val parsed = JsonRpc.json.decodeFromString(
             AddEmptyMemberResult.serializer(),
-            """{"catalog_id": 203}""",
+            """{"member_id": 203}""",
         )
-        assertEquals(203L, parsed.catalogId)
+        assertEquals(203L, parsed.memberId)
     }
 
     @Test

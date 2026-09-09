@@ -136,7 +136,13 @@ internal class CatalogStore(
                 .mapCatching { resp -> resp.decodeResultOrThrow(GetSolutionResult.serializer()) }
                 .onSuccess {
                     _solutionDetails.value = UiData.Loaded(it)
-                    reconcileMemberAdds(solutionId, it.solution.members.map { m -> m.catalogId })
+                    reconcileMemberAdds(
+                        solutionId,
+                        // Ghost rows are keyed by CATALOG id, so only members
+                        // that came from the catalog can retire one. An empty
+                        // project has no origin and never had a ghost row.
+                        it.solution.members.mapNotNull { m -> m.originCatalogId },
+                    )
                 }
                 .onFailure { _solutionDetails.value = UiData.Error(it.message ?: "unknown error") }
         }
@@ -247,19 +253,22 @@ internal class CatalogStore(
     }
 
     /**
-     * Remove a member from [solutionId] (config-only on the server — the
-     * worktree directory is left on disk). Refreshes the open solution
-     * detail so the member count and rows update; the workspace mirror
-     * picks up the change via the `solution_changed` notification.
+     * Remove the member [memberId] from [solutionId] (config-only on the
+     * server — the worktree directory is left on disk). Refreshes the open
+     * solution detail so the member count and rows update; the workspace
+     * mirror picks up the change via the `solution_changed` notification.
+     *
+     * [solutionId] is ours, for the refresh — the wire call takes the member
+     * id alone (see [ru.sipaha.sawe.core.RemoteClient.removeMember]).
      */
-    fun removeMember(solutionId: Long, catalogId: Long) {
+    fun removeMember(solutionId: Long, memberId: Long) {
         val active = context.activeClient()
         if (active == null) {
             context.emitError(context.notConnectedMessage())
             return
         }
         scope.launch {
-            runCatching { active.removeMember(solutionId, catalogId) }
+            runCatching { active.removeMember(memberId) }
                 .onSuccess { loadSolutionDetails(solutionId) }
                 .onFailure { context.emitError("Couldn't remove project: ${it.message ?: "?"}") }
         }

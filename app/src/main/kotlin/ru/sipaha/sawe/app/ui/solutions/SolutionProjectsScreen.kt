@@ -79,8 +79,11 @@ fun SolutionProjectsScreen(
     // here as well would make this screen and the chat screen steal notices
     // from each other (N-57). This screen raises no messages of its own.
 
-    fun displayName(m: SolutionMember): String =
-        catalog.firstOrNull { it.catalogId == m.catalogId }?.name ?: m.catalogId.toString()
+    // The server labels the member itself; the catalog is not a fallback
+    // source here. An empty project created via `add_empty_member` has no
+    // catalog row at all, so the old catalog lookup rendered it as a bare
+    // number.
+    fun displayName(m: SolutionMember): String = m.name
 
     Scaffold(
         topBar = {
@@ -148,12 +151,12 @@ fun SolutionProjectsScreen(
                                 )
                             }
                         } else {
-                            items(members, key = { it.catalogId }) { member ->
+                            items(members, key = { it.memberId }) { member ->
                                 ProjectRow(
                                     name = displayName(member),
                                     status = member.status,
                                     onRemove = {
-                                        viewModel.removeMember(solutionId, member.catalogId)
+                                        viewModel.removeMember(solutionId, member.memberId)
                                     },
                                 )
                                 HorizontalDivider()

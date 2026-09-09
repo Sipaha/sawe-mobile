@@ -12,16 +12,17 @@ import ru.sipaha.sawe.core.SolutionMember
  * worktree.
  *
  * Fixtures deliberately use paths whose last segment differs from the
- * member's catalog id. The old fixture derived the path FROM the id
+ * member's id. The old fixture derived the path FROM the id
  * (`member(1L)` -> `/home/u/.spk/sol/1`), so label and directory name
- * coincided and the "label is the catalog id" regression was invisible here.
+ * coincided and the "label is the id" regression was invisible here.
  */
 class CwdOptionsTest {
 
     private fun member(id: Long, path: String) = SolutionMember(
-        catalogId = id,
+        memberId = id,
+        name = "project-$id",
         localPath = path,
-        status = "ready",
+        status = "ok",
     )
 
     @Test

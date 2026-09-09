@@ -442,11 +442,31 @@ data class ListSolutionsResult(val solutions: List<SolutionSummary>)
  * One member project inside a Solution as returned by `solutions.get`.
  * The dialog flow uses [localPath] to feed `create_session.cwd` so the
  * agent subprocess starts in the right worktree.
+ *
+ * **A member is NOT a catalog project.** The server split the two
+ * identities in `a81166f241` ("replace slug identities with surrogate
+ * counter ids"): `MemberDetail` carries its own `id`, and the catalog row
+ * it was cloned from — if any — is provenance only, under
+ * `origin_catalog_id`. This client declared the id as `catalog_id` until
+ * the mismatch bit: the very first member of a solution made
+ * `solutions.get` undecodable ("Field 'catalog_id' is required … but it
+ * was missing") and the projects screen showed nothing but that error.
+ *
+ * [originCatalogId] is `null` for a member created by
+ * `solutions.add_empty_member` — an empty project has no catalog row by
+ * design (server test `add_empty_member_does_not_add_catalog_row`), and
+ * the server omits the key entirely rather than sending null. Do not make
+ * it non-null: that is the same bug one field over.
+ *
+ * [name] is the server's display label; prefer it over looking the member
+ * up in the catalog, which cannot work for an empty project.
  */
 @Serializable
 data class SolutionMember(
-    @SerialName("catalog_id") val catalogId: Long,
+    @SerialName("id") val memberId: Long,
+    val name: String,
     @SerialName("local_path") val localPath: String,
+    @SerialName("origin_catalog_id") val originCatalogId: Long? = null,
     val status: String,
 )
 
@@ -500,9 +520,15 @@ data class CreateSolutionResult(@SerialName("solution_id") val solutionId: Long)
 @Serializable
 data class AddMemberResult(@SerialName("operation_id") val operationId: String)
 
-/** Result envelope for `solutions.add_empty_member` — synchronous create. */
+/**
+ * Result envelope for `solutions.add_empty_member` — synchronous create.
+ *
+ * The wire field is `member_id` (see [SolutionMember] for why it is not
+ * `catalog_id`): an empty project never gets a catalog row, so there is no
+ * catalog id to return.
+ */
 @Serializable
-data class AddEmptyMemberResult(@SerialName("catalog_id") val catalogId: Long)
+data class AddEmptyMemberResult(@SerialName("member_id") val memberId: Long)
 
 /**
  * Decoded payload of a `solution_member_add_progress` notification.

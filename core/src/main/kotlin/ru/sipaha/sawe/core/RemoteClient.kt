@@ -1161,8 +1161,9 @@ class RemoteClient internal constructor(
 
     /**
      * Create a new empty (non-git) project named [name] as a member of
-     * [solutionId]. Synchronous server-side — the returned `catalog_id`
-     * is the slug the server assigned the new member.
+     * [solutionId]. Synchronous server-side — the returned
+     * [AddEmptyMemberResult.memberId] is the id the server assigned the new
+     * member (there is no catalog row for an empty project).
      */
     suspend fun addEmptyMember(solutionId: Long, name: String): AddEmptyMemberResult {
         val params = buildJsonObject {
@@ -1178,13 +1179,19 @@ class RemoteClient internal constructor(
     }
 
     /**
-     * Remove a member from [solutionId]. Config-only on the server — the
-     * on-disk worktree directory is left untouched.
+     * Remove the member [memberId]. Config-only on the server — the on-disk
+     * worktree directory is left untouched.
+     *
+     * The member id alone identifies the row, and the server's
+     * `RemoveMemberParams` is `deny_unknown_fields`: sending a
+     * `solution_id` alongside it is rejected outright. That is exactly what
+     * this call used to do (`solution_id` + `catalog_id`), so removing a
+     * project from the phone never worked after the server split member ids
+     * from catalog ids — see [ru.sipaha.sawe.core.SolutionMember].
      */
-    suspend fun removeMember(solutionId: Long, catalogId: Long) {
+    suspend fun removeMember(memberId: Long) {
         val params = buildJsonObject {
-            put("solution_id", solutionId)
-            put("catalog_id", catalogId)
+            put("member_id", memberId)
         }
         val response = call("remote.solutions.remove_member", params)
         val err = response.error
