@@ -24,6 +24,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import androidx.lifecycle.Lifecycle
 import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -205,46 +206,58 @@ fun AppNav(viewModel: MainViewModel, initialRoute: String? = null) {
                     contentAlignment = Alignment.Center,
                 ) { CircularProgressIndicator() }
             }
-            composable("servers") {
+            composable("servers") { entry ->
                 ServersListScreen(
                     viewModel = viewModel,
                     onOpenServer = {
-                        navController.navigate("workspace") {
-                            popUpTo("servers") { inclusive = false }
-                            launchSingleTop = true
+                        entry.ifResumed {
+                            navController.navigate("workspace") {
+                                popUpTo("servers") { inclusive = false }
+                                launchSingleTop = true
+                            }
                         }
                     },
                     onAddNew = {
-                        navController.navigate("pairing") {
-                            // Don't pop `servers` — the user is adding
-                            // *another* server, not replacing.
-                            launchSingleTop = true
+                        entry.ifResumed {
+                            navController.navigate("pairing") {
+                                // Don't pop `servers` — the user is adding
+                                // *another* server, not replacing.
+                                launchSingleTop = true
+                            }
                         }
                     },
-                    onOpenSettings = { navController.navigate("settings") },
+                    onOpenSettings = { entry.ifResumed { navController.navigate("settings") } },
                 )
             }
-            composable("workspace") {
+            composable("workspace") { entry ->
                 WorkspaceScreen(
                     viewModel = viewModel,
                     onOpenSession = { sessionId ->
-                        navController.navigate("workspace/sessions/$sessionId")
+                        entry.ifResumed {
+                            navController.navigate("workspace/sessions/$sessionId")
+                        }
                     },
                     onOpenProjects = { solutionId ->
-                        navController.navigate("workspace/solutions/$solutionId/projects")
+                        entry.ifResumed {
+                            navController.navigate("workspace/solutions/$solutionId/projects")
+                        }
                     },
-                    onOpenSettings = { navController.navigate("settings") },
-                    onRePair = { navController.navigate("pairing") { launchSingleTop = true } },
+                    onOpenSettings = { entry.ifResumed { navController.navigate("settings") } },
+                    onRePair = {
+                        entry.ifResumed {
+                            navController.navigate("pairing") { launchSingleTop = true }
+                        }
+                    },
                 )
             }
-            composable("settings") {
+            composable("settings") { entry ->
                 SettingsScreen(
                     viewModel = viewModel,
-                    onBack = { navController.popBackStack() },
+                    onBack = { entry.ifResumed { navController.popBackStack() } },
                     // Forget Server: clear THIS server (R-6c-multi) then
                     // route to either `servers` (others survive) or
                     // `pairing` (last server gone).
-                    onForget = {
+                    onForget = entry.guarded {
                         // Await the removal before reading the remaining
                         // count — the fire-and-forget variant used to send
                         // the user who just forgot their ONLY server to an
@@ -260,16 +273,18 @@ fun AppNav(viewModel: MainViewModel, initialRoute: String? = null) {
                         }
                     },
                     onSwitchServer = {
-                        navController.navigate("servers") {
-                            popUpTo("workspace") { inclusive = false }
-                            launchSingleTop = true
+                        entry.ifResumed {
+                            navController.navigate("servers") {
+                                popUpTo("workspace") { inclusive = false }
+                                launchSingleTop = true
+                            }
                         }
                     },
-                    onOpenCrashLogs = { navController.navigate("crash-logs") },
+                    onOpenCrashLogs = { entry.ifResumed { navController.navigate("crash-logs") } },
                 )
             }
-            composable("crash-logs") {
-                CrashLogsScreen(onBack = { navController.popBackStack() })
+            composable("crash-logs") { entry ->
+                CrashLogsScreen(onBack = { entry.ifResumed { navController.popBackStack() } })
             }
             composable(
                 route = "workspace/solutions/{solutionId}/projects",
@@ -279,7 +294,7 @@ fun AppNav(viewModel: MainViewModel, initialRoute: String? = null) {
                 SolutionProjectsScreen(
                     viewModel = viewModel,
                     solutionId = solutionId,
-                    onBack = { navController.popBackStack() },
+                    onBack = { entry.ifResumed { navController.popBackStack() } },
                 )
             }
             composable(
@@ -290,23 +305,59 @@ fun AppNav(viewModel: MainViewModel, initialRoute: String? = null) {
                 SessionDetailScreen(
                     viewModel = viewModel,
                     sessionId = sessionId,
-                    onBack = { navController.popBackStack() },
+                    onBack = { entry.ifResumed { navController.popBackStack() } },
                     // F-phone: chip-row taps navigate sibling-wise. The
                     // unified workspace dropped the per-solution route
                     // segment, so sibling navigation just swaps the
                     // sessionId. `launchSingleTop` prevents a re-entry
                     // on the same id from stacking duplicates.
                     onOpenSibling = { siblingId ->
-                        navController.navigate("workspace/sessions/$siblingId") {
-                            launchSingleTop = true
+                        entry.ifResumed {
+                            navController.navigate("workspace/sessions/$siblingId") {
+                                launchSingleTop = true
+                            }
                         }
                     },
-                    onRePair = { navController.navigate("pairing") { launchSingleTop = true } },
+                    onRePair = {
+                        entry.ifResumed {
+                            navController.navigate("pairing") { launchSingleTop = true }
+                        }
+                    },
                 )
             }
         }
     }
 }
+
+/**
+ * Run [action] only while [this] back-stack entry is still the resumed one.
+ *
+ * **This is what keeps the app off a blank screen.** Every in-app navigation
+ * here goes through a screen's own callback, and a callback can fire twice
+ * before the composition settles: the exiting screen stays composed and
+ * hittable for the length of the transition, so a double tap on the top-bar
+ * "←" runs `popBackStack()` twice. The first pop leaves `workspace`, the
+ * second pops `workspace` itself — and a `NavHost` with an empty back stack
+ * renders **nothing**. The Activity stays resumed, so the user is left
+ * staring at a blank screen with no way out but the system Back button.
+ * Reproduced on the user's phone 2026-09-09 (two taps on "←" in a chat).
+ *
+ * The system Back button never had this problem: `NavHost` enables its
+ * handler only while `currentBackStack.size > 1`, so the framework refuses
+ * to pop the start destination. Only these callbacks were unguarded.
+ *
+ * After the first pop this entry drops out of RESUMED, so the second call is
+ * a no-op. The same guard is applied to `navigate` calls, where the symptom
+ * is milder but the mechanism identical (two copies of a destination pushed
+ * by one double tap).
+ */
+internal inline fun NavBackStackEntry.ifResumed(action: () -> Unit) {
+    if (lifecycle.currentState == Lifecycle.State.RESUMED) action()
+}
+
+/** [ifResumed] as a callback factory, for `onX = entry.guarded { ... }`. */
+internal fun NavBackStackEntry.guarded(action: () -> Unit): () -> Unit =
+    { ifResumed(action) }
 
 /**
  * Build the *resolved* route string for [entry] — substituting any
