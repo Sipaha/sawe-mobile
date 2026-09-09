@@ -569,6 +569,19 @@ class RemoteClient internal constructor(
     @Volatile private var closing = false
 
     /**
+     * True once [close] has run on this instance — and it never goes back
+     * to false, because a [RemoteClient] is single-shot (see [close]).
+     *
+     * Exposed so a caller that hands a connection over to a replacement can
+     * assert on the FACT of the handover rather than on a log line or on
+     * [connectionState], which reads `Disconnected` both for a client that
+     * was closed and for one that has simply never dialled. The
+     * duplicate-connection guard in `:app` is that caller: "the loser is
+     * closed" is the whole property its regression test pins down.
+     */
+    val isClosed: Boolean get() = closing
+
+    /**
      * Stop this client. **A handoff, not a cancellation of the user's
      * messages.**
      *

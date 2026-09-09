@@ -29,9 +29,36 @@
         android:supportsRtl="true"
         tools:targetApi="31">
 
+        <!--
+            launchMode=singleTask is LOAD-BEARING, not tidiness.
+
+            `MainViewModel` is Activity-scoped (`by viewModels()`), and it
+            constructs the `ConnectionManager` that owns the one `RemoteClient`.
+            With the default `standard` launch mode a second instance of this
+            Activity can be created in the task (anything that starts us by
+            component — `am start -n`, a launcher shortcut, a return path from
+            the system photo picker), which gives the process TWO ViewModels,
+            TWO ConnectionManagers and TWO clients against the same desktop.
+            The server allows one connection per client id and evicts the older
+            socket with `1001 "evicted by new connection"`, so the two clients
+            evict each other forever: the phone re-authenticated 576 times in
+            3.5 h, messages sat in "Waiting for connection" and uploads failed
+            client-side while the desktop logged `upload_finish OK`.
+
+            `singleTop` is NOT enough — it only de-duplicates when we are
+            already on top of the task. This is a single-Activity Compose app,
+            so `singleTask` loses nothing: there is no Activity below us worth
+            preserving, and the nav state lives in the ViewModel, which
+            survives the re-delivered intent untouched.
+
+            `ConnectionGuard` in `ConnectionManager.kt` is the second line of
+            defence; do not delete this attribute because "the guard handles
+            it". Covered by `DuplicateConnectionGuardTest`.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.SaweMobile">
             <intent-filter>

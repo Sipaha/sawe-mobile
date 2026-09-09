@@ -41,7 +41,9 @@ import ru.sipaha.sawe.core.ServerFeatures
 import ru.sipaha.sawe.core.isServerTooNew
 import ru.sipaha.sawe.core.isServerTooOld
 import ru.sipaha.sawe.core.toServerFeatures
+import java.lang.ref.WeakReference
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Owns the multi-server pairing lifecycle and the single active
@@ -111,6 +113,10 @@ import java.util.UUID
  *  2. [tearDownConnection] is idempotent and synchronous from the
  *     caller's perspective — `client.close()` returns before the
  *     [onTearDown] callback fires (audit Fix S).
+ *  3. **At most one [ConnectionManager] in the process may own a live
+ *     client.** Enforced by [ConnectionGuard], which every bind registers
+ *     with; see that object for why a second one is fatal rather than
+ *     merely wasteful.
  */
 internal class ConnectionManager(
     private val application: Application,
@@ -301,6 +307,18 @@ internal class ConnectionManager(
      * invariant 1.
      */
     private val connectionMutex = Mutex()
+
+    /**
+     * Identity for the duplicate-connection log line, and nothing else.
+     *
+     * `ConnectionManager@1a2b3c` would do, but a hash is not obviously an
+     * *instance* to whoever greps the log at 3am, and two managers whose
+     * hashes differ in one digit read as one. A monotonic counter makes
+     * "CM#1 vs CM#2" unmistakable, and its order tells you which came
+     * first — which is exactly the question when you are looking at
+     * interleaved reconnect ladders.
+     */
+    internal val instanceId: String = "CM#${INSTANCE_SEQ.incrementAndGet()}"
 
     init {
         scope.launch { hydrateAndAutoConnect() }
@@ -742,6 +760,16 @@ internal class ConnectionManager(
             // `:core` rather than a decision made on either side alone.
             replayGate = ::canReplayRehydratedSend,
         )
+        // Claim the process-wide connection slot. If some OTHER manager still
+        // holds it — a second Activity instance, which the manifest's
+        // `singleTask` is supposed to prevent — it is torn down here rather
+        // than left to fight this one over the server's single client slot.
+        //
+        // BEFORE `client` is assigned, deliberately: this way there is not
+        // even an instant in which two managers hold a live client, so any
+        // observer (including the regression test) sees a clean handover
+        // rather than a window it has to poll past.
+        ConnectionGuard.bind(this)
         client = newClient
         // A fresh client has its own ladder, unparked by construction.
         ladderParked = false
@@ -841,6 +869,11 @@ internal class ConnectionManager(
         // tear down, and re-firing [onTearDown] would needlessly reset
         // the stores to Loading.
         if (client == null && connectionObserverJob == null && heartbeatJob == null) return
+        // Release the process-wide slot (no-op unless we are the holder), so
+        // a manager that has legitimately gone away cannot be reported as a
+        // duplicate by the next bind. The fast-exit above is deliberately
+        // ahead of this: with no client there is nothing to hold.
+        ConnectionGuard.unbind(this)
         connectionObserverJob?.cancel()
         connectionObserverJob = null
         featuresMirrorJob?.cancel()
@@ -1375,6 +1408,9 @@ internal class ConnectionManager(
     companion object {
         private const val TAG = "ConnectionManager"
 
+        /** Source of [instanceId]. */
+        private val INSTANCE_SEQ = AtomicInteger(0)
+
         /**
          * How often to ping the wire while Connected AND foregrounded.
          * See [startHeartbeat] for why this is minutes, not seconds.
@@ -1430,6 +1466,130 @@ internal class ConnectionManager(
          * this, is what catches an actually dead socket.
          */
         private const val HEARTBEAT_FAILURE_THRESHOLD: Int = 2
+    }
+}
+
+/**
+ * Process-wide "at most ONE live connection" guard. **Last bind wins.**
+ *
+ * ### Why this exists
+ *
+ * A [ConnectionManager] is built per `MainViewModel`, which is built per
+ * `MainActivity` (`by viewModels()`) — so it is Activity-scoped, not
+ * process-scoped. Anything that puts a second `MainActivity` instance in
+ * the task therefore gives the process two managers, two `RemoteClient`s
+ * and two reconnect ladders pointed at the same desktop.
+ *
+ * That is not merely wasteful. The server allows one connection per client
+ * id and evicts the older socket on every fresh authentication, closing it
+ * with `1001 "evicted by new connection"`. Each client then treats the
+ * eviction as a network drop and re-dials, evicting the other. The result
+ * observed in production on 2026-09-08: 576 authentications in 3.5 h, every
+ * socket living exactly as long as the *other* ladder's current backoff
+ * (1 s, 2 s, 4 s, 8 s, 16 s…), messages permanently "Waiting for
+ * connection", and uploads failing on the phone while the desktop logged
+ * `upload_finish OK`. The two `attempt` counters in the client log
+ * interleaved as two independent series, which is what identified it.
+ *
+ * `android:launchMode="singleTask"` on `.MainActivity` removes the trigger.
+ * This object removes the failure mode: even if some future entry point
+ * manufactures a second manager, only one of them keeps a client.
+ *
+ * ### Semantics
+ *
+ *  - **Last bind wins.** The newest manager is by construction the one
+ *    belonging to the Activity the user is looking at; the stale one is the
+ *    one whose Activity is gone or going. So [bind] hands the slot to the
+ *    newcomer and tears the previous holder down — a clean handover, never
+ *    two live clients.
+ *  - **The loser is closed, not cancelled.** Teardown goes through
+ *    [ConnectionManager.tearDownConnection] → `RemoteClient.close()`, whose
+ *    handoff contract is deliberate: queue records that never reached a
+ *    socket stay on disk for the next client and are NOT bounced; only
+ *    frames already written are failed as delivery-unknown. There is no
+ *    second teardown path here, and there must not be one — inventing one
+ *    is how "the guard ate my message" happens.
+ *  - **Idempotent and self-quiet.** Re-binding the *same* manager (a server
+ *    switch, an edit, a retry) is not a duplicate and does nothing. A
+ *    manager that has already torn itself down releases the slot via
+ *    [unbind], so a later bind does not report it.
+ *  - **The reference is weak**, so a manager whose Activity died without a
+ *    teardown cannot keep its ViewModel graph alive through this object.
+ *
+ * ### Threading
+ *
+ * [bind] / [unbind] are called from the manager's own scope — Main for the
+ * production `viewModelScope` — and the slot itself is guarded by [lock] so
+ * a bind racing a teardown cannot interleave. The evicted manager's
+ * `tearDownConnection` therefore runs on the *winner's* thread; both
+ * managers are Main-confined in production, which is the confinement that
+ * method documents.
+ *
+ * ### If you are here from a log line
+ *
+ * `ConnectionGuard` logs at [Log.e] with both manager ids whenever it
+ * actually evicts a live client. One hit means something created a second
+ * `MainViewModel`: look for a second Activity instance first (`adb shell
+ * dumpsys activity activities | grep MainActivity`). See
+ * `docs/findings/2026-09-08-duplicate-connection-storm.md`.
+ */
+private object ConnectionGuard {
+
+    private const val TAG = "ConnectionGuard"
+
+    private val lock = Any()
+
+    /**
+     * The manager that currently owns the process's one connection.
+     *
+     * Weak on purpose: this object outlives every Activity, and a strong
+     * reference to a `ConnectionManager` pins the `MainViewModel` and every
+     * store hanging off it for the life of the process.
+     */
+    private var current: WeakReference<ConnectionManager>? = null
+
+    /**
+     * Claim the slot for [manager], tearing down whoever held it.
+     *
+     * Call BEFORE [manager]'s own client is assigned, so there is never an
+     * instant in which two managers hold a live client. The guard reads
+     * [ConnectionManager.activeClient] on the *previous* holder to decide
+     * whether this is a real duplicate (worth shouting about) or just a
+     * manager that has already let go.
+     */
+    fun bind(manager: ConnectionManager) {
+        val evicted = synchronized(lock) {
+            val previous = current?.get()?.takeIf { it !== manager }
+            current = WeakReference(manager)
+            previous
+        } ?: return
+        if (evicted.activeClient() != null) {
+            // Log.e, deliberately: this is a production-fatal condition that
+            // presents as "the app just doesn't connect", and the whole cost
+            // of the 2026-09-08 incident was that nothing said so. One grep
+            // for "DUPLICATE CONNECTION" must be enough.
+            Log.e(
+                TAG,
+                "DUPLICATE CONNECTION: ${evicted.instanceId} still owns a live RemoteClient " +
+                    "while ${manager.instanceId} is binding one in the same process. " +
+                    "Tearing ${evicted.instanceId} down (last bind wins). Two clients against " +
+                    "one desktop evict each other forever (server closes 1001 " +
+                    "\"evicted by new connection\"), so this would otherwise present as an " +
+                    "endless reconnect storm. Something built a second MainViewModel — look " +
+                    "for a second MainActivity instance.",
+            )
+        }
+        evicted.tearDownConnection()
+    }
+
+    /**
+     * Release the slot if [manager] holds it. A no-op for a manager that
+     * was already evicted, which is what keeps [bind]'s log line honest.
+     */
+    fun unbind(manager: ConnectionManager) {
+        synchronized(lock) {
+            if (current?.get() === manager) current = null
+        }
     }
 }
 
