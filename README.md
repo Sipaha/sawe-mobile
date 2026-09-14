@@ -165,6 +165,14 @@ active one without prompting. To change the address (e.g. new public
 IP), open **Settings → Edit address / label**; to drop a pairing,
 **Settings → Forget this server**.
 
+## Creating sessions
+
+In a solution, tap **New session**, choose a **Provider**, and tap **Create**.
+The session starts in that solution with a server-generated name and no initial
+message. You can rename it and send a message from the session screen afterward.
+Mobile sends only `solution_id` and `agent_id` when creating a session; it does
+not override the working directory with a member project's path.
+
 ## Multi-server
 
 The phone can be paired with multiple editor instances at once

@@ -817,11 +817,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application), C
     fun createSession(
         solutionId: Long,
         agentId: String,
-        initialMessage: String?,
-        title: String?,
-        cwd: String?,
         onCreated: (sessionId: String) -> Unit,
-    ) = sessionList.createSession(solutionId, agentId, initialMessage, title, cwd, onCreated)
+    ) = sessionList.createSession(solutionId, agentId, onCreated)
 
     fun renameSession(sessionId: String, newTitle: String) =
         sessionList.renameSession(sessionId, newTitle)

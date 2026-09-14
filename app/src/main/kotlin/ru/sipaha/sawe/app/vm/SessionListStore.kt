@@ -775,9 +775,6 @@ internal class SessionListStore(
     fun createSession(
         solutionId: Long,
         agentId: String,
-        initialMessage: String?,
-        title: String?,
-        cwd: String?,
         onCreated: (sessionId: String) -> Unit,
     ) {
         val active = context.activeClient()
@@ -789,7 +786,7 @@ internal class SessionListStore(
         _createSessionInFlight.value = true
         _lastCreateAutoOpened.value = false
         scope.launch {
-            val firstAttempt = attemptCreateSession(active, solutionId, agentId, initialMessage, title, cwd)
+            val firstAttempt = attemptCreateSession(active, solutionId, agentId)
             firstAttempt
                 .onSuccess { sessionId ->
                     _createSessionInFlight.value = false
@@ -805,7 +802,7 @@ internal class SessionListStore(
                             context.emitError("Couldn't open solution: $openErr")
                             return@launch
                         }
-                        val retry = attemptCreateSession(active, solutionId, agentId, initialMessage, title, cwd)
+                        val retry = attemptCreateSession(active, solutionId, agentId)
                         retry
                             .onSuccess { sessionId ->
                                 _lastCreateAutoOpened.value = true
@@ -830,22 +827,10 @@ internal class SessionListStore(
         active: RemoteClient,
         solutionId: Long,
         agentId: String,
-        initialMessage: String?,
-        title: String?,
-        cwd: String?,
     ): Result<String> {
         val params = buildJsonObject {
             put("solution_id", solutionId)
             put("agent_id", agentId)
-            if (!initialMessage.isNullOrBlank()) {
-                put("initial_message", initialMessage)
-            }
-            if (!title.isNullOrBlank()) {
-                put("title", title)
-            }
-            if (!cwd.isNullOrBlank()) {
-                put("cwd", cwd)
-            }
         }
         return runCatching {
             val resp = active.call("remote.solution_agent.create_session", params)

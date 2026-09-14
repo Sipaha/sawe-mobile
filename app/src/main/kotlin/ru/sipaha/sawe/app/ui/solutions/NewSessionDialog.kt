@@ -1,8 +1,8 @@
 package ru.sipaha.sawe.app.ui.solutions
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -13,7 +13,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -22,25 +21,15 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Icon
-import androidx.compose.runtime.derivedStateOf
 import ru.sipaha.sawe.app.vm.MainViewModel
 import ru.sipaha.sawe.app.vm.UiData
 import ru.sipaha.sawe.core.AgentSummary
-import ru.sipaha.sawe.core.SolutionMember
 
 /**
  * "New session" dialog used by the create-session flow. Launched from the
@@ -53,8 +42,8 @@ import ru.sipaha.sawe.core.SolutionMember
  *     Create button and shows a "no adapters available" message; a
  *     transport error reports the message and lets the user dismiss.
  *  2. The user picks an agent (first agent is auto-selected on Loaded so
- *     the common case is "tap Create"). An optional multi-line initial
- *     message field forwards through as `create_session.initial_message`.
+ *     the common case is "tap Create"). The session is created in the
+ *     solution with a server-generated name and no initial message.
  *  3. Create dispatches [MainViewModel.createSession]. On success the
  *     dialog dismisses and navigates to the new session detail; on
  *     failure the error surfaces via the parent screen's snackbar (the
@@ -72,39 +61,14 @@ fun NewSessionDialog(
     onCreated: (String) -> Unit,
 ) {
     val agentsState by viewModel.agents.collectAsState()
-    val solutionDetailsState by viewModel.solutionDetails.collectAsState()
     val inFlight by viewModel.createSessionInFlight.collectAsState()
     val autoOpened by viewModel.lastCreateAutoOpened.collectAsState()
 
-    // Trigger loadAgents + loadSolutionDetails exactly once for this
-    // dialog instance. We do NOT re-key on the state flows — that would
-    // relaunch on every flip and thrash the server with duplicate calls.
     LaunchedEffect(Unit) {
         viewModel.loadAgents()
-        viewModel.loadSolutionDetails(solutionId)
     }
 
     var selectedAgentId by rememberSaveable { mutableStateOf<String?>(null) }
-    // [DraftTextSaver] rather than the default `autoSaver`: both fields accept
-    // an unbounded paste and the raw String would travel through the
-    // saved-instance-state Binder transaction on backgrounding (N-58).
-    var initialMessage by rememberSaveable(stateSaver = DraftTextSaver) { mutableStateOf("") }
-    var sessionTitle by rememberSaveable(stateSaver = DraftTextSaver) { mutableStateOf("") }
-    var selectedCwd by rememberSaveable { mutableStateOf<String?>(null) }
-    val loadedSolution = (solutionDetailsState as? UiData.Loaded)?.value?.solution
-    val members: List<SolutionMember> = loadedSolution?.members.orEmpty()
-    // Working-directory choices: member projects only. The solution root is
-    // deliberately NOT offered — a session on mobile always runs inside one
-    // project worktree. A solution with no members sends no `cwd` at all and
-    // lets the server pick.
-    val cwdOptions: List<CwdOption> = remember(members) { cwdOptionsFor(members) }
-    // Default cwd: the first member project. The picker UI is hidden when
-    // there's fewer than two choices.
-    LaunchedEffect(members) {
-        if (cwdOptions.none { it.path == selectedCwd }) {
-            selectedCwd = members.firstOrNull()?.localPath
-        }
-    }
 
     // Pre-select the first agent when the list lands (or refreshes). We
     // re-run the auto-pick whenever the loaded list changes so a user
@@ -121,9 +85,31 @@ fun NewSessionDialog(
         }
     }
 
-    val agentsLoaded = agentsState as? UiData.Loaded
-    val hasAgents = agentsLoaded?.value?.isNotEmpty() == true
-    val canCreate = !inFlight && hasAgents && selectedAgentId != null
+    NewSessionDialogContent(
+        agentsState = agentsState,
+        selectedAgentId = selectedAgentId,
+        inFlight = inFlight,
+        autoOpened = autoOpened,
+        onSelected = { selectedAgentId = it },
+        onDismiss = onDismiss,
+        onCreate = {
+            selectedAgentId?.let { viewModel.createSession(solutionId, it, onCreated) }
+        },
+    )
+}
+
+@Composable
+internal fun NewSessionDialogContent(
+    agentsState: UiData<List<AgentSummary>>,
+    selectedAgentId: String?,
+    inFlight: Boolean,
+    autoOpened: Boolean,
+    onSelected: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onCreate: () -> Unit,
+) {
+    val canCreate = !inFlight &&
+        (agentsState as? UiData.Loaded)?.value?.any { it.id == selectedAgentId } == true
 
     AlertDialog(
         onDismissRequest = { if (!inFlight) onDismiss() },
@@ -136,46 +122,14 @@ fun NewSessionDialog(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Text(
-                    text = "Agent",
+                    text = "Provider",
                     style = MaterialTheme.typography.labelLarge,
                 )
                 AgentPicker(
                     state = agentsState,
                     selectedId = selectedAgentId,
                     enabled = !inFlight,
-                    onSelected = { selectedAgentId = it },
-                )
-
-                if (cwdOptions.size >= 2) {
-                    Text(
-                        text = "Working directory",
-                        style = MaterialTheme.typography.labelLarge,
-                    )
-                    CwdPicker(
-                        options = cwdOptions,
-                        selectedPath = selectedCwd,
-                        enabled = !inFlight,
-                        onSelected = { selectedCwd = it },
-                    )
-                }
-
-                OutlinedTextField(
-                    value = sessionTitle,
-                    onValueChange = { sessionTitle = it },
-                    label = { Text("Session name (optional)") },
-                    enabled = !inFlight,
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-
-                OutlinedTextField(
-                    value = initialMessage,
-                    onValueChange = { initialMessage = it },
-                    label = { Text("Initial message (optional)") },
-                    enabled = !inFlight,
-                    minLines = 3,
-                    maxLines = 6,
-                    modifier = Modifier.fillMaxWidth(),
+                    onSelected = onSelected,
                 )
 
                 if (autoOpened) {
@@ -193,13 +147,7 @@ fun NewSessionDialog(
         },
         confirmButton = {
             TextButton(
-                onClick = {
-                    val agentId = selectedAgentId ?: return@TextButton
-                    val msg = initialMessage.trim().ifBlank { null }
-                    val title = sessionTitle.trim().ifBlank { null }
-                    val cwd = selectedCwd
-                    viewModel.createSession(solutionId, agentId, msg, title, cwd, onCreated)
-                },
+                onClick = onCreate,
                 enabled = canCreate,
             ) {
                 Text(if (inFlight) "Creating…" else "Create")
@@ -302,119 +250,6 @@ private fun AgentPicker(
                         }
                     }
                 }
-            }
-        }
-    }
-    // Spacer so RadioButton rows don't kiss the OutlinedTextField directly.
-    Box(modifier = Modifier.padding(top = 4.dp))
-}
-
-/** One working-directory choice: a human [label] and the [path] sent as `cwd`. */
-internal data class CwdOption(val label: String, val path: String)
-
-/**
- * Working-directory choices offered when creating a session: one per member
- * project, labelled by the project's directory name (the last segment of
- * [SolutionMember.localPath]).
- *
- * The label used to be `catalogId`, which was a String holding the project
- * name; once catalog ids migrated to Long it started rendering as "1", "2".
- * The full server-side path is not shown either — it is long, meaningless on
- * a phone screen, and would not fit the field. The directory name is the one
- * part of the path the user recognises. Identity stays on [CwdOption.path]:
- * that is what goes on the wire as `cwd` and what selection is matched by,
- * so labels may safely collide.
- *
- * The solution root is **not** a choice — a session started on mobile always
- * runs inside a single project worktree. A member-less solution yields an
- * empty list, and the dialog then sends no `cwd` at all (server decides).
- */
-internal fun cwdOptionsFor(members: List<SolutionMember>): List<CwdOption> =
-    members.map { CwdOption(label = projectDirLabel(it.localPath), path = it.localPath) }
-
-/**
- * Last path segment of [localPath], tolerating a trailing separator. Falls
- * back to the whole path when there is no separator or nothing is left after
- * trimming (e.g. "/"), so the label is never empty.
- */
-private fun projectDirLabel(localPath: String): String =
-    localPath.trimEnd('/').substringAfterLast('/').ifEmpty { localPath }
-
-/**
- * Dropdown for selecting the new session's working directory. Options are
- * the solution's member projects — the solution root is not selectable; only
- * rendered when there's more than one choice.
- *
- * Implementation note: I tried OutlinedTextField(readOnly=true) with a
- * .selectable overlay first — but the TextField consumes touch events
- * internally even when read-only, so the overlay never sees the tap. Using
- * a clickable Surface styled like a field surface is the simplest robust
- * approach (and matches what M3 ExposedDropdownMenuBox builds under the
- * hood, without dragging in its trigger-anchor machinery for a
- * single-screen dialog). The full server-side path is never shown — it's
- * meaningless on the phone; the label is the project's directory name, while
- * the path behind it is what identifies the choice on selection.
- */
-@Composable
-internal fun CwdPicker(
-    options: List<CwdOption>,
-    selectedPath: String?,
-    enabled: Boolean,
-    onSelected: (String) -> Unit,
-) {
-    var expanded by remember { mutableStateOf(false) }
-    val selectedOption by remember(selectedPath, options) {
-        derivedStateOf {
-            options.firstOrNull { it.path == selectedPath } ?: options.firstOrNull()
-        }
-    }
-    Box(modifier = Modifier.fillMaxWidth()) {
-        androidx.compose.material3.Surface(
-            shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp),
-            border = androidx.compose.foundation.BorderStroke(
-                width = 1.dp,
-                color = MaterialTheme.colorScheme.outline,
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(enabled = enabled) { expanded = true },
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Directory",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text(
-                        text = selectedOption?.label ?: "(none)",
-                        style = MaterialTheme.typography.bodyLarge,
-                    )
-                }
-                Icon(
-                    imageVector = Icons.Filled.KeyboardArrowDown,
-                    contentDescription = "Open directory picker",
-                )
-            }
-        }
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            for (option in options) {
-                DropdownMenuItem(
-                    text = {
-                        Text(option.label, style = MaterialTheme.typography.bodyLarge)
-                    },
-                    onClick = {
-                        expanded = false
-                        onSelected(option.path)
-                    },
-                )
             }
         }
     }
