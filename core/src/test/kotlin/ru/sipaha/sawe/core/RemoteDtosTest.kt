@@ -676,6 +676,58 @@ class RemoteDtosTest {
     }
 
     @Test
+    fun `ToolCallSummary carries the authorization reason alongside options`() {
+        // The safety-hook approval the desktop refuses to settle by policy:
+        // buttons plus the runtime's own explanation of what it is worried
+        // about. Without the reason the screen asks the user to approve a
+        // destructive command with nothing to judge it by.
+        val text = """
+            {
+              "tool_call_id": "toolu_1",
+              "name": "Bash",
+              "status": "waiting_for_confirmation",
+              "args_preview": "{ \"command\": \"rm -f ${'$'}D/x.jar\" }",
+              "authorization_reason": "Dangerous rm operation on possibly-empty variable path",
+              "options": [
+                { "option_id": "allow", "label": "Allow once", "kind": "allow_once", "is_allow": true },
+                { "option_id": "deny", "label": "Reject", "kind": "reject_once", "is_allow": false }
+              ]
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(ToolCallSummary.serializer(), text)
+        assertEquals(
+            "Dangerous rm operation on possibly-empty variable path",
+            parsed.authorizationReason,
+        )
+        assertEquals(2, parsed.options.size)
+        assertEquals(ToolCallStatusDto.WaitingForConfirmation, parsed.status)
+
+        val reencoded = JsonRpc.json.encodeToString(ToolCallSummary.serializer(), parsed)
+        assertEquals(parsed, JsonRpc.json.decodeFromString(ToolCallSummary.serializer(), reencoded))
+    }
+
+    @Test
+    fun `ToolCallSummary defaults the authorization reason to null on an older desktop`() {
+        // A desktop that does not advertise `tool_auth_reason` omits the
+        // field. The buttons must still decode and work — unexplained, not
+        // broken.
+        val text = """
+            {
+              "tool_call_id": "toolu_2",
+              "name": "Bash",
+              "status": "waiting_for_confirmation",
+              "args_preview": "{}",
+              "options": [
+                { "option_id": "allow", "label": "Allow once", "kind": "allow_once", "is_allow": true }
+              ]
+            }
+        """.trimIndent()
+        val parsed = JsonRpc.json.decodeFromString(ToolCallSummary.serializer(), text)
+        assertNull(parsed.authorizationReason)
+        assertEquals(1, parsed.options.size)
+    }
+
+    @Test
     fun `ToolCallSummary defaults tool_status_started_at_ms to null when omitted`() {
         // Back-compat with pre-tool-elapsed server builds AND with
         // pending / cold-rehydrated terminal calls that never entered

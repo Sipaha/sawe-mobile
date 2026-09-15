@@ -883,6 +883,21 @@ data class ToolCallSummary(
      * [ToolCallAuthOption.optionId] verbatim.
      */
     val options: List<ToolCallAuthOption> = emptyList(),
+    /**
+     * WHY this call needs a human answer, in the agent runtime's own words —
+     * e.g. a dangerous `rm` whose target is a shell variable it cannot prove
+     * non-empty. Sent only alongside [options], and only for an approval the
+     * desktop could not settle by policy (a target it could not place inside
+     * the Solution; work inside it needs no confirmation).
+     *
+     * Keep any example here free of the two-character sequence that opens a
+     * block comment: Kotlin nests them, so a glob pasted into KDoc silently
+     * comments out the rest of the file.
+     *
+     * `null` against a desktop that does not advertise the `tool_auth_reason`
+     * wire feature — the buttons still work, they just come unexplained.
+     */
+    @SerialName("authorization_reason") val authorizationReason: String? = null,
 )
 
 /**

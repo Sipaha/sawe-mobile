@@ -2692,6 +2692,23 @@ private fun ToolCallBubble(
             // broadcast once the user answers — so these buttons vanish
             // without any local optimistic state). Allow-style options render
             // as filled primary buttons, reject-style as outlined.
+            // The question itself, when the desktop sent one. Without it the
+            // screen offers two buttons and no reason to pick either — and the
+            // approvals that reach the phone at all are the ones the desktop
+            // refused to settle by policy, i.e. exactly the ones worth reading
+            // before tapping.
+            val authorizationReason = call.authorizationReason
+            if (call.options.isNotEmpty() && !authorizationReason.isNullOrBlank()) {
+                Text(
+                    text = authorizationReason,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp)
+                        .padding(top = 6.dp),
+                )
+            }
             if (call.options.isNotEmpty()) {
                 androidx.compose.foundation.layout.FlowRow(
                     modifier = Modifier
