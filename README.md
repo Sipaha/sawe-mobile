@@ -182,6 +182,12 @@ and beside each choice in the **New session** dialog. The mapping lives in
 the desktop's `assets/icons/ai_*.svg` converted to vector drawables. An agent
 the app has no brand for shows a neutral chat glyph rather than a wrong logo.
 
+Each row also shows how long ago the session was last active in the desktop
+tab's compact form — `now`, `12m`, `5h`, `3d`, capped at `99d`
+(`core/SessionAge.kt`, mirroring `session_tab_strip::tab_age_label`) — in a
+monospaced slot as wide as `99d`, so every row's state pill lines up and a row
+does not reflow as its age changes.
+
 ## Multi-server
 
 The phone can be paired with multiple editor instances at once

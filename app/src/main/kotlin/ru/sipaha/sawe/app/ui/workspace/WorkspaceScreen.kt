@@ -1,6 +1,5 @@
 package ru.sipaha.sawe.app.ui.workspace
 
-import android.text.format.DateUtils
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -19,7 +18,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -31,6 +33,8 @@ import ru.sipaha.sawe.app.vm.MainViewModel
 import ru.sipaha.sawe.app.vm.OpenSessionVM
 import ru.sipaha.sawe.app.vm.OpenSolutionVM
 import ru.sipaha.sawe.app.vm.WorkspaceUiState
+import ru.sipaha.sawe.core.WIDEST_SESSION_AGE
+import ru.sipaha.sawe.core.compactSessionAge
 import ru.sipaha.sawe.core.displayState
 
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
@@ -315,13 +319,7 @@ private fun SessionRow(
         Spacer(Modifier.width(8.dp))
         StatePill(state = session.state.displayState(), raw = "")
         Spacer(Modifier.width(6.dp))
-        Text(
-            text = relativeTime(session.lastActivityAt),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        SessionAge(session.lastActivityAt)
         KebabMenuButton(
             contentDescription = "Session menu",
             expanded = menuExpanded,
@@ -454,17 +452,26 @@ private fun KebabMenuButton(
 }
 
 /**
- * Format `last_activity_at` (epoch millis) into a relative string like "5m ago".
- * Private to this screen — `ServersListScreen` keeps its own copy with the
- * same shape; YAGNI extraction left for if/when a third copy lands.
+ * Time since the session's last activity in the compact desktop form (`now`,
+ * `12m`, `5h`, `3d`, capped at `99d`), monospaced, in a slot as wide as the
+ * widest label. Every row's slot is the same width, so the state pills line up
+ * and a row doesn't reflow as its age ticks (maintainer request, 2026-09-23 —
+ * the localized "7 мин. назад" / "14 сентября" ran from 5 to 12 characters).
  */
-private fun relativeTime(epochMillis: Long): String {
-    if (epochMillis <= 0L) return ""
-    val now = System.currentTimeMillis()
-    return DateUtils.getRelativeTimeSpanString(
-        epochMillis,
-        now,
-        DateUtils.SECOND_IN_MILLIS,
-        DateUtils.FORMAT_ABBREV_RELATIVE,
-    ).toString()
+@Composable
+private fun SessionAge(lastActivityAt: Long) {
+    val style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace)
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val slotWidth = remember(style, density) {
+        with(density) { measurer.measure(WIDEST_SESSION_AGE, style).size.width.toDp() }
+    }
+    Text(
+        text = compactSessionAge(lastActivityAt, System.currentTimeMillis()),
+        style = style,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+        textAlign = TextAlign.End,
+        modifier = Modifier.width(slotWidth),
+    )
 }
