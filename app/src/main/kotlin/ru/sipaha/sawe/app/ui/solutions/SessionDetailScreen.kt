@@ -147,6 +147,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import ru.sipaha.sawe.app.ui.common.ProviderLogo
 import ru.sipaha.sawe.core.ConnectionState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -378,6 +379,9 @@ fun SessionDetailScreen(
     // newest *real-time* entry is the last server entry. Null → the status
     // bar shows nothing extra (looks exactly as before).
     val lastActivityMs: Long? = loadedSession?.entries?.lastOrNull()?.createdMs?.takeIf { it > 0 }
+    // Which provider this session talks to — the full fetch carries it, the
+    // list cache covers the moment before that lands.
+    val activeAgentId: String? = loadedSession?.agentId?.ifBlank { null } ?: activeSummary?.agentId
     Scaffold(
         // Android 15+ (targetSdk 35+) forces edge-to-edge; Scaffold's
         // default contentWindowInsets = systemBars would then double-
@@ -480,6 +484,9 @@ fun SessionDetailScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
+                        // Provider mark first, as the desktop status row leads
+                        // with the agent's name.
+                        ProviderLogo(agentId = activeAgentId, size = 16.dp)
                         ContextFillMeter(
                             totalTokens = activeTotalTokens,
                             maxTokens = activeMaxTokens,

@@ -27,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
+import ru.sipaha.sawe.app.ui.common.ProviderLogo
 import ru.sipaha.sawe.app.vm.MainViewModel
 import ru.sipaha.sawe.app.vm.UiData
 import ru.sipaha.sawe.core.AgentSummary
@@ -236,6 +237,13 @@ private fun AgentPicker(
                             selected = isSelected,
                             enabled = enabled,
                             onClick = { onSelected(agent.id) },
+                        )
+                        // The provider's mark in its colour, as in the
+                        // desktop's "+" picker.
+                        ProviderLogo(
+                            agentId = agent.id,
+                            size = 24.dp,
+                            modifier = Modifier.padding(start = 4.dp, end = 8.dp),
                         )
                         Column(modifier = Modifier.padding(start = 4.dp)) {
                             Text(

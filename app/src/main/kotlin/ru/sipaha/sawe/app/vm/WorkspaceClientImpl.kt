@@ -106,4 +106,5 @@ private fun SessionSummary.toVM(): OpenSessionVM = OpenSessionVM(
     lastActivityAt = lastActivityAt,
     totalTokens = totalTokens,
     maxTokens = maxTokens,
+    agentId = agentId,
 )

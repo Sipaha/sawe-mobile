@@ -28,10 +28,10 @@ class NewSessionDialogSnapshotTest {
             MaterialTheme {
                 NewSessionDialogContent(
                     agentsState = UiData.Loaded(listOf(
-                        AgentSummary("codex", "Codex"),
-                        AgentSummary("claude", "Claude"),
+                        AgentSummary("codex-native", "Codex"),
+                        AgentSummary("claude-acp", "Claude"),
                     )),
-                    selectedAgentId = "codex",
+                    selectedAgentId = "codex-native",
                     inFlight = false,
                     autoOpened = false,
                     onSelected = {},

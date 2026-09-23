@@ -173,6 +173,15 @@ message. You can rename it and send a message from the session screen afterward.
 Mobile sends only `solution_id` and `agent_id` when creating a session; it does
 not override the working directory with a member project's path.
 
+Every session shows which provider it talks to the way the desktop does: the
+vendor's mark in the vendor's colour — Claude orange, Codex (OpenAI) green — on
+its row in the session list, at the head of the session screen's status strip,
+and beside each choice in the **New session** dialog. The mapping lives in
+`ui/common/ProviderBrand.kt`, keyed on the wire's `agent_id` (`claude-acp`,
+`codex-native`) and kept in step with the desktop's `AgentBrand`; the logos are
+the desktop's `assets/icons/ai_*.svg` converted to vector drawables. An agent
+the app has no brand for shows a neutral chat glyph rather than a wrong logo.
+
 ## Multi-server
 
 The phone can be paired with multiple editor instances at once

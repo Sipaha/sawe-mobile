@@ -59,6 +59,7 @@ class WorkspaceScreenSnapshotTest {
                         lastActivityAt = 1_000L,
                         totalTokens = 2_400L,
                         maxTokens = 200_000L,
+                        agentId = "claude-acp",
                     ),
                     OpenSessionVM(
                         id = "se2",
@@ -67,6 +68,7 @@ class WorkspaceScreenSnapshotTest {
                         lastActivityAt = 3_600_000L,
                         totalTokens = null,
                         maxTokens = null,
+                        agentId = "codex-native",
                     ),
                 ),
             ),
@@ -82,6 +84,9 @@ class WorkspaceScreenSnapshotTest {
                         lastActivityAt = 300_000L,
                         totalTokens = null,
                         maxTokens = null,
+                        // An agent this app has no brand for: the row must
+                        // fall back to the neutral glyph, not a wrong logo.
+                        agentId = "some-future-agent",
                     ),
                 ),
             ),

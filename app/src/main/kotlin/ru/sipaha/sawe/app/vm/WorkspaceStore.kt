@@ -44,6 +44,8 @@ data class OpenSessionVM(
     val lastActivityAt: Long,
     val totalTokens: Long?,
     val maxTokens: Long?,
+    /** Wire `agent_id` — which provider the session talks to ([ru.sipaha.sawe.app.ui.common.ProviderBrand]). */
+    val agentId: String = "",
 )
 
 data class ClosedSolutionRow(
@@ -520,6 +522,7 @@ private fun SessionSummary.toVM(): OpenSessionVM = OpenSessionVM(
     id = id, title = title, state = state,
     lastActivityAt = lastActivityAt,
     totalTokens = totalTokens, maxTokens = maxTokens,
+    agentId = agentId,
 )
 
 /**

@@ -7,7 +7,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FolderOpen
@@ -25,6 +24,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ru.sipaha.sawe.app.ui.common.ConnectionStatusBanner
+import ru.sipaha.sawe.app.ui.common.ProviderLogo
 import ru.sipaha.sawe.app.ui.solutions.NewSessionDialog
 import ru.sipaha.sawe.app.ui.solutions.StatePill
 import ru.sipaha.sawe.app.vm.MainViewModel
@@ -298,12 +298,9 @@ private fun SessionRow(
             .padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            imageVector = Icons.AutoMirrored.Filled.Chat,
-            contentDescription = null,
-            modifier = Modifier.size(14.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        // The provider's mark in its colour, like the desktop's session tab,
+        // so the list says which AI each session talks to at a glance.
+        ProviderLogo(agentId = session.agentId, size = 18.dp)
         Spacer(Modifier.width(8.dp))
         Text(
             text = session.title.ifBlank { "(untitled session)" },
